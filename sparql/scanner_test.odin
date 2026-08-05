@@ -59,18 +59,20 @@ test_keyword_a_case_sensitive :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_keyword_through_codepoint_escape :: proc(t: ^testing.T) {
-	// §19.2: codepoint escapes are pre-grammar and may appear anywhere,
-	// keywords included.
+test_keyword_escape_rejected :: proc(t: ^testing.T) {
+	// SPARQL 1.2 confines codepoint escapes to strings and IRIs; an
+	// escaped keyword is a syntax error (sparql12 codepoint-esc-01-bad),
+	// revising SPARQL 1.1's anywhere-rule.
 	s: Scanner
 	buf: [4]Token
 	toks := scan_all(&s, `\u0053ELECT`, buf[:])
-	testing.expect_value(t, s.err.kind, Error_Kind.None)
-	expect_kinds(t, toks, {.Keyword})
-	if len(toks) == 1 {
-		testing.expect_value(t, toks[0].keyword, Keyword.Select)
-		testing.expect(t, toks[0].has_escape)
-	}
+	testing.expect_value(t, s.err.kind, Error_Kind.Unexpected_Character)
+	testing.expect_value(t, len(toks), 0)
+
+	// And in prefixed-name locals, only PN_LOCAL_ESC remains legal
+	// (codepoint-esc-03-bad).
+	scan_all(&s, `ns:a\u0062c`, buf[:])
+	testing.expect(t, s.err.kind != .None)
 }
 
 @(test)

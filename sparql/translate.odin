@@ -424,6 +424,8 @@ translate_exists_in_expr :: proc(p: ^Parser, e: Expr) {
 		if v.expr != nil {
 			translate_exists_in_expr(p, v.expr)
 		}
+	case ^Triple_Term:
+	// Triple terms contain terms and variables, never expressions.
 	case Var, rdf.IRI, rdf.Literal:
 	}
 }

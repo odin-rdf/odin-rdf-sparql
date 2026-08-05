@@ -52,6 +52,11 @@ Error_Kind :: enum {
 	Variable_In_Scope,
 	Ungrouped_Variable,
 	Expected_Separator,
+	Unclosed_Triple_Term,
+	Unclosed_Reified_Triple,
+	Unclosed_Annotation,
+	Expected_Version_String,
+	Nested_Aggregate,
 }
 
 // Error is a grammar violation with its position. The zero value (kind
@@ -159,6 +164,16 @@ error_message :: proc(kind: Error_Kind) -> string {
 		return "variable used outside an aggregate in a grouped query (SelectClause/HavingClause)"
 	case .Expected_Separator:
 		return "expected SEPARATOR '=' string (Aggregate)"
+	case .Unclosed_Triple_Term:
+		return "triple term not closed with ')>>' (tripleTerm)"
+	case .Unclosed_Reified_Triple:
+		return "reified triple not closed with '>>' (reifiedTriple)"
+	case .Unclosed_Annotation:
+		return "annotation block not closed with '|}' (annotationBlock)"
+	case .Expected_Version_String:
+		return "expected a short quoted string after VERSION (VersionDecl)"
+	case .Nested_Aggregate:
+		return "aggregate calls cannot be nested (Aggregate)"
 	}
 	return "unknown error"
 }

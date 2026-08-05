@@ -42,6 +42,7 @@ Parser :: struct {
 	scope_scratch: map[string]bool, // reused by the §19.8 scope checks
 	algebra:       Algebra, // owned; set by translate, freed by parser_destroy
 	detached:      [dynamic]Expr, // aggregate trees translate lifted out of the AST
+	triple_terms:  [dynamic]^Triple_Term, // registry of all 1.2 triple-term nodes (shared by design)
 	agg_n:         int, // ".N" aggregate-variable counter
 	path_n:        int, // ".pN" path-variable counter
 	allocator:     runtime.Allocator,
@@ -61,6 +62,7 @@ parser_init :: proc(p: ^Parser, source: []byte, base := "", allocator := context
 	p.prefixes = make(map[string]string, allocator)
 	p.blank_first = make(map[string]int, allocator)
 	p.scope_scratch = make(map[string]bool, allocator)
+	p.triple_terms = make([dynamic]^Triple_Term, allocator)
 	p.unesc = make([dynamic]byte, allocator)
 	if base != "" {
 		// A relative initial base can never resolve anything; leave the
@@ -78,6 +80,10 @@ parser_destroy :: proc(p: ^Parser) {
 		destroy_expr(detached, p.allocator)
 	}
 	delete(p.detached)
+	for tt in p.triple_terms {
+		free(tt, p.allocator)
+	}
+	delete(p.triple_terms)
 	delete(p.prefixes)
 	delete(p.blank_first)
 	delete(p.scope_scratch)
@@ -99,7 +105,7 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 	q = new_query(p)
 	p.query = q
 
-	parse_prologue(p)
+	parse_prologue(p, q)
 
 	where_required := true
 	switch {
@@ -313,9 +319,21 @@ token_pos :: proc(tok: Token) -> Position {
 // --- Prologue -------------------------------------------------------
 
 @(private = "file")
-parse_prologue :: proc(p: ^Parser) {
+parse_prologue :: proc(p: ^Parser, q: ^Query) {
 	for p.err.kind == .None {
 		switch {
+		case at_keyword(p, .Version):
+			// VersionDecl (SPARQL 1.2): a short quoted string.
+			advance(p)
+			if !at(p, .String_Literal) || p.tok.long_string {
+				fail_current(p, .Expected_Version_String)
+				return
+			}
+			q.version = unescape_string_text(p, p.tok)
+			if p.err.kind != .None {
+				return
+			}
+			advance(p)
 		case at_keyword(p, .Base):
 			advance(p)
 			if !at(p, .IRI_Ref) {
@@ -845,7 +863,8 @@ starts_triples :: proc(p: ^Parser) -> bool {
 	}
 	#partial switch p.tok.kind {
 	case .Var, .IRI_Ref, .PName, .Blank_Node_Label, .String_Literal,
-	     .Integer, .Decimal, .Double, .Boolean, .Nil, .Anon, .L_Paren, .L_Bracket:
+	     .Integer, .Decimal, .Double, .Boolean, .Nil, .Anon, .L_Paren, .L_Bracket,
+	     .Reified_Open, .Triple_Term_Open:
 		return true
 	}
 	return false
@@ -903,6 +922,18 @@ parse_triples_same_subject :: proc(p: ^Parser, bp: ^Basic_Pattern) {
 		}
 		return
 	}
+	if at(p, .Reified_Open) {
+		// reifiedTriple PropertyListPath — the list may be empty; the
+		// desugared rdf:reifies triple alone is a valid statement.
+		subject := parse_reified_triple(p, bp)
+		if p.err.kind != .None {
+			return
+		}
+		if starts_verb(p) {
+			parse_property_list(p, bp, subject, pos)
+		}
+		return
+	}
 	subject := parse_var_or_term(p)
 	if p.err.kind != .None {
 		return
@@ -918,7 +949,7 @@ parse_triples_same_subject :: proc(p: ^Parser, bp: ^Basic_Pattern) {
 	parse_property_list(p, bp, subject, pos)
 }
 
-@(private = "file")
+@(private)
 starts_verb :: proc(p: ^Parser) -> bool {
 	if at(p, .A) || at(p, .Var) {
 		return true
@@ -932,7 +963,7 @@ starts_verb :: proc(p: ^Parser) -> bool {
 
 // parse_property_list parses PropertyListNotEmpty: Verb ObjectList
 // (';' (Verb ObjectList)?)*.
-@(private = "file")
+@(private)
 parse_property_list :: proc(p: ^Parser, bp: ^Basic_Pattern, subject: Pattern_Node, pos: Position) {
 	for p.err.kind == .None {
 		predicate := parse_verb(p) if p.in_template else parse_verb_path(p)
@@ -950,6 +981,16 @@ parse_property_list :: proc(p: ^Parser, bp: ^Basic_Pattern, subject: Pattern_Nod
 				return
 			}
 			append(&bp.triples, Triple_Pattern{subject = subject, predicate = predicate, object = object, pos = pos})
+			if at(p, .Tilde) || at(p, .Annotation_Open) {
+				// A path triple cannot be reified or annotated (sparql12
+				// annotated-*-path tests); the stray token errors upstream.
+				if _, is_path := predicate.(^Path_Expr); !is_path {
+					parse_annotations(p, bp, subject, predicate, object, pos)
+					if p.err.kind != .None {
+						return
+					}
+				}
+			}
 			if !at(p, .Comma) {
 				break
 			}
@@ -996,13 +1037,16 @@ parse_graph_node :: proc(p: ^Parser, bp: ^Basic_Pattern) -> Pattern_Node {
 	if at(p, .L_Paren) || at(p, .L_Bracket) {
 		return parse_triples_node(p, bp)
 	}
+	if at(p, .Reified_Open) {
+		return parse_reified_triple(p, bp)
+	}
 	return parse_var_or_term(p)
 }
 
 // parse_var_or_term parses VarOrTerm — a variable or a GraphTerm. Only
 // the tokens that can start one are consumed; anything else returns nil
 // with no error so callers report their own production.
-@(private = "file")
+@(private)
 parse_var_or_term :: proc(p: ^Parser) -> Pattern_Node {
 	if !p.has_tok {
 		return nil
@@ -1069,6 +1113,8 @@ parse_var_or_term :: proc(p: ^Parser) -> Pattern_Node {
 		// A bare '[ ]' term is a fresh blank node.
 		advance(p)
 		return fresh_blank(p)
+	case .Triple_Term_Open:
+		return parse_triple_term(p, .Pattern)
 	}
 	return nil
 }
@@ -1194,7 +1240,7 @@ parse_triples_node :: proc(p: ^Parser, bp: ^Basic_Pattern) -> Pattern_Node {
 // fresh_blank generates a parser-owned blank node label. The ".b" stem
 // cannot collide with user labels: a BLANK_NODE_LABEL can never start
 // with '.'.
-@(private = "file")
+@(private)
 fresh_blank :: proc(p: ^Parser) -> Pattern_Node {
 	buf: [24]byte
 	buf[0] = '.'

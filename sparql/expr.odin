@@ -103,6 +103,7 @@ Expr :: union {
 	^In_Expr,
 	^Exists_Expr,
 	^Aggregate,
+	^Triple_Term, // SPARQL 1.2 ExprTripleTerm
 	Var,
 	rdf.IRI,
 	rdf.Literal,
@@ -144,6 +145,9 @@ destroy_expr :: proc(e: Expr, allocator := context.allocator) {
 	case ^Aggregate:
 		destroy_expr(v.expr, allocator)
 		free(v, allocator)
+	case ^Triple_Term:
+	// Owned by the parser's triple-term registry, freed flatly there
+	// (nodes may be shared by annotation desugaring).
 	case Var, rdf.IRI, rdf.Literal:
 	// Terms own nothing at this layer.
 	}

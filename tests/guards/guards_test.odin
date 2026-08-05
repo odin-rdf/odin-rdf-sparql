@@ -83,6 +83,10 @@ WHERE {
 	BIND(IF(BOUND(?m), STR(?m), "none") AS ?mail)
 	?person foaf:knows/foaf:knows?|^foaf:employs ?fof .
 	?person !(foaf:enemy|^foaf:blocks) ?other .
+	<< ?person foaf:age 42 ~ foaf:claim >> foaf:source ?src .
+	?person foaf:says ?quote ~ foaf:q1 {| foaf:certainty 0.9 |} .
+	<<( ?person foaf:name ?name )>> foaf:listedIn ?reg .
+	BIND(<<( ?person foaf:name ?name )>> AS ?nameClaim)
 	MINUS { ?person foaf:status "hidden" }
 	VALUES (?dept ?floor) { ("eng" 3) (UNDEF 1) }
 	{ SELECT ?person (COUNT(*) AS ?edges) { ?person foaf:knows ?anyone } GROUP BY ?person }

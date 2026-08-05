@@ -32,14 +32,26 @@ Var :: struct {
 // variable. The rdf.Term component types are flattened in rather than
 // nested as a union-in-union so call sites switch over one level.
 // ^Path_Expr appears only in predicate position (a composite property
-// path; a plain-IRI path stays rdf.IRI). SPARQL 1.2 triple terms join
-// the union with SPARQL-T-0008.
+// path; a plain-IRI path stays rdf.IRI); ^Triple_Term only in subject
+// and object positions (SPARQL 1.2).
 Pattern_Node :: union {
 	rdf.IRI,
 	rdf.Blank_Node,
 	rdf.Literal,
 	Var,
 	^Path_Expr,
+	^Triple_Term,
+}
+
+// Triple_Term is a SPARQL 1.2 triple term pattern '<<( s p o )>>': an
+// opaque term whose constituents may be variables, terms, or nested
+// triple terms — never paths or reified triples (those desugar at
+// parse time). Also an expression (BIND(<<(?s ?p ?o)>> AS ?t)).
+Triple_Term :: struct {
+	subject:   Pattern_Node,
+	predicate: Pattern_Node,
+	object:    Pattern_Node,
+	pos:       Position,
 }
 
 Path_Op :: enum {
@@ -192,6 +204,7 @@ Group_Condition :: struct {
 // Query is a parsed SPARQL query (or SubSelect, which reuses the type
 // with only the SELECT-relevant fields populated).
 Query :: struct {
+	version:         string, // the VERSION declaration's string; "" when absent
 	form:            Query_Form,
 	select_modifier: Select_Modifier,
 	select_star:     bool, // SELECT * or DESCRIBE *
@@ -258,6 +271,10 @@ destroy_basic :: proc(bp: ^Basic_Pattern, allocator := context.allocator) {
 	free(bp, allocator)
 }
 
+// Triple_Term nodes are exempt here: annotation desugaring may share
+// one node between the pattern and a reifies triple, so the parser
+// owns every node through its registry (p.triple_terms) and frees them
+// flatly in parser_destroy.
 @(private)
 destroy_pattern_node :: proc(node: Pattern_Node, allocator := context.allocator) {
 	if path, is_path := node.(^Path_Expr); is_path {

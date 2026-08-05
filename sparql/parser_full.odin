@@ -293,6 +293,10 @@ parse_aggregate :: proc(p: ^Parser) -> Expr {
 		if p.err.kind != .None {
 			return agg
 		}
+		if expr_uses_aggregate(agg.expr) {
+			fail_at(p, .Nested_Aggregate, kw_tok)
+			return agg
+		}
 	}
 	if kw_tok.keyword == .Group_Concat && at(p, .Semicolon) {
 		advance(p)
@@ -345,6 +349,14 @@ parse_values :: proc(p: ^Parser) -> ^Values_Pattern {
 	case at(p, .L_Paren):
 		advance(p)
 		for at(p, .Var) {
+			// A data block may not name the same variable twice
+			// (sparql12 duplicated-values-variable).
+			for existing in vp.vars {
+				if existing.name == p.tok.text {
+					fail_at(p, .Variable_In_Scope, p.tok)
+					return vp
+				}
+			}
 			append(&vp.vars, var_of(p.tok))
 			advance(p)
 		}
@@ -423,6 +435,13 @@ parse_data_value :: proc(p: ^Parser) -> (value: Pattern_Node, ok: bool) {
 		return nil, false
 	}
 	#partial switch p.tok.kind {
+	case .Triple_Term_Open:
+		// SPARQL 1.2: a ground triple term is a data value.
+		tt := parse_triple_term(p, .Data)
+		if p.err.kind != .None {
+			return nil, false
+		}
+		return tt, true
 	case .IRI_Ref, .PName:
 		iri, iri_ok := parse_iri(p)
 		if !iri_ok {
@@ -512,8 +531,15 @@ collect_group_in_scope :: proc(g: ^Group_Pattern, scope: ^map[string]bool) {
 
 @(private = "file")
 collect_node_var :: proc(node: Pattern_Node, scope: ^map[string]bool) {
-	if v, is_var := node.(Var); is_var {
+	#partial switch v in node {
+	case Var:
 		scope[v.name] = true
+	case ^Triple_Term:
+		// Variables inside a triple term bind during matching and are
+		// in scope.
+		collect_node_var(v.subject, scope)
+		collect_node_var(v.predicate, scope)
+		collect_node_var(v.object, scope)
 	}
 }
 
@@ -537,8 +563,10 @@ check_query_scopes :: proc(p: ^Parser, q: ^Query) {
 		return
 	}
 
-	// AS variables must be fresh: not in scope of the WHERE pattern
-	// (with trailing VALUES) and not bound twice in the projection.
+	// AS variables must be fresh. GROUP BY (expr AS v) checks against
+	// the pattern's in-scope set; a grouped query's SELECT AS targets
+	// check against what grouping leaves visible — the group keys —
+	// not the raw pattern scope (sparql12 group-by-scope tests).
 	clear(&p.scope_scratch)
 	collect_group_in_scope(q.where_clause, &p.scope_scratch)
 	if q.values != nil {
@@ -553,6 +581,18 @@ check_query_scopes :: proc(p: ^Parser, q: ^Query) {
 				return
 			}
 			p.scope_scratch[condition.v.name] = true
+		}
+	}
+	if len(q.group_by) > 0 {
+		// Rebuild as the post-grouping visible set.
+		clear(&p.scope_scratch)
+		for condition in q.group_by {
+			if v, is_var := condition.expr.(Var); is_var {
+				p.scope_scratch[v.name] = true
+			}
+			if condition.has_var {
+				p.scope_scratch[condition.v.name] = true
+			}
 		}
 	}
 	for projection in q.projection {
@@ -690,7 +730,7 @@ expr_uses_aggregate :: proc(e: Expr) -> bool {
 		}
 	case ^Aggregate:
 		return true
-	case ^Exists_Expr, Var, rdf.IRI, rdf.Literal:
+	case ^Exists_Expr, ^Triple_Term, Var, rdf.IRI, rdf.Literal:
 	}
 	return false
 }
@@ -732,11 +772,31 @@ ungrouped_var :: proc(e: Expr, grouped: ^map[string]bool) -> (found: bool, v: Va
 	// Anything under an aggregate is fine.
 	case ^Exists_Expr:
 	// EXISTS patterns have their own scope.
+	case ^Triple_Term:
+		return ungrouped_var_in_term(node, grouped)
 	case Var:
 		if !grouped[node.name] {
 			return true, node
 		}
 	case rdf.IRI, rdf.Literal:
+	}
+	return false, {}
+}
+
+@(private = "file")
+ungrouped_var_in_term :: proc(tt: ^Triple_Term, grouped: ^map[string]bool) -> (found: bool, v: Var) {
+	nodes := [3]Pattern_Node{tt.subject, tt.predicate, tt.object}
+	for node in nodes {
+		#partial switch inner in node {
+		case Var:
+			if !grouped[inner.name] {
+				return true, inner
+			}
+		case ^Triple_Term:
+			if found, v = ungrouped_var_in_term(inner, grouped); found {
+				return
+			}
+		}
 	}
 	return false, {}
 }

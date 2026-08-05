@@ -2,18 +2,17 @@
 // buffer; scanning never allocates. Modeled on odin-rdf-parser's
 // internal scanners (SPARQL-T-0002).
 //
-// Codepoint escapes: per SPARQL 1.1 §19.2, \uXXXX and \UXXXXXXXX are
-// processed before the grammar applies and may appear anywhere in the
-// query string. Rather than preprocessing into a second buffer (which
-// would break zero-copy), decode_char treats a codepoint escape as the
-// single character it denotes, everywhere a character is read. A
-// character produced by an escape is never re-interpreted as syntax
-// that starts another escape — '\U00000031' is a backslash
-// followed by 'U', not a second escape (the W3C codepoint-escape-bad
-// tests pin this). Deliberate simplification: an escape-produced quote,
-// backslash, or newline inside a string literal is treated as content
-// rather than re-tokenized; the W3C suites do not exercise those
-// pathological corners.
+// Codepoint escapes: SPARQL 1.2 restricts \uXXXX and \UXXXXXXXX to
+// string literals and IRI references (the sparql12 codepoint-escape
+// suite pins this — escaped keywords, prefixed names, and variable
+// names are illegal, revising SPARQL 1.1's anywhere-rule). Inside
+// those two contexts the scanner decodes an escape as the single
+// character it denotes, with no second buffer (zero-copy) and no
+// re-interpretation of produced characters — '\U00000031' is a
+// backslash followed by 'U', never a second escape round. Deliberate
+// simplification: an escape-produced quote, backslash, or newline
+// inside a string literal is treated as content rather than
+// re-tokenized; the W3C suites do not exercise those corners.
 package sparql
 
 import "core:unicode/utf8"
@@ -137,8 +136,18 @@ scanner_next :: proc(s: ^Scanner) -> (tok: Token, ok: bool) {
 			tok.kind = .Or
 			return tok, true
 		}
+		if peek(s, 1) == '}' {
+			s.pos += 2
+			tok.kind = .Annotation_Close
+			return tok, true
+		}
 		s.pos += 1
 		tok.kind = .Pipe
+		return tok, true
+
+	case '~':
+		s.pos += 1
+		tok.kind = .Tilde
 		return tok, true
 
 	case '&':
@@ -228,6 +237,11 @@ scanner_next :: proc(s: ^Scanner) -> (tok: Token, ok: bool) {
 		return tok, true
 
 	case '{':
+		if peek(s, 1) == '|' {
+			s.pos += 2
+			tok.kind = .Annotation_Open
+			return tok, true
+		}
 		s.pos += 1
 		tok.kind = .L_Brace
 		return tok, true
@@ -789,18 +803,9 @@ local_char_at :: proc(s: ^Scanner, at: int, first: bool) -> bool {
 		return true
 	}
 	if c == '\\' {
-		// PN_LOCAL_ESC or a codepoint escape; either way local content.
-		if at + 1 < len(s.source) && is_pn_local_esc(s.source[at + 1]) {
-			return true
-		}
-		r, n := decode_escape_at(s, at)
-		if n == 0 {
-			return false
-		}
-		if first {
-			return is_pn_chars_u(r) || is_digit_rune(r) || r == ':'
-		}
-		return is_pn_chars(r) || r == ':'
+		// Only PN_LOCAL_ESC — SPARQL 1.2 forbids codepoint escapes in
+		// prefixed names.
+		return at + 1 < len(s.source) && is_pn_local_esc(s.source[at + 1])
 	}
 	r, n, _ := decode_char_at(s, at)
 	if n == 0 {
@@ -827,18 +832,12 @@ consume_local_char :: proc(s: ^Scanner, tok: ^Token) -> bool {
 		}
 		s.pos += 3
 	case '\\':
-		if s.pos + 1 < len(s.source) && is_pn_local_esc(s.source[s.pos + 1]) {
-			tok.has_escape = true
-			s.pos += 2
-			return true
-		}
-		_, n := decode_escape_at(s, s.pos)
-		if n == 0 {
+		if s.pos + 1 >= len(s.source) || !is_pn_local_esc(s.source[s.pos + 1]) {
 			set_error(s, .Invalid_Escape, s.pos)
 			return false
 		}
 		tok.has_escape = true
-		s.pos += n
+		s.pos += 2
 	case:
 		_, n, _ := decode_char_at(s, s.pos)
 		s.pos += n
@@ -1101,20 +1100,16 @@ lookup_keyword_word :: proc(word: string) -> Keyword {
 	return kw
 }
 
-// decode_char_at decodes the character at `at`: a codepoint escape
-// (\uXXXX / \UXXXXXXXX) counts as the single character it denotes, any
-// other byte sequence as UTF-8. n == 0 marks an invalid character or
-// malformed escape; the caller chooses the error kind from context.
+// decode_char_at decodes the UTF-8 character at `at`. Codepoint
+// escapes are NOT decoded here — SPARQL 1.2 confines them to strings
+// and IRIs, whose scanners handle them explicitly. n == 0 marks an
+// invalid character; the caller chooses the error kind from context.
 @(private = "file")
 decode_char_at :: proc(s: ^Scanner, at: int) -> (r: rune, n: int, escaped: bool) {
 	if at >= len(s.source) {
 		return 0, 0, false
 	}
 	c := s.source[at]
-	if c == '\\' {
-		r, n = decode_escape_at(s, at)
-		return r, n, n != 0
-	}
 	if c < 0x80 {
 		return rune(c), 1, false
 	}

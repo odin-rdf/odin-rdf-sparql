@@ -16,17 +16,27 @@ harness runs hermetically with no network access.
 | `sparql11-aggregates/` | `sparql/sparql11/aggregates/` | Aggregate tests (5 negative syntax; rest evaluation) |
 | `sparql11-construct/` | `sparql/sparql11/construct/` | CONSTRUCT tests (2 positive syntax; rest evaluation) |
 | `sparql11-grouping/` | `sparql/sparql11/grouping/` | GROUP BY tests (2 negative syntax; rest evaluation) |
+| `sparql12-syntax/` | `sparql/sparql12/syntax/` | SPARQL 1.2 general syntax tests (GROUP BY scope, nested aggregates) |
+| `sparql12-syntax-triple-terms-positive/` | `sparql/sparql12/syntax-triple-terms-positive/` | Triple terms, reified triples, reifiers, annotations (positive) |
+| `sparql12-syntax-triple-terms-negative/` | `sparql/sparql12/syntax-triple-terms-negative/` | The same surface, negative |
+| `sparql12-codepoint-escapes/` | `sparql/sparql12/codepoint-escapes/` | 1.2 codepoint-escape restriction (strings/IRIs only) |
+| `sparql12-lang-basedir/` | `sparql/sparql12/lang-basedir/` | Directional language tags |
+| `sparql12-version/` | `sparql/sparql12/version/` | VERSION declaration |
 
-The vendored directories are the sparql11 directories whose manifests
-contain query syntax tests (`mf:PositiveSyntaxTest11` /
-`mf:NegativeSyntaxTest11`). Directories are copied verbatim, so the
-evaluation entries mixed into `aggregates/`, `construct/`, and
-`grouping/` (and their data/result files) ride along; they stay dormant
-until the evaluation initiative runs them. Intentionally excluded, per
-the vision's scope: `syntax-update-1/`, `syntax-update-2/`,
-`delete-insert/` (SPARQL Update), `syntax-fed/` (federation), the
-protocol and service directories, and the purely-evaluation suites
-(vendored later by the evaluation initiative).
+The vendored directories are the sparql11 and sparql12 directories
+whose manifests contain query syntax tests. Directories are copied
+verbatim, so evaluation entries and SPARQL Update entries mixed into
+them ride along: evaluation queries must parse (evaluation itself runs
+in the evaluation initiative), while Update tests
+(`mf:*UpdateSyntaxTest`, `mf:UpdateEvaluationTest`) are explicitly
+acknowledged as out of the engine's scope by the harness — SPARQL
+Update is a vision-level exclusion, counted in the log line and never
+silently skipped. Intentionally not vendored, per the vision's scope:
+`syntax-update-1/`, `syntax-update-2/`, `delete-insert/` (SPARQL
+Update), `syntax-fed/` (federation), the protocol and service
+directories, and the purely-evaluation suites (sparql11 eval dirs and
+sparql12 `expression/`, `grouping/`, `eval-triple-terms/` — vendored
+later by the evaluation initiative).
 
 The harness lives in `harness/` and runs under `odin test`. Manifests
 are parsed with the family's own Turtle parser through the `rdf:`

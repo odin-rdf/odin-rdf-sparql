@@ -390,6 +390,8 @@ print_expr :: proc(w: io.Writer, e: Expr) {
 			print_expr(w, v.expr)
 		}
 		io.write_byte(w, ')')
+	case ^Triple_Term:
+		print_triple_term(w, v)
 	case Var:
 		print_var(w, v)
 	case rdf.IRI:
@@ -413,7 +415,22 @@ print_node :: proc(w: io.Writer, node: Pattern_Node) {
 		print_var(w, v)
 	case ^Path_Expr:
 		print_path(w, v)
+	case ^Triple_Term:
+		print_triple_term(w, v)
 	}
+}
+
+// print_triple_term renders a SPARQL 1.2 triple term in its surface
+// form — unambiguous in SSE context and stable for goldens.
+@(private = "file")
+print_triple_term :: proc(w: io.Writer, tt: ^Triple_Term) {
+	io.write_string(w, "<<(")
+	print_node(w, tt.subject)
+	io.write_byte(w, ' ')
+	print_node(w, tt.predicate)
+	io.write_byte(w, ' ')
+	print_node(w, tt.object)
+	io.write_string(w, ")>>")
 }
 
 @(private = "file")

@@ -50,6 +50,9 @@ Token_Kind :: enum {
 	Reified_Close, // >> (SPARQL 1.2)
 	Triple_Term_Open, // <<( (SPARQL 1.2)
 	Triple_Term_Close, // )>> (SPARQL 1.2)
+	Tilde, // ~ (SPARQL 1.2 reifier)
+	Annotation_Open, // {| (SPARQL 1.2)
+	Annotation_Close, // |} (SPARQL 1.2)
 }
 
 // Keyword enumerates the case-insensitive SPARQL keywords ('a' is a

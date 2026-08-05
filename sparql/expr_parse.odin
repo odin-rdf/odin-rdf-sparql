@@ -252,6 +252,10 @@ parse_primary_expr :: proc(p: ^Parser) -> Expr {
 		return rdf.literal_typed(lexical, rdf.XSD_BOOLEAN)
 	case .Keyword:
 		return parse_builtin_expr(p)
+	case .Triple_Term_Open:
+		// SPARQL 1.2 ExprTripleTerm: a triple term as an expression —
+		// no blank nodes inside, as with expressions generally.
+		return parse_triple_term(p, .Expression)
 	}
 	fail_at(p, .Expected_Expression, p.tok)
 	return nil

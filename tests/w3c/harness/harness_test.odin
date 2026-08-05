@@ -13,6 +13,7 @@ SUITE_ROOT :: #directory + ".."
 // Test-file IRIs resolve against the upstream suite location, per the
 // W3C convention.
 DATA_SPARQL11 :: "http://www.w3.org/2009/sparql/docs/tests/data-sparql11/"
+SPARQL12 :: "https://w3c.github.io/rdf-tests/sparql/sparql12/"
 
 // Suite directories are enabled individually; once enabled, a
 // directory must be fully green — no skip lists, no expected-failure
@@ -41,6 +42,36 @@ test_w3c_sparql11_grouping :: proc(t: ^testing.T) {
 	run_suite(t, "sparql11-grouping", DATA_SPARQL11 + "grouping/", 6)
 }
 
+@(test)
+test_w3c_sparql12_syntax :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-syntax", SPARQL12 + "syntax/", 6)
+}
+
+@(test)
+test_w3c_sparql12_triple_terms_positive :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-syntax-triple-terms-positive", SPARQL12 + "syntax-triple-terms-positive/", 113)
+}
+
+@(test)
+test_w3c_sparql12_triple_terms_negative :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-syntax-triple-terms-negative", SPARQL12 + "syntax-triple-terms-negative/", 65)
+}
+
+@(test)
+test_w3c_sparql12_codepoint_escapes :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-codepoint-escapes", SPARQL12 + "codepoint-escapes/", 14)
+}
+
+@(test)
+test_w3c_sparql12_lang_basedir :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-lang-basedir", SPARQL12 + "lang-basedir/", 11)
+}
+
+@(test)
+test_w3c_sparql12_version :: proc(t: ^testing.T) {
+	run_suite(t, "sparql12-version", SPARQL12 + "version/", 9)
+}
+
 // run_suite runs every manifest entry. expected_count pins the entry
 // count recorded when the suite was vendored — the guard against a
 // manifest-reader regression silently dropping tests.
@@ -65,15 +96,23 @@ run_suite :: proc(t: ^testing.T, suite: string, base_prefix: string, expected_co
 	)
 
 	passed := 0
+	update_out_of_scope := 0
 	for e in entries {
 		kind: enum {
 			Positive,
 			Negative,
 		}
 		switch {
-		case strings.contains(e.type_str, "PositiveSyntaxTest11"):
+		case strings.contains(e.type_str, "UpdateSyntaxTest"),
+		     strings.contains(e.type_str, "UpdateEvaluationTest"):
+			// SPARQL Update is out of the engine's scope by design
+			// (vision constraint) — acknowledged explicitly here and
+			// counted, never silently skipped.
+			update_out_of_scope += 1
+			continue
+		case strings.contains(e.type_str, "PositiveSyntaxTest"):
 			kind = .Positive
-		case strings.contains(e.type_str, "NegativeSyntaxTest11"):
+		case strings.contains(e.type_str, "NegativeSyntaxTest"):
 			kind = .Negative
 		case strings.contains(e.type_str, "QueryEvaluationTest"):
 			// Evaluation belongs to the evaluation initiative; at this
@@ -122,5 +161,15 @@ run_suite :: proc(t: ^testing.T, suite: string, base_prefix: string, expected_co
 		}
 		sparql.parser_destroy(&p)
 	}
-	log.infof("%s: %d/%d syntax-level conformance tests passed", suite, passed, len(entries))
+	if update_out_of_scope > 0 {
+		log.infof(
+			"%s: %d/%d syntax-level conformance tests passed (%d Update tests out of engine scope)",
+			suite,
+			passed,
+			len(entries) - update_out_of_scope,
+			update_out_of_scope,
+		)
+	} else {
+		log.infof("%s: %d/%d syntax-level conformance tests passed", suite, passed, len(entries))
+	}
 }
