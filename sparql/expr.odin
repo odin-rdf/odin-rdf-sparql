@@ -68,9 +68,13 @@ In_Expr :: struct {
 	pos:     Position,
 }
 
-// Exists_Expr is EXISTS/NOT EXISTS over a group graph pattern.
+// Exists_Expr is EXISTS/NOT EXISTS over a group graph pattern. The
+// parser fills group; the §18.2 translation (SPARQL-T-0007) fills
+// algebra with the translated pattern, which the printer and the
+// evaluator use.
 Exists_Expr :: struct {
 	group:   ^Group_Pattern,
+	algebra: Algebra, // nil until translated
 	negated: bool,
 	pos:     Position,
 }
@@ -135,6 +139,7 @@ destroy_expr :: proc(e: Expr, allocator := context.allocator) {
 		free(v, allocator)
 	case ^Exists_Expr:
 		destroy_group(v.group, allocator)
+		destroy_algebra(v.algebra, allocator)
 		free(v, allocator)
 	case ^Aggregate:
 		destroy_expr(v.expr, allocator)
