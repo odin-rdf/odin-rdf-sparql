@@ -66,12 +66,21 @@ print_op :: proc(w: io.Writer, a: Algebra, indent: int) {
 		print_op(w, v.left, indent + 1)
 		io.write_byte(w, '\n')
 		print_op(w, v.right, indent + 1)
-		if v.condition != nil {
+		if len(v.conditions) > 0 {
 			io.write_byte(w, '\n')
 			for _ in 0 ..< indent + 1 {
 				io.write_string(w, "  ")
 			}
-			print_expr(w, v.condition)
+			if len(v.conditions) == 1 {
+				print_expr(w, v.conditions[0])
+			} else {
+				io.write_string(w, "(exprlist")
+				for condition in v.conditions {
+					io.write_byte(w, ' ')
+					print_expr(w, condition)
+				}
+				io.write_byte(w, ')')
+			}
 		}
 		io.write_byte(w, ')')
 	case ^Alg_Filter:

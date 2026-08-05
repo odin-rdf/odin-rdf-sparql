@@ -43,12 +43,13 @@ Alg_Join :: struct {
 	left, right: Algebra,
 }
 
-// Alg_Left_Join is LeftJoin(left, right, expr) — OPTIONAL, with the
-// filter condition hoisted per §18.2.2.3. condition is nil when the
-// OPTIONAL carried no filter.
+// Alg_Left_Join is LeftJoin(left, right, conditions) — OPTIONAL, with
+// the inner filter's conditions hoisted per §18.2.2.6. An empty (nil)
+// list means the OPTIONAL carried no filter; multiple entries are a
+// conjunction, exactly as in Alg_Filter.
 Alg_Left_Join :: struct {
 	left, right: Algebra,
-	condition:   Expr,
+	conditions:  [dynamic]Expr,
 }
 
 // Alg_Filter is Filter(conditions, input). Multiple collected FILTERs
@@ -178,6 +179,7 @@ destroy_algebra :: proc(a: Algebra, allocator := context.allocator) {
 	case ^Alg_Left_Join:
 		destroy_algebra(v.left, allocator)
 		destroy_algebra(v.right, allocator)
+		delete(v.conditions)
 		free(v, allocator)
 	case ^Alg_Filter:
 		delete(v.conditions)

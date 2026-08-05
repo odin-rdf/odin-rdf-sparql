@@ -40,6 +40,10 @@ Parser :: struct {
 	depth:         int,
 	in_template:   bool, // CONSTRUCT template: no paths, no label scoping
 	scope_scratch: map[string]bool, // reused by the §19.8 scope checks
+	algebra:       Algebra, // owned; set by translate, freed by parser_destroy
+	detached:      [dynamic]Expr, // aggregate trees translate lifted out of the AST
+	agg_n:         int, // ".N" aggregate-variable counter
+	path_n:        int, // ".pN" path-variable counter
 	allocator:     runtime.Allocator,
 }
 
@@ -69,6 +73,11 @@ parser_init :: proc(p: ^Parser, source: []byte, base := "", allocator := context
 
 parser_destroy :: proc(p: ^Parser) {
 	destroy_query(p.query, p.allocator)
+	destroy_algebra(p.algebra, p.allocator)
+	for detached in p.detached {
+		destroy_expr(detached, p.allocator)
+	}
+	delete(p.detached)
 	delete(p.prefixes)
 	delete(p.blank_first)
 	delete(p.scope_scratch)

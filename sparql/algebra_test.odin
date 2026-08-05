@@ -96,7 +96,7 @@ test_sse_leftjoin_union_graph :: proc(t: ^testing.T) {
 	lj := new(Alg_Left_Join)
 	lj.left = bgp1(v("s"), rdf.IRI("urn:p"), v("o"))
 	lj.right = bgp1(v("s"), rdf.IRI("urn:m"), v("m"))
-	lj.condition = bound
+	append(&lj.conditions, Expr(bound))
 
 	u := new(Alg_Union)
 	u.left = lj

@@ -103,6 +103,45 @@ ORDER BY ?name DESC(?person + 1) str(?mail) LIMIT 5 OFFSET 2
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
+// A parse+translate+destroy cycle must release everything: the query
+// tree, the algebra tree, and the aggregate expressions the §18.2
+// substitution detaches from the AST (SPARQL-T-0007 ownership).
+@(test)
+test_translate_no_leaks :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	allocator := mem.tracking_allocator(&track)
+
+	TRANSLATE_QUERY :: `
+PREFIX f: <urn:f#>
+SELECT ?s (COUNT(DISTINCT ?v) + 1 AS ?n) (GROUP_CONCAT(?v ; SEPARATOR = ",") AS ?all)
+WHERE {
+	?s f:p/f:q+ ?v ; ^f:r ?w .
+	OPTIONAL { ?s f:m ?m FILTER(?m > 0) FILTER(?m < 9) }
+	FILTER EXISTS { ?s f:flag true }
+	MINUS { ?s f:hide ?any }
+	BIND(STR(?w) AS ?label)
+	VALUES ?tag { "a" "b" }
+	{ SELECT (SUM(?z) AS ?total) { ?a f:num ?z } }
+}
+GROUP BY ?s HAVING(COUNT(?v) > 1 && NOT EXISTS { ?s f:no ?x })
+ORDER BY DESC(?n) LIMIT 7 OFFSET 1
+`
+	for _ in 0 ..< 50 {
+		p: sparql.Parser
+		sparql.parser_init(&p, transmute([]byte)string(TRANSLATE_QUERY), "", allocator)
+		_, parse_ok := sparql.parse(&p)
+		testing.expect_value(t, p.err.kind, sparql.Error_Kind.None)
+		testing.expect(t, parse_ok)
+		_, translate_ok := sparql.translate(&p)
+		testing.expect(t, translate_ok)
+		sparql.parser_destroy(&p)
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
 // Failed parses must release everything too — the error paths abandon
 // partial trees to the parser, never to the floor.
 @(test)

@@ -5,11 +5,11 @@
 // the data model and format parsers, `store:` for the match interface
 // -- and is consumed the same way (see Makefile and ols.json).
 //
-// The package is under construction (SPARQL-I-0001). The parser is
-// complete for SPARQL 1.1 Query: tokenizer (SPARQL-T-0002), AST and
-// parser core (SPARQL-T-0003), expressions and FILTER/BIND
-// (SPARQL-T-0004), and the full grammar — property paths, aggregates
-// with GROUP BY/HAVING, subqueries, VALUES, CONSTRUCT/DESCRIBE, MINUS
-// — with the W3C SPARQL 1.1 syntax suites green (SPARQL-T-0005).
-// Algebra translation follows (SPARQL-T-0006/0007).
+// The package covers SPARQL 1.1 Query front to algebra: tokenizer
+// (SPARQL-T-0002), AST and parser (SPARQL-T-0003/0004/0005, W3C syntax
+// suites green), the §18 algebra with its ARQ-compatible SSE printer
+// (SPARQL-T-0006), and the §18.2/§18.4 translation (SPARQL-T-0007).
+// Typical use: parser_init → parse → translate → walk p.algebra (or
+// algebra_to_string for the SSE view); parser_destroy frees it all.
+// SPARQL 1.2 syntax conformance lands with SPARQL-T-0008.
 package sparql
