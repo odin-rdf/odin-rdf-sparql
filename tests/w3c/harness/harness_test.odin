@@ -8,12 +8,9 @@ import "core:testing"
 
 import sparql "../../../sparql"
 
-SUITE_ROOT :: #directory + ".."
-
 // Test-file IRIs resolve against the upstream suite location, per the
-// W3C convention.
-DATA_SPARQL11 :: "http://www.w3.org/2009/sparql/docs/tests/data-sparql11/"
-SPARQL12 :: "https://w3c.github.io/rdf-tests/sparql/sparql12/"
+// W3C convention; the prefixes and SUITE_ROOT live alongside the
+// vendored evaluation suites, which resolve the same way.
 
 // Suite directories are enabled individually; once enabled, a
 // directory must be fully green — no skip lists, no expected-failure
