@@ -6,6 +6,7 @@
 // -- and is consumed the same way (see Makefile and ols.json).
 //
 // The package is under construction (SPARQL-I-0001). The tokenizer
-// (scanner.odin, token.odin, error.odin) landed with SPARQL-T-0002;
-// the parser core arrives with SPARQL-T-0003.
+// (scanner.odin, token.odin, error.odin) landed with SPARQL-T-0002; the
+// AST and parser core (ast.odin, parser.odin, resolve.odin) with
+// SPARQL-T-0003. Expressions arrive with SPARQL-T-0004.
 package sparql

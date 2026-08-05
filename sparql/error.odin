@@ -20,6 +20,28 @@ Error_Kind :: enum {
 	Invalid_Number,
 	Invalid_Variable_Name,
 	Unknown_Keyword,
+	// Parser-level (set by the query parser, SPARQL-T-0003 on).
+	Expected_Query_Form,
+	Expected_Projection,
+	Expected_Group,
+	Unclosed_Group,
+	Expected_Pattern,
+	Expected_Subject,
+	Expected_Predicate,
+	Expected_Object,
+	Expected_IRI,
+	Expected_Datatype,
+	Expected_Prefix_Name,
+	Undefined_Prefix,
+	Relative_IRI,
+	Expected_Variable,
+	Expected_Integer,
+	Unclosed_Collection,
+	Unclosed_Property_List,
+	Nesting_Too_Deep,
+	Blank_Label_Reuse,
+	Invalid_Direction,
+	Trailing_Content,
 }
 
 // Error is a grammar violation with its position. The zero value (kind
@@ -65,6 +87,48 @@ error_message :: proc(kind: Error_Kind) -> string {
 		return "malformed variable name (VAR1/VAR2)"
 	case .Unknown_Keyword:
 		return "word is neither a SPARQL keyword, 'a', 'true'/'false', nor a prefixed name (QueryUnit)"
+	case .Expected_Query_Form:
+		return "expected SELECT or ASK (Query)"
+	case .Expected_Projection:
+		return "expected '*' or variables in the SELECT clause (SelectClause)"
+	case .Expected_Group:
+		return "expected '{' to open a group graph pattern (GroupGraphPattern)"
+	case .Unclosed_Group:
+		return "group graph pattern not closed with '}' (GroupGraphPattern)"
+	case .Expected_Pattern:
+		return "expected a triple pattern, group, OPTIONAL, GRAPH, or UNION (GraphPatternNotTriples)"
+	case .Expected_Subject:
+		return "expected a term or variable as subject (TriplesSameSubject)"
+	case .Expected_Predicate:
+		return "expected an IRI, variable, or 'a' as predicate (Verb)"
+	case .Expected_Object:
+		return "expected a term or variable as object (ObjectList)"
+	case .Expected_IRI:
+		return "expected an IRI reference (iri)"
+	case .Expected_Datatype:
+		return "expected an IRI after '^^' (RDFLiteral)"
+	case .Expected_Prefix_Name:
+		return "expected a prefix name ending in ':' (PrefixDecl)"
+	case .Undefined_Prefix:
+		return "prefixed name uses an undeclared prefix (PrefixedName)"
+	case .Relative_IRI:
+		return "relative IRI with no base established (IRIREF)"
+	case .Expected_Variable:
+		return "expected a variable (Var)"
+	case .Expected_Integer:
+		return "expected a non-negative integer (LimitClause/OffsetClause)"
+	case .Unclosed_Collection:
+		return "collection not closed with ')' (Collection)"
+	case .Unclosed_Property_List:
+		return "blank node property list not closed with ']' (BlankNodePropertyList)"
+	case .Nesting_Too_Deep:
+		return "nesting exceeds the parser's depth bound (GroupGraphPattern/TriplesNode)"
+	case .Blank_Label_Reuse:
+		return "blank node label reused across basic graph patterns (BLANK_NODE_LABEL)"
+	case .Invalid_Direction:
+		return "base direction must be 'ltr' or 'rtl' (LANGTAG)"
+	case .Trailing_Content:
+		return "unexpected content after the end of the query (QueryUnit)"
 	}
 	return "unknown error"
 }
