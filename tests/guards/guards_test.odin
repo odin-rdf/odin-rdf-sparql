@@ -69,7 +69,7 @@ test_parser_no_leaks :: proc(t: ^testing.T) {
 	PARSE_QUERY :: `
 BASE <http://example.org/data/>
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-SELECT DISTINCT ?name
+SELECT DISTINCT ?name (STRLEN(?name) + 1 AS ?n)
 FROM <graphs/main> FROM NAMED <graphs/extra>
 WHERE {
 	?person a foaf:Person ;
@@ -77,8 +77,12 @@ WHERE {
 		foaf:topics ( "a" "b" 3 ) .
 	[ foaf:nick "néo" ] foaf:knows ?person .
 	{ GRAPH ?g { ?person foaf:age 42 } } UNION { OPTIONAL { ?person foaf:mbox ?m } }
+	FILTER(?age >= 18 && !REGEX(?name, "^x", "i") || ?age NOT IN (1, 2+3))
+	FILTER NOT EXISTS { ?person foaf:enemy ?e }
+	FILTER foaf:custom(DISTINCT ?name)
+	BIND(IF(BOUND(?m), STR(?m), "none") AS ?mail)
 }
-ORDER BY ?name DESC(?person) LIMIT 5 OFFSET 2
+ORDER BY ?name DESC(?person + 1) str(?mail) LIMIT 5 OFFSET 2
 `
 	for _ in 0 ..< 100 {
 		p: sparql.Parser
@@ -109,6 +113,11 @@ test_parser_no_leaks_on_error :: proc(t: ^testing.T) {
 		"SELECT * { ?s ?p ( 1 2 }",
 		"SELECT * { [ ?p 1 ?o }",
 		"ASK { _:a ?p ?o OPTIONAL { ?s ?q _:a } }",
+		"ASK { FILTER(?x + ) }",
+		"ASK { FILTER(STRLEN(?x, ?y)) }",
+		"ASK { BIND(?x + 1 ?y) }",
+		"SELECT (1 + AS ?x) { ?s ?p ?o }",
+		"ASK { FILTER EXISTS { ?s ?p } }",
 	}
 	for bad in BAD_QUERIES {
 		p: sparql.Parser

@@ -86,7 +86,7 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 	q = new(Query, p.allocator)
 	q.limit = -1
 	q.offset = -1
-	q.projection = make([dynamic]Var, p.allocator)
+	q.projection = make([dynamic]Projection, p.allocator)
 	q.datasets = make([dynamic]Dataset_Clause, p.allocator)
 	q.order = make([dynamic]Order_Condition, p.allocator)
 	p.query = q
@@ -133,7 +133,7 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 
 // --- Token plumbing -------------------------------------------------
 
-@(private = "file")
+@(private)
 advance :: proc(p: ^Parser) {
 	tok, ok := scanner_next(&p.scanner)
 	if !ok {
@@ -147,7 +147,7 @@ advance :: proc(p: ^Parser) {
 	p.has_tok = true
 }
 
-@(private = "file")
+@(private)
 fail_at :: proc(p: ^Parser, kind: Error_Kind, tok: Token) {
 	if p.err.kind == .None {
 		p.err = {kind = kind, offset = tok.offset, line = tok.line, column = tok.column}
@@ -156,7 +156,7 @@ fail_at :: proc(p: ^Parser, kind: Error_Kind, tok: Token) {
 
 // fail_here reports an error at the current scanner position (end of
 // input reached while a construct was incomplete).
-@(private = "file")
+@(private)
 fail_here :: proc(p: ^Parser, kind: Error_Kind) {
 	if p.err.kind == .None {
 		p.err = {
@@ -170,7 +170,7 @@ fail_here :: proc(p: ^Parser, kind: Error_Kind) {
 
 // fail_current reports at the current token, or at end of input when
 // there is none.
-@(private = "file")
+@(private)
 fail_current :: proc(p: ^Parser, kind: Error_Kind) {
 	if p.has_tok {
 		fail_at(p, kind, p.tok)
@@ -179,17 +179,17 @@ fail_current :: proc(p: ^Parser, kind: Error_Kind) {
 	}
 }
 
-@(private = "file")
+@(private)
 at_keyword :: proc(p: ^Parser, kw: Keyword) -> bool {
 	return p.has_tok && p.tok.kind == .Keyword && p.tok.keyword == kw
 }
 
-@(private = "file")
+@(private)
 at :: proc(p: ^Parser, kind: Token_Kind) -> bool {
 	return p.has_tok && p.tok.kind == kind
 }
 
-@(private = "file")
+@(private)
 token_pos :: proc(tok: Token) -> Position {
 	return {offset = tok.offset, line = tok.line, column = tok.column}
 }
@@ -273,10 +273,42 @@ parse_select_clause :: proc(p: ^Parser, q: ^Query) {
 		advance(p)
 		return
 	}
-	// (expr AS ?var) projections arrive with SPARQL-T-0004.
-	for at(p, .Var) {
-		append(&q.projection, Var{name = p.tok.text, pos = token_pos(p.tok)})
-		advance(p)
+	// (Var | '(' Expression AS Var ')')+
+	loop: for p.err.kind == .None {
+		switch {
+		case at(p, .Var):
+			append(&q.projection, Projection{v = var_of(p.tok)})
+			advance(p)
+		case at(p, .L_Paren):
+			advance(p)
+			expr := parse_expression(p)
+			if p.err.kind != .None {
+				destroy_expr(expr, p.allocator)
+				return
+			}
+			if !at_keyword(p, .As) {
+				destroy_expr(expr, p.allocator)
+				fail_current(p, .Expected_As)
+				return
+			}
+			advance(p)
+			if !at(p, .Var) {
+				destroy_expr(expr, p.allocator)
+				fail_current(p, .Expected_Variable)
+				return
+			}
+			v := var_of(p.tok)
+			advance(p)
+			if !at(p, .R_Paren) {
+				destroy_expr(expr, p.allocator)
+				fail_current(p, .Expected_Close_Paren)
+				return
+			}
+			advance(p)
+			append(&q.projection, Projection{v = v, expr = expr})
+		case:
+			break loop
+		}
 	}
 	if len(q.projection) == 0 {
 		fail_current(p, .Expected_Projection)
@@ -313,33 +345,31 @@ parse_solution_modifiers :: proc(p: ^Parser, q: ^Query) {
 		advance(p)
 		n := 0
 		order: for p.err.kind == .None {
+			// OrderCondition ::= (ASC|DESC) BrackettedExpression
+			//                  | Constraint | Var
 			switch {
 			case at(p, .Var):
-				append(&q.order, Order_Condition{v = var_of(p.tok), direction = .Ascending})
+				append(&q.order, Order_Condition{expr = var_of(p.tok), direction = .Ascending})
 				advance(p)
 				n += 1
 			case at_keyword(p, .Asc) || at_keyword(p, .Desc):
 				direction := Order_Direction.Ascending if p.tok.keyword == .Asc else .Descending
 				advance(p)
-				// General bracketted expressions arrive with SPARQL-T-0004;
-				// the core accepts '(' Var ')'.
-				if !at(p, .L_Paren) {
-					fail_current(p, .Expected_Variable)
+				expr := parse_bracketted(p)
+				if p.err.kind != .None {
+					destroy_expr(expr, p.allocator)
 					return
 				}
-				advance(p)
-				if !at(p, .Var) {
-					fail_current(p, .Expected_Variable)
+				append(&q.order, Order_Condition{expr = expr, direction = direction})
+				n += 1
+			case at(p, .L_Paren), at(p, .IRI_Ref), at(p, .PName),
+			     p.has_tok && p.tok.kind == .Keyword && order_constraint_keyword(p.tok.keyword):
+				expr := parse_constraint(p)
+				if p.err.kind != .None {
+					destroy_expr(expr, p.allocator)
 					return
 				}
-				v := var_of(p.tok)
-				advance(p)
-				if !at(p, .R_Paren) {
-					fail_current(p, .Expected_Variable)
-					return
-				}
-				advance(p)
-				append(&q.order, Order_Condition{v = v, direction = direction})
+				append(&q.order, Order_Condition{expr = expr, direction = .Ascending})
 				n += 1
 			case:
 				if n == 0 {
@@ -367,6 +397,18 @@ parse_solution_modifiers :: proc(p: ^Parser, q: ^Query) {
 	}
 }
 
+// order_constraint_keyword reports whether a keyword can start an
+// ORDER BY Constraint (a BuiltInCall form) — as opposed to a clause
+// keyword like LIMIT that ends the order condition list.
+@(private = "file")
+order_constraint_keyword :: proc(kw: Keyword) -> bool {
+	if kw == .Exists || kw == .Not || kw == .Bound {
+		return true
+	}
+	_, _, ok := builtin_arity(kw)
+	return ok
+}
+
 @(private = "file")
 expect_unsigned_integer :: proc(p: ^Parser) -> int {
 	if !at(p, .Integer) || len(p.tok.text) == 0 || p.tok.text[0] == '+' || p.tok.text[0] == '-' {
@@ -382,14 +424,14 @@ expect_unsigned_integer :: proc(p: ^Parser) -> int {
 	return value
 }
 
-@(private = "file")
+@(private)
 var_of :: proc(tok: Token) -> Var {
 	return {name = tok.text, pos = token_pos(tok)}
 }
 
 // --- Group graph patterns -------------------------------------------
 
-@(private = "file")
+@(private)
 parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 	if !at(p, .L_Brace) {
 		fail_current(p, .Expected_Group)
@@ -438,6 +480,44 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 				gp.group = parse_group(p)
 			}
 			append(&g.elements, Pattern(gp))
+			accept_dot(p)
+		case at_keyword(p, .Filter):
+			f := new(Filter_Pattern, p.allocator)
+			f.pos = token_pos(p.tok)
+			advance(p)
+			append(&g.elements, Pattern(f))
+			f.condition = parse_constraint(p)
+			accept_dot(p)
+		case at_keyword(p, .Bind):
+			b := new(Bind_Pattern, p.allocator)
+			b.pos = token_pos(p.tok)
+			advance(p)
+			append(&g.elements, Pattern(b))
+			if !at(p, .L_Paren) {
+				fail_current(p, .Expected_Expression)
+				return g
+			}
+			advance(p)
+			b.expr = parse_expression(p)
+			if p.err.kind != .None {
+				return g
+			}
+			if !at_keyword(p, .As) {
+				fail_current(p, .Expected_As)
+				return g
+			}
+			advance(p)
+			if !at(p, .Var) {
+				fail_current(p, .Expected_Variable)
+				return g
+			}
+			b.v = var_of(p.tok)
+			advance(p)
+			if !at(p, .R_Paren) {
+				fail_current(p, .Expected_Close_Paren)
+				return g
+			}
+			advance(p)
 			accept_dot(p)
 		case !p.has_tok:
 			fail_here(p, .Unclosed_Group)
@@ -669,7 +749,11 @@ parse_var_or_term :: proc(p: ^Parser) -> Pattern_Node {
 		advance(p)
 		return rdf.Blank_Node(label)
 	case .String_Literal:
-		return parse_rdf_literal(p)
+		lit, ok := parse_rdf_literal(p)
+		if !ok {
+			return nil
+		}
+		return lit
 	case .Integer:
 		lit := rdf.literal_typed(p.tok.text, rdf.XSD_INTEGER)
 		advance(p)
@@ -700,11 +784,12 @@ parse_var_or_term :: proc(p: ^Parser) -> Pattern_Node {
 }
 
 // parse_rdf_literal parses RDFLiteral: String (LANGTAG | '^^' iri)?.
-@(private = "file")
-parse_rdf_literal :: proc(p: ^Parser) -> Pattern_Node {
+// Shared between graph patterns and expressions.
+@(private)
+parse_rdf_literal :: proc(p: ^Parser) -> (lit: rdf.Literal, ok: bool) {
 	lexical := unescape_string_text(p, p.tok)
 	if p.err.kind != .None {
-		return nil
+		return {}, false
 	}
 	advance(p)
 	switch {
@@ -722,27 +807,27 @@ parse_rdf_literal :: proc(p: ^Parser) -> Pattern_Node {
 					direction = .RTL
 				case:
 					fail_at(p, .Invalid_Direction, p.tok)
-					return nil
+					return {}, false
 				}
 				advance(p)
-				return rdf.literal_dir_lang(lexical, lang, direction)
+				return rdf.literal_dir_lang(lexical, lang, direction), true
 			}
 		}
 		advance(p)
-		return rdf.literal_lang(lexical, tag)
+		return rdf.literal_lang(lexical, tag), true
 	case at(p, .Datatype_Marker):
 		advance(p)
 		if !at(p, .IRI_Ref) && !at(p, .PName) {
 			fail_current(p, .Expected_Datatype)
-			return nil
+			return {}, false
 		}
-		datatype, ok := parse_iri(p)
-		if !ok {
-			return nil
+		datatype, dt_ok := parse_iri(p)
+		if !dt_ok {
+			return {}, false
 		}
-		return rdf.literal_typed(lexical, datatype)
+		return rdf.literal_typed(lexical, datatype), true
 	}
-	return rdf.literal_plain(lexical)
+	return rdf.literal_plain(lexical), true
 }
 
 // parse_triples_node parses Collection | BlankNodePropertyList (or the
@@ -832,7 +917,7 @@ fresh_blank :: proc(p: ^Parser) -> Pattern_Node {
 // --- IRIs and lexical materialization -------------------------------
 
 // parse_iri parses iri: IRIREF | PrefixedName, consuming the token.
-@(private = "file")
+@(private)
 parse_iri :: proc(p: ^Parser) -> (iri: rdf.IRI, ok: bool) {
 	switch {
 	case at(p, .IRI_Ref):

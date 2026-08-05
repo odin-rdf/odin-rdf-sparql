@@ -74,15 +74,27 @@ Graph_Pattern :: struct {
 	pos:   Position,
 }
 
-// Pattern is one element of a group graph pattern. FILTER/BIND arrive
-// with SPARQL-T-0004; MINUS, SERVICE, VALUES, and subqueries with
-// SPARQL-T-0005.
+Filter_Pattern :: struct {
+	condition: Expr,
+	pos:       Position,
+}
+
+Bind_Pattern :: struct {
+	expr: Expr,
+	v:    Var,
+	pos:  Position,
+}
+
+// Pattern is one element of a group graph pattern. MINUS, SERVICE,
+// VALUES, and subqueries arrive with SPARQL-T-0005.
 Pattern :: union {
 	^Basic_Pattern,
 	^Group_Pattern,
 	^Optional_Pattern,
 	^Union_Pattern,
 	^Graph_Pattern,
+	^Filter_Pattern,
+	^Bind_Pattern,
 }
 
 Query_Form :: enum {
@@ -108,11 +120,16 @@ Order_Direction :: enum {
 	Descending,
 }
 
-// Order_Condition holds a variable for now; general expressions arrive
-// with SPARQL-T-0004 and widen this in place.
 Order_Condition :: struct {
-	v:         Var,
+	expr:      Expr, // a bare Var, a bracketted expression, or a Constraint call
 	direction: Order_Direction,
+}
+
+// Projection is one SELECT clause entry: a bare variable (expr nil) or
+// an `(expr AS ?var)` binding.
+Projection :: struct {
+	v:    Var,
+	expr: Expr, // nil for a bare variable
 }
 
 // Query is a parsed SPARQL query. GROUP BY/HAVING and the remaining
@@ -121,9 +138,9 @@ Query :: struct {
 	form:            Query_Form,
 	select_modifier: Select_Modifier,
 	select_star:     bool,
-	projection:      [dynamic]Var, // empty when select_star or form == .Ask
+	projection:      [dynamic]Projection, // empty when select_star or form == .Ask
 	datasets:        [dynamic]Dataset_Clause,
-	where_clause:           ^Group_Pattern,
+	where_clause:    ^Group_Pattern,
 	order:           [dynamic]Order_Condition,
 	limit:           int, // -1 when absent
 	offset:          int, // -1 when absent
@@ -136,8 +153,14 @@ destroy_query :: proc(q: ^Query, allocator := context.allocator) {
 	if q == nil {
 		return
 	}
+	for projection in q.projection {
+		destroy_expr(projection.expr, allocator)
+	}
 	delete(q.projection)
 	delete(q.datasets)
+	for condition in q.order {
+		destroy_expr(condition.expr, allocator)
+	}
 	delete(q.order)
 	destroy_group(q.where_clause, allocator)
 	free(q, allocator)
@@ -174,6 +197,12 @@ destroy_pattern :: proc(pat: Pattern, allocator := context.allocator) {
 		free(v, allocator)
 	case ^Graph_Pattern:
 		destroy_group(v.group, allocator)
+		free(v, allocator)
+	case ^Filter_Pattern:
+		destroy_expr(v.condition, allocator)
+		free(v, allocator)
+	case ^Bind_Pattern:
+		destroy_expr(v.expr, allocator)
 		free(v, allocator)
 	}
 }

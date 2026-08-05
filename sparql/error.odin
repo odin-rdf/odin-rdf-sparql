@@ -42,6 +42,10 @@ Error_Kind :: enum {
 	Blank_Label_Reuse,
 	Invalid_Direction,
 	Trailing_Content,
+	Expected_Expression,
+	Expected_Close_Paren,
+	Wrong_Arity,
+	Expected_As,
 }
 
 // Error is a grammar violation with its position. The zero value (kind
@@ -129,6 +133,14 @@ error_message :: proc(kind: Error_Kind) -> string {
 		return "base direction must be 'ltr' or 'rtl' (LANGTAG)"
 	case .Trailing_Content:
 		return "unexpected content after the end of the query (QueryUnit)"
+	case .Expected_Expression:
+		return "expected an expression (Expression)"
+	case .Expected_Close_Paren:
+		return "expected ')' (BrackettedExpression/ArgList)"
+	case .Wrong_Arity:
+		return "wrong number of arguments for built-in call (BuiltInCall)"
+	case .Expected_As:
+		return "expected AS (SelectClause/Bind)"
 	}
 	return "unknown error"
 }

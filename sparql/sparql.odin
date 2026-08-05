@@ -8,5 +8,8 @@
 // The package is under construction (SPARQL-I-0001). The tokenizer
 // (scanner.odin, token.odin, error.odin) landed with SPARQL-T-0002; the
 // AST and parser core (ast.odin, parser.odin, resolve.odin) with
-// SPARQL-T-0003. Expressions arrive with SPARQL-T-0004.
+// SPARQL-T-0003; expressions, FILTER/BIND, and expression projections
+// (expr.odin, expr_parse.odin) with SPARQL-T-0004. Property paths,
+// aggregates, subqueries, VALUES, and CONSTRUCT/DESCRIBE arrive with
+// SPARQL-T-0005.
 package sparql
