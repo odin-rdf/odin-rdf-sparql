@@ -157,9 +157,31 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-sort/` | SPARQL-T-0015 | 14 |
 | `sparql10-solution-seq/` | SPARQL-T-0015 | 13 |
 | `sparql11-project-expression/` | SPARQL-T-0015 | 7 |
+| `sparql11-property-path/` | SPARQL-T-0016 | 33 |
+| `sparql10-construct/` | SPARQL-T-0017 | 5 |
+| `sparql11-construct/` | SPARQL-T-0017 | 5 |
 
-That is **392 evaluation tests across twenty-eight directories**, each run
+That is **435 evaluation tests across thirty-one directories**, each run
 against both backends at both Term_ID widths.
+
+## What DESCRIBE returns
+
+§16.4 defines DESCRIBE's *shape* and leaves its *content* to the
+implementation: the result is an RDF graph "describing" the named
+resources, and which triples that is nobody's business but the engine's.
+So no W3C evaluation directory pins DESCRIBE output. That is measured
+rather than assumed: the vendored corpus contains no `qt:QueryDescribe`
+entry and no query whose form is DESCRIBE at all. The form is therefore
+covered by `sparql/memstore/forms_test.odin` instead, which is the only
+place its behaviour is stated.
+
+This engine answers a DESCRIBE with **every triple of the query's default
+graph whose subject is a described resource**. Nothing else: no
+blank-node closure, no incoming triples, no schema. A resource the data
+says nothing about, or one the store has never heard of, contributes
+nothing rather than failing. It is the smallest answer that is a
+description, and it is stable — which is what a caller can build on when
+the specification promises nothing.
 
 `sparql10-expr-builtin/` is the near miss worth recording: 24 of its 25
 entries pass, and `dawg-lang-3` — `?x :p "string"@EN` against
@@ -176,6 +198,11 @@ the named graphs rather than against each in turn. That is the same
 shape as the aggregation-inside-GRAPH case SPARQL-T-0015 fixed for the
 blocking operators, and fixing it for MINUS belongs with the rest of the
 GRAPH work rather than with sorting.
+
+`sparql11-subquery/` is the third, and the one blocked by nothing in the
+engine: 4 of its 5 evaluation entries pass, and `sq11` fails because its
+data document is RDF/XML, which the family's parser does not implement.
+The directory waits on a format, not on an operator.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs
 pass/mismatch/unsupported counts without asserting anything. It is a

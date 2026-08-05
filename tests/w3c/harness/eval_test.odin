@@ -29,7 +29,9 @@ import "core:testing"
 // the whole of §18.4 in one place: the repeat forms and their zero-length
 // cases, negated property sets in both directions, and the precedence
 // tests that pin alternation and sequence as bags against the repeats as
-// sets. The rest arrive as their operators do.
+// sets. SPARQL-T-0017 adds the two CONSTRUCT directories, whose
+// expectations are RDF graphs compared up to blank-node renaming rather
+// than solution sequences. The rest arrive as their operators do.
 //
 // sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
 // of its 25 entries pass, and the one that does not — dawg-lang-3,
@@ -331,6 +333,26 @@ test_eval_sparql11_property_path_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql11_property_path_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-property-path", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_construct_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-construct", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_construct_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-construct", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_construct_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-construct", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_construct_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-construct", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,

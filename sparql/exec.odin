@@ -1477,6 +1477,48 @@ exec_exists :: proc(
 	return found
 }
 
+// exec_describe writes the description of each resource into a graph:
+// every triple of the default graph with that resource as its subject
+// (see Describe_Targets for why that, and only that).
+//
+// It is here rather than in construct.odin because it is the one part of
+// a result form that asks the store a question of its own — DESCRIBE
+// answers about resources, not about solutions, so the pattern's answers
+// name the subjects and the store supplies the triples.
+exec_describe :: proc(
+	e: ^Exec($D, $It),
+	targets: []store.Term_ID,
+	graph: ^Result_Graph,
+	resolve: Term_Resolver,
+	resolve_data: rawptr,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) {
+	for subject in targets {
+		// A term the engine named itself is not in the data, and its ID is
+		// in a space the store must never be shown.
+		if is_synthetic(subject) {
+			continue
+		}
+		pattern := store.Match_Pattern{subject, store.WILDCARD, store.WILDCARD, store.DEFAULT_GRAPH}
+		it := MATCH(e.dataset, pattern)
+		defer DESTROY(&it)
+		for {
+			quad, more := NEXT(&it)
+			if !more {
+				break
+			}
+			triple := rdf.Triple {
+				subject   = resolve(resolve_data, quad[store.QUAD_S]),
+				predicate = resolve(resolve_data, quad[store.QUAD_P]),
+				object    = resolve(resolve_data, quad[store.QUAD_O]),
+			}
+			result_graph_add(graph, triple)
+		}
+	}
+}
+
 // exec_computed_term resolves a synthetic ID to the term it names. A
 // consumer materializing a solution asks here before it asks the store,
 // because the store has never heard of these terms.

@@ -5,6 +5,8 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 
+import rdf "rdf:rdf"
+import store "store:store"
 import memstore "store:store/memstore"
 
 import sparql "../../sparql"
@@ -578,4 +580,90 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+// The graph-answering result forms' memory contract (SPARQL-T-0017).
+//
+// A CONSTRUCT or a DESCRIBE answers with a Result_Graph that owns every
+// term in it, copied out of whatever the backend materialized. That is
+// three owned structures the solution path does not have — the compiled
+// template, the graph's triples, and the deduplication keys that make it
+// a set — and each is a different lifetime. So the cycle is run under a
+// tracking allocator and the count has to come back to zero: the caller
+// frees the graph, and freeing the graph frees all of it.
+@(test)
+test_result_graph_no_leaks :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	allocator := mem.tracking_allocator(&track)
+
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d, allocator)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds, allocator)
+	context.allocator = allocator
+	_, load_err := memstore.load_triples(
+		&d,
+		&ds,
+		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
+<http://e/b> <http://e/p> <http://e/c> .
+<http://e/c> <http://e/p> "text" .`),
+	)
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	QUERIES :: [?]string {
+		// A template with a variable in every position, and one with a
+		// blank node — the two ways a template triple is built.
+		`CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }`,
+		`CONSTRUCT { _:r <http://e/about> ?s . _:r <http://e/saw> ?o } WHERE { ?s <http://e/p> ?o }`,
+		// A template position the pattern leaves unbound, and one it binds
+		// to a literal: both drop their triple, and a drop must not leak
+		// the graph entry it did not make.
+		`CONSTRUCT { ?s <http://e/q> ?missing . ?o <http://e/back> ?s } WHERE { ?s <http://e/p> ?o }`,
+		// CONSTRUCT WHERE: the template doubles as the pattern.
+		`CONSTRUCT WHERE { ?s <http://e/p> ?o }`,
+		// DESCRIBE with no pattern at all, from a pattern, and over a
+		// resource the store does not hold.
+		`DESCRIBE <http://e/a>`,
+		`DESCRIBE ?o WHERE { ?s <http://e/p> ?o }`,
+		`DESCRIBE * WHERE { ?s <http://e/p> ?o }`,
+		`DESCRIBE <http://e/nobody>`,
+	}
+	for query in QUERIES {
+		p: sparql.Parser
+		sparql.parser_init(&p, transmute([]byte)query, "", allocator)
+		_, parsed := sparql.parse(&p)
+		testing.expectf(t, parsed, "the query should parse: %s", query)
+		algebra, _ := sparql.translate(&p)
+
+		q: sparql_mem.Query
+		if sparql_mem.query_init(&q, algebra, &d, &ds, sparql.parser_base(&p), allocator) {
+			graph: sparql.Result_Graph
+			if p.query.form == .Construct {
+				template: sparql.Template
+				sparql.template_build(&template, p.query.template, sparql_mem.query_slots(&q), allocator)
+				graph = sparql_mem.query_construct(&q, &template, allocator)
+				sparql.template_destroy(&template)
+			} else {
+				targets: sparql.Describe_Targets
+				sparql.describe_build(&targets, p.query, sparql_mem.query_slots(&q), find_guard, &q, allocator)
+				graph = sparql_mem.query_describe(&q, &targets, allocator)
+				sparql.describe_destroy(&targets)
+			}
+			sparql.result_graph_destroy(&graph)
+		}
+		sparql_mem.query_destroy(&q)
+		sparql.parser_destroy(&p)
+	}
+	memstore.dataset_destroy(&ds)
+	memstore.dictionary_destroy(&d)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(private = "file")
+find_guard :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
+	return sparql_mem.query_find(cast(^sparql_mem.Query)data, term)
 }

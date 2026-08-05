@@ -88,19 +88,6 @@ evaluate_entry :: proc(
 		return {}, .Failed, "the query did not translate"
 	}
 
-	// CONSTRUCT and DESCRIBE build RDF graphs and arrive with
-	// SPARQL-T-0017, and are refused by name rather than attempted.
-	//
-	// ASK is here because it needs nothing the engine does not already
-	// have: its answer is whether the pattern has at least one solution.
-	// Pulling it forward from SPARQL-T-0017 is what makes the operator
-	// suites testable — sparql10-expr-ops and sparql10-type-promotion
-	// state their expectations as ASK queries, so without it a FILTER
-	// task could enable almost nothing.
-	if p.query.form != .Select && p.query.form != .Ask {
-		return {}, .Unsupported, "CONSTRUCT / DESCRIBE"
-	}
-
 	// A query may name its own dataset. FROM documents merge into the
 	// dataset's default graph and FROM NAMED documents become named
 	// graphs — and once they are loaded that way, the engine needs to
@@ -120,11 +107,13 @@ evaluate_entry :: proc(
 		append(&declared, Dataset_Document{name = strings.clone(name), named = clause.named})
 	}
 
-	rs, status, detail = evaluate_algebra(suite, e, algebra, sparql.parser_base(&p), declared[:], backend)
+	rs, status, detail = evaluate_algebra(suite, e, algebra, p.query, sparql.parser_base(&p), declared[:], backend)
 	if status != .Ok || p.query.form != .Ask {
 		return rs, status, detail
 	}
 	// An ASK answer is the existence of a solution, not the solutions.
+	// It reads the bindings the evaluator produced rather than asking the
+	// engine anything else — ASK is a SELECT nobody looks at.
 	answered := len(rs.rows) > 0
 	result_set_destroy(&rs)
 	return Result_Set{kind = .Boolean, boolean = answered}, .Ok, ""
@@ -142,6 +131,7 @@ evaluate_algebra :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	query: ^sparql.Query,
 	base: string,
 	declared: []Dataset_Document,
 	backend: Backend,
@@ -152,11 +142,25 @@ evaluate_algebra :: proc(
 ) {
 	switch backend {
 	case .Memstore:
-		return evaluate_memstore(suite, e, algebra, base, declared)
+		return evaluate_memstore(suite, e, algebra, query, base, declared)
 	case .Kvstore:
-		return evaluate_kvstore(suite, e, algebra, base, declared)
+		return evaluate_kvstore(suite, e, algebra, query, base, declared)
 	}
 	return {}, .Failed, "unknown backend"
+}
+
+// graph_result turns a constructed or described graph into the harness's
+// result type. It copies again — the graph owns its terms against the
+// store, the Result_Set owns its terms against the graph — which is what
+// lets both be freed in the order their scopes end.
+@(private = "file")
+graph_result :: proc(graph: ^sparql.Result_Graph) -> Result_Set {
+	rs: Result_Set
+	rs.kind = .Graph
+	for t in sparql.result_graph_triples(graph) {
+		result_set_add_triple(&rs, t)
+	}
+	return rs
 }
 
 // query_is_ordered reports whether an entry's query asks for an order,
@@ -189,6 +193,7 @@ evaluate_memstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	query: ^sparql.Query,
 	base: string,
 	declared: []Dataset_Document,
 ) -> (
@@ -222,6 +227,25 @@ evaluate_memstore :: proc(
 		return {}, .Unsupported, q.unsupported
 	}
 
+	#partial switch query.form {
+	case .Construct:
+		template: sparql.Template
+		defer sparql.template_destroy(&template)
+		if !sparql.template_build(&template, query.template, sparql_mem.query_slots(&q)) {
+			return {}, .Unsupported, "CONSTRUCT template"
+		}
+		graph := sparql_mem.query_construct(&q, &template)
+		defer sparql.result_graph_destroy(&graph)
+		return graph_result(&graph), .Ok, ""
+	case .Describe:
+		targets: sparql.Describe_Targets
+		defer sparql.describe_destroy(&targets)
+		sparql.describe_build(&targets, query, sparql_mem.query_slots(&q), find_memstore, &q)
+		graph := sparql_mem.query_describe(&q, &targets)
+		defer sparql.result_graph_destroy(&graph)
+		return graph_result(&graph), .Ok, ""
+	}
+
 	rs.kind = .Bindings
 	names := sparql_mem.query_var_names(&q)
 	internal := sparql_mem.query_var_internal(&q)
@@ -246,6 +270,7 @@ evaluate_kvstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	query: ^sparql.Query,
 	base: string,
 	declared: []Dataset_Document,
 ) -> (
@@ -291,6 +316,31 @@ evaluate_kvstore :: proc(
 		return {}, .Failed, "the store failed while resolving the query's terms"
 	}
 
+	#partial switch query.form {
+	case .Construct:
+		template: sparql.Template
+		defer sparql.template_destroy(&template)
+		if !sparql.template_build(&template, query.template, sparql_kv.query_slots(&q)) {
+			return {}, .Unsupported, "CONSTRUCT template"
+		}
+		graph := sparql_kv.query_construct(&q, &template)
+		defer sparql.result_graph_destroy(&graph)
+		if sparql_kv.query_error(&q) != nil {
+			return {}, .Failed, "the store failed during evaluation"
+		}
+		return graph_result(&graph), .Ok, ""
+	case .Describe:
+		targets: sparql.Describe_Targets
+		defer sparql.describe_destroy(&targets)
+		sparql.describe_build(&targets, query, sparql_kv.query_slots(&q), find_kvstore, &q)
+		graph := sparql_kv.query_describe(&q, &targets)
+		defer sparql.result_graph_destroy(&graph)
+		if sparql_kv.query_error(&q) != nil {
+			return {}, .Failed, "the store failed during evaluation"
+		}
+		return graph_result(&graph), .Ok, ""
+	}
+
 	rs.kind = .Bindings
 	names := sparql_kv.query_var_names(&q)
 	internal := sparql_kv.query_var_internal(&q)
@@ -312,6 +362,19 @@ evaluate_kvstore :: proc(
 		return {}, .Failed, "the store failed during evaluation"
 	}
 	return rs, .Ok, ""
+}
+
+// A DESCRIBE clause names IRIs, and resolving one to a store ID is the
+// same non-interning lookup plan building uses. The two adapters are what
+// carry it across the backend boundary this file dispatches on.
+@(private = "file")
+find_memstore :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
+	return sparql_mem.query_find(cast(^sparql_mem.Query)data, term)
+}
+
+@(private = "file")
+find_kvstore :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
+	return sparql_kv.query_find(cast(^sparql_kv.Query)data, term)
 }
 
 // load_entry_into_kvstore mirrors load_entry_dataset (dataset.odin) for

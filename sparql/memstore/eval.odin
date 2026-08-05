@@ -188,3 +188,82 @@ query_var_names :: proc(q: ^Query) -> []string {
 query_var_internal :: proc(q: ^Query) -> []bool {
 	return q.slots.internal[:]
 }
+
+// query_slots is the prepared query's slot table, which is what a
+// CONSTRUCT template or a DESCRIBE clause is compiled against — see
+// sparql.template_build for why that has to happen after preparation.
+query_slots :: proc(q: ^Query) -> ^sparql.Var_Slots {
+	return &q.slots
+}
+
+// query_find resolves a ground term to its store ID without interning it,
+// for a DESCRIBE clause's IRIs.
+query_find :: proc(q: ^Query, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
+	return find_adapter(q.dictionary, term)
+}
+
+@(private)
+resolve_adapter :: proc(data: rawptr, id: store.Term_ID) -> rdf.Term {
+	return query_term(cast(^Query)data, id)
+}
+
+// query_construct runs the query and instantiates a CONSTRUCT template
+// once per solution (§16.2), returning the graph.
+//
+// The graph owns every term in it, deep-copied out of the dictionary, and
+// the caller frees it with sparql.result_graph_destroy. That is what lets
+// an answer outlive the store it was read from — memstore's materialized
+// terms borrow the dictionary's storage, and a result that borrowed it
+// would be a dangling one the moment the dataset went away.
+query_construct :: proc(
+	q: ^Query,
+	template: ^sparql.Template,
+	allocator := context.allocator,
+) -> sparql.Result_Graph {
+	graph := sparql.result_graph_make(allocator)
+	solution := 0
+	for {
+		row, more := query_next(q)
+		if !more {
+			break
+		}
+		sparql.construct_solution(&graph, template, row, solution, resolve_adapter, q)
+		solution += 1
+	}
+	return graph
+}
+
+// query_describe runs the query and describes every resource its DESCRIBE
+// clause names (§16.4). Ownership is the same contract as
+// query_construct's.
+query_describe :: proc(
+	q: ^Query,
+	targets: ^sparql.Describe_Targets,
+	allocator := context.allocator,
+) -> sparql.Result_Graph {
+	graph := sparql.result_graph_make(allocator)
+	subjects := make([dynamic]store.Term_ID, allocator)
+	defer delete(subjects)
+	seen := make(map[store.Term_ID]bool, allocator)
+	defer delete(seen)
+
+	sparql.describe_ground(targets, &subjects, &seen)
+	for {
+		row, more := query_next(q)
+		if !more {
+			break
+		}
+		sparql.describe_collect(targets, row, &subjects, &seen)
+	}
+	sparql.exec_describe(
+		&q.exec,
+		subjects[:],
+		&graph,
+		resolve_adapter,
+		q,
+		match_adapter,
+		next_adapter,
+		destroy_adapter,
+	)
+	return graph
+}
