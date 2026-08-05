@@ -68,6 +68,7 @@ Exec_Kind :: enum {
 	Extend,
 	Table,
 	Materialized,
+	Graph_Scan,
 }
 
 // Exec_Node is one operator, instantiated for a backend's iterator type.
@@ -136,6 +137,10 @@ Exec_Node :: struct($It: typeid) {
 	// Extend (BIND)
 	bind_slots: []int,
 	bind_exprs: []Expr,
+
+	// Graph_Scan
+	graph_slot: int,
+	graph_seen: map[store.Term_ID]bool,
 }
 
 // Exec is a plan ready to run against one dataset. work is the solution
@@ -163,6 +168,11 @@ Exec :: struct($D: typeid, $It: typeid) {
 	// out to be one the store already holds.
 	find:      Term_Finder,
 	find_data: rawptr,
+	// The root node of each EXISTS sub-plan, in the order plan building
+	// registered them. They live in the same node array as the main plan
+	// — a sub-plan is an ordinary operator tree, just one nothing pulls
+	// from until an expression asks.
+	exists_roots: [dynamic]int,
 	allocator: runtime.Allocator,
 }
 
@@ -177,6 +187,9 @@ exec_init :: proc(
 	load_data: rawptr,
 	find: Term_Finder,
 	find_data: rawptr,
+	exists_plans: []Plan,
+	exists_nodes: []^Exists_Expr,
+	exists: Exists_Runner,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
@@ -193,7 +206,17 @@ exec_init :: proc(
 	}
 	e.nodes = make([dynamic]Exec_Node(It), allocator)
 	e.root = build_node(e, plan)
-	e.stack = make([dynamic][2]int, 0, len(e.nodes) + 1, allocator)
+	e.exists_roots = make([dynamic]int, allocator)
+	for sub in exists_plans {
+		append(&e.exists_roots, build_node(e, sub))
+	}
+	// The walk never needs more frames than there are nodes, and a
+	// nested EXISTS walk shares the stack with the walk that asked for
+	// it — hence the doubling rather than a fresh allocation per call.
+	e.stack = make([dynamic][2]int, 0, 2 * len(e.nodes) + 2, allocator)
+	e.expr.exists = exists
+	e.expr.exists_data = e
+	e.expr.exists_nodes = exists_nodes
 }
 
 exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
@@ -219,8 +242,10 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 			delete(key, e.allocator)
 		}
 		delete(node.seen)
+		delete(node.graph_seen)
 	}
 	delete(e.nodes)
+	delete(e.exists_roots)
 	delete(e.stack)
 	delete(e.work, e.allocator)
 	expr_context_destroy(&e.expr)
@@ -303,10 +328,36 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.kind = .Table
 		node.table = v
 		node.set_slots = make([dynamic]int, e.allocator)
+		// A cell naming a term the store does not hold still binds it —
+		// VALUES supplies bindings, and a binding to a term the data
+		// lacks simply matches nothing later. So the term gets a name of
+		// the engine's own, exactly as a computed BIND value does. The
+		// plan is resolved in place, which is safe because a plan backs
+		// one execution.
+		for &row in v.rows {
+			for &cell in row {
+				if !cell.absent || cell.term == nil {
+					continue
+				}
+				append(&e.computed, rdf.clone_term(cell.term, e.allocator))
+				cell.id = synthetic_id(len(e.computed) - 1)
+				cell.bound = true
+				cell.absent = false
+			}
+		}
 	case ^Plan_Materialized:
 		node.kind = .Materialized
 		node.input = build_node(e, v.input)
 		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.set_slots = make([dynamic]int, e.allocator)
+	case ^Plan_Graph_Scan:
+		node.kind = .Graph_Scan
+		node.graph_slot = v.slot
+		node.graph_seen = make(map[store.Term_ID]bool, e.allocator)
+		node.iters = make([]It, 1, e.allocator)
+		node.iter_open = make([]bool, 1, e.allocator)
+		node.bound_slots = make([][4]int, 1, e.allocator)
+		node.bound_count = make([]int, 1, e.allocator)
 		node.set_slots = make([dynamic]int, e.allocator)
 	}
 	node.subtree_start = start
@@ -396,7 +447,10 @@ run :: proc(
 	row: []store.Term_ID,
 	ok: bool,
 ) {
-	clear(&e.stack)
+	// The walk is re-entrant: an EXISTS evaluated mid-solution runs its
+	// own sub-plan on this same stack, above whatever the outer walk has
+	// pushed. So the base is where this walk started, not zero.
+	base := len(e.stack)
 	at := root
 	pulling := true
 
@@ -413,7 +467,7 @@ run :: proc(
 			continue
 		}
 
-		if len(e.stack) == 0 {
+		if len(e.stack) == base {
 			return row, ok
 		}
 		frame := pop(&e.stack)
@@ -478,8 +532,58 @@ source_next :: proc(
 		return table_next(e, at)
 	case .Materialized:
 		return stored_next(e, at)
+	case .Graph_Scan:
+		return graph_scan_next(e, at, MATCH, NEXT, DESTROY)
 	}
 	return nil, false
+}
+
+// graph_scan_next yields each named graph once. It reads every quad to
+// do it, which is the cost of the store having no way to be asked what
+// graphs it holds; the seen-set keeps the answer a set.
+@(private = "file")
+graph_scan_next :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) -> (
+	row: []store.Term_ID,
+	ok: bool,
+) {
+	node := &e.nodes[at]
+	if !node.iter_open[0] {
+		node.iters[0] = MATCH(e.dataset, store.MATCH_ALL)
+		node.iter_open[0] = true
+	}
+	for {
+		release_set_slots(e, node)
+		quad, more := NEXT(&node.iters[0])
+		if !more {
+			DESTROY(&node.iters[0])
+			node.iter_open[0] = false
+			return nil, false
+		}
+		graph := quad[store.QUAD_G]
+		if graph == store.DEFAULT_GRAPH || graph in node.graph_seen {
+			continue
+		}
+		node.graph_seen[graph] = true
+		// The slot may already be bound — by a VALUES row, or by an
+		// enclosing solution — in which case this graph only counts if it
+		// agrees.
+		current := e.work[node.graph_slot]
+		if current != store.UNBOUND {
+			if current != graph {
+				continue
+			}
+			return e.work, true
+		}
+		e.work[node.graph_slot] = graph
+		append(&node.set_slots, node.graph_slot)
+		return e.work, true
+	}
 }
 
 // table_next and stored_next share a rule that is easy to miss: a stored
@@ -844,6 +948,31 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 	return synthetic_id(len(e.computed) - 1), true
 }
 
+// exec_exists answers an EXISTS: does the index-th sub-plan have a
+// solution, given the bindings currently in the row?
+//
+// The sub-plan is reset before and after. Before, because it was last
+// run against a different solution; after, because whatever it bound is
+// its own business — EXISTS is a test, and a variable it happened to
+// bind must not leak into the answer (§17.4.1.2's substitution
+// semantics, read as "the pattern is evaluated, not joined").
+exec_exists :: proc(
+	e: ^Exec($D, $It),
+	index: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) -> bool {
+	if index < 0 || index >= len(e.exists_roots) {
+		return false
+	}
+	root := e.exists_roots[index]
+	node_reset(e, root, DESTROY)
+	_, found := run(e, root, MATCH, NEXT, DESTROY)
+	node_reset(e, root, DESTROY)
+	return found
+}
+
 // exec_computed_term resolves a synthetic ID to the term it names. A
 // consumer materializing a solution asks here before it asks the store,
 // because the store has never heard of these terms.
@@ -887,6 +1016,7 @@ node_reset :: proc(e: ^Exec($D, $It), at: int, $DESTROY: proc(it: ^It)) {
 		node.row_at = 0
 		node.skipped = 0
 		node.emitted = 0
+		clear(&node.graph_seen)
 		// Deliberately not reset: a Distinct's seen-set and a
 		// Materialized node's collected rows. Both are properties of the
 		// whole sub-plan rather than of one run of it, and re-running a

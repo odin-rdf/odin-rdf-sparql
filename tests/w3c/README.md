@@ -145,8 +145,11 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-expr-ops/` | SPARQL-T-0013 | 18 |
 | `sparql10-optional-filter/` | SPARQL-T-0013 | 5 |
 | `sparql11-bind/` | SPARQL-T-0013 | 10 |
+| `sparql10-dataset/` | SPARQL-T-0013 | 12 |
+| `sparql11-exists/` | SPARQL-T-0013 | 6 |
+| `sparql11-bindings/` | SPARQL-T-0013 | 11 |
 
-That is **174 evaluation tests across sixteen directories**, each run against
+That is **203 evaluation tests across nineteen directories**, each run against
 both backends at both Term_ID widths.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs

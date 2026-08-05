@@ -230,6 +230,11 @@ Plan_Table_Cell :: struct {
 	id:     store.Term_ID,
 	bound:  bool,
 	absent: bool,
+	// The term the cell was written with, kept for the absent case: a
+	// VALUES cell supplies a binding, and a value the store has never
+	// seen is still a perfectly good binding. It borrows the query's
+	// parse, which outlives the plan.
+	term:   rdf.Term,
 }
 
 // Plan_Table is a VALUES block: an inline solution sequence. A ground
@@ -239,6 +244,26 @@ Plan_Table_Cell :: struct {
 Plan_Table :: struct {
 	rows:  [dynamic][dynamic]Plan_Table_Cell,
 	slots: [dynamic]int,
+}
+
+// Plan_Graph_Scan yields one solution per named graph, binding the slot
+// to each.
+//
+// It exists for the case the ordinary mechanism cannot cover. `GRAPH ?g
+// { P }` normally needs no operator of its own: the graph position of
+// every triple pattern in P becomes ?g's slot, and matching binds it.
+// But when P matches no triples at all — `GRAPH ?g {}`, or a GRAPH whose
+// body is only a VALUES block — there is nothing to carry the binding,
+// and the clause still ranges over the graphs. Then the graphs have to
+// be enumerated.
+//
+// The store cannot be asked for its graphs, so this scans everything and
+// keeps the distinct graph IDs. That is the third store-evidence item
+// for SPARQL-T-0019: a dataset's list of named graphs is something a
+// query engine asks for constantly and the match interface cannot
+// answer.
+Plan_Graph_Scan :: struct {
+	slot: int,
 }
 
 // Plan_Materialized is a sub-plan whose solutions are collected once,
@@ -264,6 +289,7 @@ Plan :: union {
 	^Plan_Extend,
 	^Plan_Table,
 	^Plan_Materialized,
+	^Plan_Graph_Scan,
 }
 
 // Term_Finder resolves a ground term to its store ID without interning
@@ -289,6 +315,13 @@ Plan_Builder :: struct {
 	// to the graph each solution was found in.
 	graph:       Plan_Ref,
 	unsupported: string,
+	// The EXISTS patterns met while walking the expressions, each with
+	// the sub-plan built for it. They are collected rather than nested
+	// because an expression is not part of the operator tree: EXISTS is
+	// a pattern that appears inside a value, and the executor keeps its
+	// sub-plans alongside the main one.
+	exists_nodes: [dynamic]^Exists_Expr,
+	exists_plans: [dynamic]Plan,
 	allocator:   runtime.Allocator,
 }
 
@@ -303,7 +336,47 @@ plan_builder_init :: proc(
 	b.find = find
 	b.data = data
 	b.graph = Plan_Ref{slot = -1, id = store.DEFAULT_GRAPH}
+	b.exists_nodes = make([dynamic]^Exists_Expr, allocator)
+	b.exists_plans = make([dynamic]Plan, allocator)
 	b.allocator = allocator
+}
+
+// plan_builder_destroy releases the builder's own bookkeeping. The plans
+// it produced belong to the caller.
+plan_builder_destroy :: proc(b: ^Plan_Builder) {
+	delete(b.exists_nodes)
+	delete(b.exists_plans)
+}
+
+// exists_register builds the sub-plan for an EXISTS pattern and returns
+// its index, reusing the plan if the same node has been seen before.
+exists_register :: proc(b: ^Plan_Builder, node: ^Exists_Expr) -> (index: int, ok: bool) {
+	for existing, i in b.exists_nodes {
+		if existing == node {
+			return i, true
+		}
+	}
+	// An EXISTS is evaluated inside whatever solution reaches it, so its
+	// pattern is built exactly like a correlated join's right side — and
+	// under the same restriction. A sub-pattern that cannot be probed is
+	// materialized, which is also what makes its variables scoped.
+	sub, built := plan_build(b, node.algebra)
+	if !built {
+		return -1, false
+	}
+	append(&b.exists_nodes, node)
+	append(&b.exists_plans, scoped(b, sub))
+	return len(b.exists_nodes) - 1, true
+}
+
+// exists_index returns the index registered for an EXISTS node.
+exists_index :: proc(nodes: []^Exists_Expr, node: ^Exists_Expr) -> int {
+	for existing, i in nodes {
+		if existing == node {
+			return i
+		}
+	}
+	return -1
 }
 
 // plan_build turns an algebra tree into a plan. ok is false when the
@@ -430,7 +503,16 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 			return new(Plan_Nothing, b.allocator), true
 		}
 		b.graph = ref
-		return plan_build(b, v.input)
+		inner := plan_build(b, v.input) or_return
+		if plan_ref_is_var(ref) && !plan_matches_triples(inner) {
+			scan := new(Plan_Graph_Scan, b.allocator)
+			scan.slot = ref.slot
+			node := new(Plan_Join, b.allocator)
+			node.left = scan
+			node.right = scoped(b, inner)
+			return node, true
+		}
+		return inner, true
 	case ^Alg_Extend:
 		for binding in v.bindings {
 			if !expr_check(b, binding.expr) {
@@ -566,7 +648,7 @@ probe_safe :: proc(b: ^Plan_Builder, p: Plan) -> bool {
 @(private = "file")
 probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
 	switch v in p {
-	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table:
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
 		return true
 	case ^Plan_Filter:
 		for condition in v.conditions {
@@ -581,6 +663,40 @@ probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
 		return probe_safe_under(b, v.left, bindable) && probe_safe_under(b, v.right, bindable)
 	case ^Plan_Join:
 		return probe_safe_under(b, v.left, bindable) && probe_safe_under(b, v.right, bindable)
+	}
+	return false
+}
+
+// plan_matches_triples reports whether a sub-plan has a triple pattern
+// anywhere in it — that is, whether anything in it carries the graph
+// position and can bind a GRAPH variable by matching.
+@(private = "file")
+plan_matches_triples :: proc(p: Plan) -> bool {
+	switch v in p {
+	case ^Plan_BGP:
+		return len(v.triples) > 0
+	case ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+		return false
+	case ^Plan_Filter:
+		return plan_matches_triples(v.input)
+	case ^Plan_Project:
+		return plan_matches_triples(v.input)
+	case ^Plan_Distinct:
+		return plan_matches_triples(v.input)
+	case ^Plan_Slice:
+		return plan_matches_triples(v.input)
+	case ^Plan_Extend:
+		return plan_matches_triples(v.input)
+	case ^Plan_Materialized:
+		return plan_matches_triples(v.input)
+	case ^Plan_Union:
+		return plan_matches_triples(v.left) || plan_matches_triples(v.right)
+	case ^Plan_Join:
+		return plan_matches_triples(v.left) || plan_matches_triples(v.right)
+	case ^Plan_Left_Join:
+		return plan_matches_triples(v.left) || plan_matches_triples(v.right)
+	case ^Plan_Minus:
+		return plan_matches_triples(v.left)
 	}
 	return false
 }
@@ -604,6 +720,10 @@ plan_bindable :: proc(p: Plan, out: []bool) {
 			}
 		}
 	case ^Plan_Nothing, ^Plan_Unit:
+	case ^Plan_Graph_Scan:
+		if v.slot >= 0 && v.slot < len(out) {
+			out[v.slot] = true
+		}
 	case ^Plan_Filter:
 		plan_bindable(v.input, out)
 	case ^Plan_Distinct:
@@ -674,9 +794,11 @@ build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
 			case rdf.IRI:
 				out.id, _, out.bound = ground_ref_id(b, v)
 				out.absent = !out.bound
+				out.term = v
 			case rdf.Literal:
 				out.id, _, out.bound = ground_ref_id(b, v)
 				out.absent = !out.bound
+				out.term = v
 			case nil:
 			// UNDEF: the cell binds nothing, and that is an answer.
 			case:
@@ -846,6 +968,8 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 		free(v, allocator)
 	case ^Plan_Materialized:
 		plan_destroy(v.input, allocator)
+		free(v, allocator)
+	case ^Plan_Graph_Scan:
 		free(v, allocator)
 	}
 }

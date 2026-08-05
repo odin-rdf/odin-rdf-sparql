@@ -183,6 +183,37 @@ test_eval_bind_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-bind", .Kvstore)
 }
 
+
+@(test)
+test_eval_dataset_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-dataset", .Memstore)
+}
+
+@(test)
+test_eval_dataset_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-dataset", .Kvstore)
+}
+
+@(test)
+test_eval_exists_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-exists", .Memstore)
+}
+
+@(test)
+test_eval_exists_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-exists", .Kvstore)
+}
+
+@(test)
+test_eval_bindings_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-bindings", .Memstore)
+}
+
+@(test)
+test_eval_bindings_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-bindings", .Kvstore)
+}
+
 // run_eval_suite runs every evaluation entry of a directory: load,
 // evaluate, compare. The suite's pinned entry count is asserted here too,
 // so a manifest-reader regression cannot quietly shrink what "fully

@@ -97,6 +97,16 @@ find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found:
 	return resolved, present
 }
 
+// exists_adapter is the door back into the generic executor. An
+// expression cannot call it directly — the call would complete a cycle
+// of generic instantiations that the compiler cannot close — so it goes
+// through a procedure value, which is concrete here.
+@(private)
+exists_adapter :: proc(data: rawptr, index: int) -> bool {
+	e := cast(^sparql.Exec(Session, kvstore.Match_Iterator))data
+	return sparql.exec_exists(e, index, match_adapter, next_adapter, destroy_adapter)
+}
+
 // Query is a prepared query bound to one store.
 Query :: struct {
 	session:      Session,
@@ -105,6 +115,9 @@ Query :: struct {
 	exec:         sparql.Exec(Session, kvstore.Match_Iterator),
 	materialized: [dynamic]rdf.Term,
 	unsupported:  string,
+	exists_plans: []sparql.Plan,
+	exists_nodes: []^sparql.Exists_Expr,
+	builder:      sparql.Plan_Builder,
 	allocator:    runtime.Allocator,
 }
 
@@ -127,20 +140,21 @@ query_init :: proc(
 	q.materialized = make([dynamic]rdf.Term, allocator)
 	sparql.var_slots_init(&q.slots, allocator)
 
-	builder: sparql.Plan_Builder
-	sparql.plan_builder_init(&builder, &q.slots, find_adapter, &q.session, allocator)
-	plan, built := sparql.plan_build(&builder, algebra)
+	sparql.plan_builder_init(&q.builder, &q.slots, find_adapter, &q.session, allocator)
+	plan, built := sparql.plan_build(&q.builder, algebra)
 	if !built {
-		q.unsupported = builder.unsupported
+		q.unsupported = q.builder.unsupported
 		return false
 	}
 	q.plan = plan
+	q.exists_plans = q.builder.exists_plans[:]
+	q.exists_nodes = q.builder.exists_nodes[:]
 	if q.session.err != nil {
 		sparql.plan_destroy(plan, allocator)
 		q.plan = nil
 		return false
 	}
-	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, allocator)
 	return true
 }
 
@@ -160,6 +174,10 @@ query_error :: proc(q: ^Query) -> kvstore.Error {
 query_destroy :: proc(q: ^Query) {
 	sparql.exec_destroy(&q.exec, destroy_adapter)
 	sparql.plan_destroy(q.plan, q.allocator)
+	for sub in q.exists_plans {
+		sparql.plan_destroy(sub, q.allocator)
+	}
+	sparql.plan_builder_destroy(&q.builder)
 	sparql.var_slots_destroy(&q.slots)
 	for term in q.materialized {
 		rdf.destroy_term(term, q.allocator)

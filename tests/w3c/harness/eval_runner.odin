@@ -89,8 +89,7 @@ evaluate_entry :: proc(
 	}
 
 	// CONSTRUCT and DESCRIBE build RDF graphs and arrive with
-	// SPARQL-T-0017; FROM / FROM NAMED dataset construction arrives with
-	// SPARQL-T-0013. Both are refused by name rather than attempted.
+	// SPARQL-T-0017, and are refused by name rather than attempted.
 	//
 	// ASK is here because it needs nothing the engine does not already
 	// have: its answer is whether the pattern has at least one solution.
@@ -101,11 +100,27 @@ evaluate_entry :: proc(
 	if p.query.form != .Select && p.query.form != .Ask {
 		return {}, .Unsupported, "CONSTRUCT / DESCRIBE"
 	}
-	if len(p.query.datasets) > 0 {
-		return {}, .Unsupported, "FROM / FROM NAMED"
+
+	// A query may name its own dataset. FROM documents merge into the
+	// dataset's default graph and FROM NAMED documents become named
+	// graphs — and once they are loaded that way, the engine needs to
+	// know nothing about dataset clauses: the store's default graph *is*
+	// the query's default graph, and the only named graphs present are
+	// the ones the query asked for. A query with FROM NAMED and no FROM
+	// therefore has an empty default graph, exactly as the spec says.
+	declared := make([dynamic]Dataset_Document)
+	defer {
+		for d in declared {
+			delete(d.name)
+		}
+		delete(declared)
+	}
+	for clause in p.query.datasets {
+		name := strings.trim_prefix(string(clause.iri), suite.base)
+		append(&declared, Dataset_Document{name = strings.clone(name), named = clause.named})
 	}
 
-	rs, status, detail = evaluate_algebra(suite, e, algebra, backend)
+	rs, status, detail = evaluate_algebra(suite, e, algebra, declared[:], backend)
 	if status != .Ok || p.query.form != .Ask {
 		return rs, status, detail
 	}
@@ -115,11 +130,19 @@ evaluate_entry :: proc(
 	return Result_Set{kind = .Boolean, boolean = answered}, .Ok, ""
 }
 
+// Dataset_Document is one FROM or FROM NAMED document, resolved to the
+// file name it lives under in the vendored suite.
+Dataset_Document :: struct {
+	name:  string,
+	named: bool,
+}
+
 @(private = "file")
 evaluate_algebra :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	declared: []Dataset_Document,
 	backend: Backend,
 ) -> (
 	rs: Result_Set,
@@ -128,9 +151,9 @@ evaluate_algebra :: proc(
 ) {
 	switch backend {
 	case .Memstore:
-		return evaluate_memstore(suite, e, algebra)
+		return evaluate_memstore(suite, e, algebra, declared)
 	case .Kvstore:
-		return evaluate_kvstore(suite, e, algebra)
+		return evaluate_kvstore(suite, e, algebra, declared)
 	}
 	return {}, .Failed, "unknown backend"
 }
@@ -165,6 +188,7 @@ evaluate_memstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	declared: []Dataset_Document,
 ) -> (
 	rs: Result_Set,
 	status: Eval_Status,
@@ -175,6 +199,19 @@ evaluate_memstore :: proc(
 	defer test_dataset_destroy(&td)
 	if loaded, why := load_entry_dataset(&td, suite, e); !loaded {
 		return {}, .Failed, why
+	}
+	for document in declared {
+		graph: rdf.Graph_Label
+		graph_iri: string
+		if document.named {
+			graph_iri = strings.concatenate({suite.base, document.name})
+			graph = rdf.IRI(graph_iri)
+		}
+		loaded, why := load_declared_document(&td, suite, document.name, graph)
+		delete(graph_iri)
+		if !loaded {
+			return {}, .Failed, why
+		}
 	}
 
 	q: sparql_mem.Query
@@ -207,6 +244,7 @@ evaluate_kvstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	declared: []Dataset_Document,
 ) -> (
 	rs: Result_Set,
 	status: Eval_Status,
@@ -226,6 +264,19 @@ evaluate_kvstore :: proc(
 	}
 	if loaded, why := load_entry_into_kvstore(s, suite, e); !loaded {
 		return {}, .Failed, why
+	}
+	for document in declared {
+		graph: rdf.Graph_Label
+		graph_iri: string
+		if document.named {
+			graph_iri = strings.concatenate({suite.base, document.name})
+			graph = rdf.IRI(graph_iri)
+		}
+		loaded, why := load_kv_document(s, suite, document.name, graph)
+		delete(graph_iri)
+		if !loaded {
+			return {}, .Failed, why
+		}
 	}
 
 	q: sparql_kv.Query
@@ -280,7 +331,6 @@ load_entry_into_kvstore :: proc(s: ^kvstore.Store, suite: Suite, e: Entry) -> (o
 	return true, ""
 }
 
-@(private = "file")
 load_kv_document :: proc(
 	s: ^kvstore.Store,
 	suite: Suite,

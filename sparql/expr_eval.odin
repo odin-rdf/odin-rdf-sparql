@@ -37,6 +37,10 @@ Term_Loader :: #type proc(
 	owned: bool,
 )
 
+// Exists_Runner evaluates the index-th EXISTS sub-plan against the
+// solution currently in the row, and reports whether it has one.
+Exists_Runner :: #type proc(data: rawptr, index: int) -> bool
+
 // Expr_Context is everything an expression needs beyond its own tree.
 // row is repointed at each solution; scratch collects the terms the
 // loader allocated for the current evaluation.
@@ -49,6 +53,14 @@ Expr_Context :: struct {
 	// Terms this query computed — BIND results, which the store has
 	// never seen. See the note on synthetic IDs below.
 	computed:  ^[dynamic]rdf.Term,
+	// EXISTS is a pattern inside a value, so evaluating one means running
+	// a sub-plan against the current solution. The executor supplies that
+	// as a procedure pointer: the call has to cross back into code that
+	// is generic over the backend, and a generic procedure that reaches
+	// itself directly is what hangs the compiler (SPARQL-T-0011).
+	exists:       Exists_Runner,
+	exists_data:  rawptr,
+	exists_nodes: []^Exists_Expr,
 	allocator: runtime.Allocator,
 }
 
@@ -131,7 +143,17 @@ expr_eval :: proc(ctx: ^Expr_Context, e: Expr) -> Value {
 		return eval_in(ctx, v)
 	case ^Builtin_Call:
 		return eval_builtin(ctx, v)
-	case ^Function_Call, ^Exists_Expr, ^Aggregate, ^Triple_Term:
+	case ^Exists_Expr:
+		if ctx.exists == nil {
+			return ERROR_VALUE
+		}
+		index := exists_index(ctx.exists_nodes, v)
+		if index < 0 {
+			return ERROR_VALUE
+		}
+		found := ctx.exists(ctx.exists_data, index)
+		return value_boolean(found != v.negated)
+	case ^Function_Call, ^Aggregate, ^Triple_Term:
 	// Refused at plan time (expr_check); reaching here would be a bug
 	// in that check rather than a query the engine should answer.
 	}
@@ -428,7 +450,14 @@ expr_check :: proc(b: ^Plan_Builder, e: Expr) -> bool {
 	case ^Function_Call:
 		b.unsupported = "extension function"
 	case ^Exists_Expr:
-		b.unsupported = "EXISTS"
+		if v.algebra == nil {
+			b.unsupported = "EXISTS without a translated pattern"
+			return false
+		}
+		if _, ok := exists_register(b, v); !ok {
+			return false
+		}
+		return true
 	case ^Aggregate:
 		b.unsupported = "aggregate"
 	case ^Triple_Term:
@@ -473,7 +502,12 @@ expr_within :: proc(slots: ^Var_Slots, e: Expr, bindable: []bool) -> bool {
 			}
 		}
 		return true
-	case ^Function_Call, ^Exists_Expr, ^Aggregate, ^Triple_Term:
+	case ^Exists_Expr:
+		// An EXISTS reaches outside by design: its pattern is evaluated
+		// against the enclosing solution. So a filter containing one is
+		// never safe to move under a correlated join.
+		return false
+	case ^Function_Call, ^Aggregate, ^Triple_Term:
 		return false
 	case nil:
 		return false

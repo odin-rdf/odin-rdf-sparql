@@ -65,6 +65,22 @@ load_entry_dataset :: proc(td: ^Test_Dataset, suite: Suite, e: Entry) -> (ok: bo
 	return true, ""
 }
 
+// load_declared_document loads a document a query named in a FROM or
+// FROM NAMED clause. Same mechanics as an entry's data; separate name
+// because the two come from different places — the manifest and the
+// query — and confusing them makes a dataset test very hard to read.
+load_declared_document :: proc(
+	td: ^Test_Dataset,
+	suite: Suite,
+	name: string,
+	graph: rdf.Graph_Label,
+) -> (
+	ok: bool,
+	reason: string,
+) {
+	return load_document(td, suite, name, graph)
+}
+
 // load_document loads one file into the given graph (nil for the
 // default graph), dispatching on the extension the suites use.
 @(private = "file")

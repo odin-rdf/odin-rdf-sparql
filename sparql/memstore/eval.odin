@@ -68,6 +68,16 @@ find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found:
 	return memstore.find_term(dictionary, term)
 }
 
+// exists_adapter is the door back into the generic executor. An
+// expression cannot call it directly — the call would complete a cycle
+// of generic instantiations that the compiler cannot close — so it goes
+// through a procedure value, which is concrete here.
+@(private)
+exists_adapter :: proc(data: rawptr, index: int) -> bool {
+	e := cast(^sparql.Exec(memstore.Dataset, memstore.Match_Iterator))data
+	return sparql.exec_exists(e, index, match_adapter, next_adapter, destroy_adapter)
+}
+
 // Query is a prepared query bound to one dataset: the slot table, the
 // plan, and the running execution state.
 Query :: struct {
@@ -76,6 +86,11 @@ Query :: struct {
 	exec:        sparql.Exec(memstore.Dataset, memstore.Match_Iterator),
 	dictionary:  ^memstore.Dictionary,
 	unsupported: string,
+	// The EXISTS sub-plans plan building produced, owned here and
+	// destroyed with the query.
+	exists_plans: []sparql.Plan,
+	exists_nodes: []^sparql.Exists_Expr,
+	builder:      sparql.Plan_Builder,
 	allocator:   runtime.Allocator,
 }
 
@@ -96,15 +111,16 @@ query_init :: proc(
 	q.dictionary = dictionary
 	sparql.var_slots_init(&q.slots, allocator)
 
-	builder: sparql.Plan_Builder
-	sparql.plan_builder_init(&builder, &q.slots, find_adapter, dictionary, allocator)
-	plan, built := sparql.plan_build(&builder, algebra)
+	sparql.plan_builder_init(&q.builder, &q.slots, find_adapter, dictionary, allocator)
+	plan, built := sparql.plan_build(&q.builder, algebra)
 	if !built {
-		q.unsupported = builder.unsupported
+		q.unsupported = q.builder.unsupported
 		return false
 	}
 	q.plan = plan
-	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, allocator)
+	q.exists_plans = q.builder.exists_plans[:]
+	q.exists_nodes = q.builder.exists_nodes[:]
+	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, q.exists_plans, q.exists_nodes, exists_adapter, allocator)
 	return true
 }
 
@@ -118,6 +134,10 @@ query_next :: proc(q: ^Query) -> (row: []store.Term_ID, ok: bool) {
 query_destroy :: proc(q: ^Query) {
 	sparql.exec_destroy(&q.exec, destroy_adapter)
 	sparql.plan_destroy(q.plan, q.allocator)
+	for sub in q.exists_plans {
+		sparql.plan_destroy(sub, q.allocator)
+	}
+	sparql.plan_builder_destroy(&q.builder)
 	sparql.var_slots_destroy(&q.slots)
 	q^ = {}
 }
