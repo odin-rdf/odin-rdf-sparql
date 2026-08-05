@@ -159,6 +159,10 @@ Exec :: struct($D: typeid, $It: typeid) {
 	// Terms the query computed, named by synthetic IDs. Owned here and
 	// freed with the execution.
 	computed:  [dynamic]rdf.Term,
+	// The store's non-interning lookup, used when a computed term turns
+	// out to be one the store already holds.
+	find:      Term_Finder,
+	find_data: rawptr,
 	allocator: runtime.Allocator,
 }
 
@@ -171,10 +175,14 @@ exec_init :: proc(
 	dataset: ^D,
 	load: Term_Loader,
 	load_data: rawptr,
+	find: Term_Finder,
+	find_data: rawptr,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
 	e.dataset = dataset
+	e.find = find
+	e.find_data = find_data
 	width := var_slots_count(slots)
 	e.width = width
 	e.computed = make([dynamic]rdf.Term, allocator)
@@ -430,6 +438,12 @@ start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 	#partial switch node.kind {
 	case .Union, .Left_Join, .Join:
 		return node.input if node.phase == .Need_Left else node.right
+	case .Materialized:
+		// A materialized node has an input, but only so collect_all knows
+		// what to run. During the query it is a source: descending into
+		// it would evaluate the sub-plan again, correlated — the exact
+		// thing materializing it was meant to prevent.
+		return -1
 	}
 	return node.input
 }
@@ -492,13 +506,15 @@ table_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: boo
 @(private = "file")
 merge_cells :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), cells: []Plan_Table_Cell) -> bool {
 	for cell in cells {
-		if cell.slot < 0 {
+		if cell.absent {
 			// The cell names a term the store does not hold, so nothing
-			// can match it and the row contributes nothing.
+			// can match it and the row contributes nothing. This is not
+			// UNDEF, which contributes a solution that simply leaves the
+			// variable unbound.
 			release_set_slots(e, node)
 			return false
 		}
-		if !cell.bound {
+		if !cell.bound || cell.slot < 0 {
 			continue
 		}
 		current := e.work[cell.slot]
@@ -815,6 +831,14 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 	term, rendered := value_to_term(value, e.allocator)
 	if !rendered {
 		return store.UNBOUND, false
+	}
+	// A computed term the store already holds gets the store's own ID, so
+	// a later pattern can match on it — `BIND(?o+1 AS ?z) . ?s ?p ?z` is
+	// a real query shape, and a synthetic ID would match nothing. Only a
+	// term the data does not contain needs a name of the engine's own.
+	if stored, found := e.find(e.find_data, term); found {
+		rdf.destroy_term(term, e.allocator)
+		return stored, true
 	}
 	append(&e.computed, term)
 	return synthetic_id(len(e.computed) - 1), true

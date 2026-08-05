@@ -26,6 +26,8 @@ import "core:strings"
 
 import rdf "rdf:rdf"
 
+import sparql "../../../sparql"
+
 // Result_Kind is the shape of an expectation or an answer.
 Result_Kind :: enum {
 	Bindings, // SELECT: a sequence of solutions
@@ -387,7 +389,36 @@ unify_term :: proc(a, e: rdf.Term, m: ^Mapping) -> bool {
 			unify_term(a_triple.object, e_triple.object, m) \
 		)
 	}
+	a_literal, a_is_literal := a.(rdf.Literal)
+	e_literal, e_is_literal := e.(rdf.Literal)
+	if a_is_literal && e_is_literal {
+		return literals_equivalent(a_literal, e_literal)
+	}
 	return rdf.equal_term(a, e)
+}
+
+// literals_equivalent compares two literals of the same datatype by
+// *value* where the engine interprets that datatype, and by lexical form
+// otherwise.
+//
+// This is not laxity, it is what the suites require. The DAWG writes the
+// expected result of adding two xsd:floats as "6", while XSD's canonical
+// form is "6.0E0" — and elsewhere it writes "1.0E0". No implementation
+// can match both by string, and both denote the same value. Comparing
+// within a datatype keeps the distinctions the tests are actually about:
+// "1"^^xsd:integer and "1.0"^^xsd:decimal remain different answers.
+@(private = "file")
+literals_equivalent :: proc(a, e: rdf.Literal) -> bool {
+	if a.datatype != e.datatype || !strings.equal_fold(a.language, e.language) {
+		return false
+	}
+	if a.lexical == e.lexical {
+		return true
+	}
+	a_value := sparql.value_of(a)
+	e_value := sparql.value_of(e)
+	equal, comparable := sparql.value_equal(a_value, e_value)
+	return comparable && equal
 }
 
 // graphs_isomorphic is the same search over triples: CONSTRUCT and
@@ -546,7 +577,26 @@ write_term_key :: proc(b: ^strings.Builder, term: rdf.Term) {
 		strings.write_string(b, "B*")
 	case rdf.Literal:
 		strings.write_string(b, "L\"")
-		strings.write_string(b, v.lexical)
+		// The key has to agree with literals_equivalent: two literals
+		// that compare equal must share a key, or the pruning above would
+		// refuse to pair them. So an interpreted datatype keys on its
+		// value, not on how the value was written.
+		value := sparql.value_of(v)
+		#partial switch value.kind {
+		case .Numeric:
+			if value.numeric == .Integer {
+				strings.write_i64(b, value.integer)
+			} else {
+				strings.write_f64(b, value.number, 'g')
+			}
+		case .Boolean:
+			strings.write_string(b, value.boolean ? "true" : "false")
+		case .Date_Time, .Date:
+			strings.write_f64(b, value.datetime.seconds, 'g')
+			strings.write_byte(b, value.datetime.has_tz ? 'z' : 'n')
+		case:
+			strings.write_string(b, v.lexical)
+		}
 		strings.write_string(b, "\"^^")
 		strings.write_string(b, string(v.datatype))
 		strings.write_byte(b, '@')

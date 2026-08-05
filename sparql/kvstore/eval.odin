@@ -140,7 +140,7 @@ query_init :: proc(
 		q.plan = nil
 		return false
 	}
-	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, allocator)
 	return true
 }
 

@@ -766,6 +766,11 @@ value_negate :: proc(v: Value) -> Value {
 	}
 	out := v
 	out.term = nil
+	// The negated value is a different value from the one that was read,
+	// so it must not keep the ID that one came from — carrying it would
+	// bind a variable to the un-negated term.
+	out.source = store.UNBOUND
+	out.has_source = false
 	out.integer = -v.integer
 	out.number = -v.number
 	out.datatype = numeric_datatype(v.numeric)
@@ -858,14 +863,15 @@ value_to_term :: proc(v: Value, allocator := context.allocator) -> (term: rdf.Te
 	case .Blank_Node:
 		return rdf.Blank_Node(strings.clone(v.text, allocator)), true
 	case .Boolean:
-		return rdf.literal_typed(strings.clone(v.boolean ? "true" : "false", allocator), XSD_BOOLEAN), true
+		return owned_literal(v.boolean ? "true" : "false", XSD_BOOLEAN, "", allocator), true
 	case .Simple_String:
-		return rdf.literal_plain(strings.clone(v.text, allocator)), true
+		return owned_literal(v.text, XSD_STRING, "", allocator), true
 	case .Lang_String:
-		return rdf.literal_lang(strings.clone(v.text, allocator), strings.clone(v.language, allocator)), true
+		return owned_literal(v.text, rdf.RDF_LANG_STRING, v.language, allocator), true
 	case .Numeric:
 		lexical := numeric_lexical(v, allocator)
-		return rdf.literal_typed(lexical, numeric_datatype(v.numeric)), true
+		defer delete(lexical, allocator)
+		return owned_literal(lexical, numeric_datatype(v.numeric), "", allocator), true
 	}
 	// A value that came from the store keeps whatever term it had —
 	// dates, dateTimes, and the datatypes the engine does not interpret
@@ -874,6 +880,20 @@ value_to_term :: proc(v: Value, allocator := context.allocator) -> (term: rdf.Te
 		return rdf.clone_term(v.term, allocator), true
 	}
 	return nil, false
+}
+
+// owned_literal builds a literal that owns every string in it —
+// including the datatype IRI, which is otherwise a compile-time constant.
+// rdf.destroy_term frees all three, so a term that borrows any of them
+// cannot be destroyed, and a computed term must be destroyable: it is
+// held for the life of the query and released with it.
+@(private = "file")
+owned_literal :: proc(lexical: string, datatype: rdf.IRI, language: string, allocator: runtime.Allocator) -> rdf.Term {
+	return rdf.Literal {
+		lexical = strings.clone(lexical, allocator),
+		datatype = rdf.IRI(strings.clone(string(datatype), allocator)),
+		language = strings.clone(language, allocator),
+	}
 }
 
 // numeric_lexical writes a number in its datatype's canonical form.

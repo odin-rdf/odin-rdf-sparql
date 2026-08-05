@@ -158,6 +158,18 @@ translate_query :: proc(p: ^Parser, q: ^Query) -> Algebra {
 	return g
 }
 
+// group_has_own_filter reports whether a group pattern carries a FILTER
+// among its own elements, as opposed to inside one of its subgroups.
+@(private = "file")
+group_has_own_filter :: proc(g: ^Group_Pattern) -> bool {
+	for element in g.elements {
+		if _, is_filter := element.(^Filter_Pattern); is_filter {
+			return true
+		}
+	}
+	return false
+}
+
 // uses_grouping reports whether §18.2.4.1 applies: explicit GROUP BY,
 // or an aggregate anywhere aggregates may appear.
 @(private = "file")
@@ -216,10 +228,20 @@ translate_group_pattern :: proc(p: ^Parser, g: ^Group_Pattern) -> Algebra {
 		case ^Optional_Pattern:
 			// §18.2.2.6: OPTIONAL{Filter(F, A)} → LeftJoin(G, A, F) —
 			// the inner filter's condition list moves onto the join.
+			//
+			// Only a FILTER that is an element of the OPTIONAL's *own*
+			// group moves. A filter inside a nested group belongs to that
+			// group and stays there, and the difference is observable:
+			// hoisted, the condition sees the left side's bindings and can
+			// match; left in place, its variables are out of scope and it
+			// errors. The DAWG ships both expectations for the same query
+			// (optional-filter-005 "simplified" and "not-simplified"),
+			// which is how the distinction gets tested.
 			inner := translate_group_pattern(p, v.group)
 			lj := new(Alg_Left_Join, p.allocator)
 			lj.left = acc if acc != nil else unit_table(p)
-			if inner_filter, has_filter := inner.(^Alg_Filter); has_filter {
+			inner_filter, has_filter := inner.(^Alg_Filter)
+			if has_filter && group_has_own_filter(v.group) {
 				lj.conditions = inner_filter.conditions
 				lj.right = inner_filter.input
 				free(inner_filter, p.allocator)

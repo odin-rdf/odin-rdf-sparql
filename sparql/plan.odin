@@ -220,11 +220,16 @@ Plan_Extend :: struct {
 	input:    Plan,
 }
 
-// Plan_Table_Cell is one cell of a VALUES row; bound=false is UNDEF.
+// Plan_Table_Cell is one cell of a VALUES row. Three states, and the
+// difference between the last two matters: `bound` is a term to bind,
+// not-bound-not-absent is UNDEF (bind nothing, which is a perfectly good
+// solution), and `absent` is a term the store does not hold, which makes
+// the whole row unmatchable.
 Plan_Table_Cell :: struct {
-	slot:  int,
-	id:    store.Term_ID,
-	bound: bool,
+	slot:   int,
+	id:     store.Term_ID,
+	bound:  bool,
+	absent: bool,
 }
 
 // Plan_Table is a VALUES block: an inline solution sequence. A ground
@@ -315,7 +320,11 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		return build_table(b, v)
 	case ^Alg_Join:
 		left := plan_build(b, v.left) or_return
-		right := plan_build(b, v.right) or_return
+		right, right_ok := plan_build(b, v.right)
+		if !right_ok {
+			plan_destroy(left, b.allocator)
+			return nil, false
+		}
 		return join_plans(b, left, right)
 	case ^Alg_Project:
 		input := plan_build(b, v.input) or_return
@@ -352,10 +361,18 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 			}
 		}
 		left := plan_build(b, v.left) or_return
-		right := plan_build(b, v.right) or_return
+		right, right_ok := plan_build(b, v.right)
+		if !right_ok {
+			// The left side is already built; a failure on the right
+			// leaves it with no owner unless it is released here.
+			plan_destroy(left, b.allocator)
+			return nil, false
+		}
 		node := new(Plan_Left_Join, b.allocator)
 		node.left = left
-		node.right = right
+		// The right side of an OPTIONAL is correlated for the same
+		// reason, and under the same restriction, as a join's.
+		node.right = scoped(b, right)
 		node.conditions = make([dynamic]Expr, b.allocator)
 		for condition in v.conditions {
 			append(&node.conditions, condition)
@@ -377,14 +394,22 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		return filter, true
 	case ^Alg_Union:
 		left := plan_build(b, v.left) or_return
-		right := plan_build(b, v.right) or_return
+		right, right_ok := plan_build(b, v.right)
+		if !right_ok {
+			plan_destroy(left, b.allocator)
+			return nil, false
+		}
 		node := new(Plan_Union, b.allocator)
 		node.left = left
 		node.right = right
 		return node, true
 	case ^Alg_Minus:
 		left := plan_build(b, v.left) or_return
-		right := plan_build(b, v.right) or_return
+		right, right_ok := plan_build(b, v.right)
+		if !right_ok {
+			plan_destroy(left, b.allocator)
+			return nil, false
+		}
 		materialized := new(Plan_Materialized, b.allocator)
 		materialized.input = right
 		node := new(Plan_Minus, b.allocator)
@@ -446,17 +471,24 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 @(private = "file")
 join_plans :: proc(b: ^Plan_Builder, left, right: Plan) -> (p: Plan, ok: bool) {
 	// A join with the unit table is the other side, unchanged.
+	// Each of these simplifications drops one side, which has to be
+	// released — plan nodes are allocated as they are built, not at the
+	// end, so a discarded sub-plan is a leak unless it is freed here.
 	if _, is_unit := left.(^Plan_Unit); is_unit {
+		plan_destroy(left, b.allocator)
 		return right, true
 	}
 	if _, is_unit := right.(^Plan_Unit); is_unit {
+		plan_destroy(right, b.allocator)
 		return left, true
 	}
 	// A join with an unsatisfiable side is unsatisfiable.
 	if _, is_nothing := left.(^Plan_Nothing); is_nothing {
+		plan_destroy(right, b.allocator)
 		return left, true
 	}
 	if _, is_nothing := right.(^Plan_Nothing); is_nothing {
+		plan_destroy(left, b.allocator)
 		return right, true
 	}
 	left_bgp, left_is_bgp := left.(^Plan_BGP)
@@ -481,17 +513,130 @@ join_plans :: proc(b: ^Plan_Builder, left, right: Plan) -> (p: Plan, ok: bool) {
 	return node, true
 }
 
-// scoped wraps a sub-plan whose evaluation must not see the enclosing
-// solution's bindings.
+// scoped decides how a join's right side is evaluated, and it is the
+// most consequential decision in plan building.
+//
+// Running the right side with the left's bindings already in the row —
+// correlating it — is what turns a join into an index probe, and it is
+// what makes this engine fast. It is also *wrong* in general. SPARQL
+// evaluates a join's operands independently and then merges compatible
+// solutions; pre-binding a variable changes what the right side computes
+// unless the right side is a pure pattern, where restricting the search
+// and filtering the results come to the same thing.
+//
+// Where it is not the same thing:
+//
+//   - `{ :x :p ?v } { FILTER(?v = 1) }` — inside the second group ?v is
+//     not in scope, so the filter errors and the group has no solutions.
+//     Correlated, the filter sees ?v bound and succeeds.
+//   - `?X :name "paul" { ?Y :name "george" OPTIONAL { ?X :email ?Z } }` —
+//     evaluated independently the OPTIONAL binds ?X to whoever has an
+//     email, and the join then fails on the mismatch. Correlated, the
+//     OPTIONAL is restricted to paul's email, finds none, and emits the
+//     left row — a solution the spec does not have.
+//
+// So a right side is correlated only when it is built from patterns
+// (basic graph patterns, unions and joins of them, inline tables), plus
+// filters whose variables the subtree itself binds. Anything else —
+// OPTIONAL, MINUS, BIND, a subquery's projection — is materialized and
+// merged. See probe_safe.
 @(private = "file")
 scoped :: proc(b: ^Plan_Builder, p: Plan) -> Plan {
-	#partial switch v in p {
-	case ^Plan_Project, ^Plan_Distinct, ^Plan_Slice:
-		node := new(Plan_Materialized, b.allocator)
-		node.input = p
-		return node
+	if probe_safe(b, p) {
+		return p
 	}
-	return p
+	node := new(Plan_Materialized, b.allocator)
+	node.input = p
+	return node
+}
+
+// probe_safe reports whether pre-binding a variable can change what a
+// sub-plan computes. A pure pattern is safe: matching with a binding
+// already in place yields exactly the solutions that matching without it
+// and then filtering would. A filter is safe only if every variable it
+// mentions is one the sub-plan itself binds — otherwise the enclosing
+// bindings are the difference between a type error and a value.
+@(private = "file")
+probe_safe :: proc(b: ^Plan_Builder, p: Plan) -> bool {
+	bindable := make([]bool, var_slots_count(b.slots), context.temp_allocator)
+	plan_bindable(p, bindable)
+	return probe_safe_under(b, p, bindable)
+}
+
+@(private = "file")
+probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
+	switch v in p {
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table:
+		return true
+	case ^Plan_Filter:
+		for condition in v.conditions {
+			if !expr_within(b.slots, condition, bindable) {
+				return false
+			}
+		}
+		return probe_safe_under(b, v.input, bindable)
+	case ^Plan_Project, ^Plan_Distinct, ^Plan_Slice, ^Plan_Extend, ^Plan_Left_Join, ^Plan_Minus, ^Plan_Materialized:
+		return false
+	case ^Plan_Union:
+		return probe_safe_under(b, v.left, bindable) && probe_safe_under(b, v.right, bindable)
+	case ^Plan_Join:
+		return probe_safe_under(b, v.left, bindable) && probe_safe_under(b, v.right, bindable)
+	}
+	return false
+}
+
+// plan_bindable marks the slots a sub-plan can bind on its own.
+@(private = "file")
+plan_bindable :: proc(p: Plan, out: []bool) {
+	switch v in p {
+	case ^Plan_BGP:
+		for triple in v.triples {
+			for position in triple {
+				if plan_ref_is_var(position) && position.slot < len(out) {
+					out[position.slot] = true
+				}
+			}
+		}
+	case ^Plan_Table:
+		for slot in v.slots {
+			if slot >= 0 && slot < len(out) {
+				out[slot] = true
+			}
+		}
+	case ^Plan_Nothing, ^Plan_Unit:
+	case ^Plan_Filter:
+		plan_bindable(v.input, out)
+	case ^Plan_Distinct:
+		plan_bindable(v.input, out)
+	case ^Plan_Slice:
+		plan_bindable(v.input, out)
+	case ^Plan_Materialized:
+		plan_bindable(v.input, out)
+	case ^Plan_Project:
+		for slot in v.slots {
+			if slot >= 0 && slot < len(out) {
+				out[slot] = true
+			}
+		}
+	case ^Plan_Extend:
+		plan_bindable(v.input, out)
+		for slot in v.slots {
+			if slot >= 0 && slot < len(out) {
+				out[slot] = true
+			}
+		}
+	case ^Plan_Union:
+		plan_bindable(v.left, out)
+		plan_bindable(v.right, out)
+	case ^Plan_Join:
+		plan_bindable(v.left, out)
+		plan_bindable(v.right, out)
+	case ^Plan_Left_Join:
+		plan_bindable(v.left, out)
+		plan_bindable(v.right, out)
+	case ^Plan_Minus:
+		plan_bindable(v.left, out)
+	}
 }
 
 // graph_ref resolves a GRAPH clause's graph designator: a variable
@@ -528,10 +673,12 @@ build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
 			#partial switch v in cell {
 			case rdf.IRI:
 				out.id, _, out.bound = ground_ref_id(b, v)
+				out.absent = !out.bound
 			case rdf.Literal:
 				out.id, _, out.bound = ground_ref_id(b, v)
+				out.absent = !out.bound
 			case nil:
-			// UNDEF: the cell stays unbound.
+			// UNDEF: the cell binds nothing, and that is an answer.
 			case:
 				delete(row)
 				for built in table.rows {
@@ -542,13 +689,6 @@ build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
 				free(table, b.allocator)
 				b.unsupported = "VALUES cell"
 				return nil, false
-			}
-			if !out.bound {
-				// A term the store does not hold: this row can bind the
-				// variable to nothing that any pattern will match. Marking
-				// the cell unmatchable is not the same as UNDEF, so the
-				// row is dropped instead.
-				out.slot = -1
 			}
 			append(&row, out)
 		}

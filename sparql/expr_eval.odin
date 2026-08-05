@@ -438,3 +438,45 @@ expr_check :: proc(b: ^Plan_Builder, e: Expr) -> bool {
 	}
 	return false
 }
+
+// expr_within reports whether every variable an expression mentions is
+// one the given set of slots can bind. It is what decides whether a
+// filter may be evaluated with an enclosing solution's bindings already
+// in place (see probe_safe in plan.odin): a filter over variables its own
+// sub-plan binds means the same thing either way, and one that reaches
+// outside does not.
+expr_within :: proc(slots: ^Var_Slots, e: Expr, bindable: []bool) -> bool {
+	switch v in e {
+	case Var:
+		slot, found := var_slot_lookup(slots, v.name)
+		return found && slot < len(bindable) && bindable[slot]
+	case rdf.IRI, rdf.Literal:
+		return true
+	case ^Binary_Expr:
+		return expr_within(slots, v.left, bindable) && expr_within(slots, v.right, bindable)
+	case ^Unary_Expr:
+		return expr_within(slots, v.operand, bindable)
+	case ^In_Expr:
+		if !expr_within(slots, v.value, bindable) {
+			return false
+		}
+		for item in v.list {
+			if !expr_within(slots, item, bindable) {
+				return false
+			}
+		}
+		return true
+	case ^Builtin_Call:
+		for arg in v.args {
+			if !expr_within(slots, arg, bindable) {
+				return false
+			}
+		}
+		return true
+	case ^Function_Call, ^Exists_Expr, ^Aggregate, ^Triple_Term:
+		return false
+	case nil:
+		return false
+	}
+	return false
+}

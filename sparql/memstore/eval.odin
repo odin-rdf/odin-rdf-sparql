@@ -104,7 +104,7 @@ query_init :: proc(
 		return false
 	}
 	q.plan = plan
-	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, allocator)
 	return true
 }
 

@@ -141,3 +141,16 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-open-world/` | SPARQL-T-0013 | 18 |
 | `sparql10-optional/` | SPARQL-T-0013 | 7 |
 | `sparql10-reduced/` | SPARQL-T-0013 | 2 |
+| `sparql10-algebra/` | SPARQL-T-0013 | 14 |
+| `sparql10-expr-ops/` | SPARQL-T-0013 | 18 |
+| `sparql10-optional-filter/` | SPARQL-T-0013 | 5 |
+| `sparql11-bind/` | SPARQL-T-0013 | 10 |
+
+That is **174 evaluation tests across sixteen directories**, each run against
+both backends at both Term_ID widths.
+
+`harness/zz_survey_test.odin` runs *every* vendored directory and logs
+pass/mismatch/unsupported counts without asserting anything. It is a
+development instrument rather than a guard: it is what turns "which
+directory should this task enable" into a measurement, and setting its
+`DETAIL` list prints the got/want of a directory's mismatches.
