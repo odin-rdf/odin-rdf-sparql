@@ -177,6 +177,73 @@ Plan_Slice :: struct {
 	input:  Plan,
 }
 
+// Plan_Union is the binary Union of §18.5: every solution of the left,
+// then every solution of the right.
+Plan_Union :: struct {
+	left, right: Plan,
+}
+
+// Plan_Left_Join is OPTIONAL. The right side is evaluated once per left
+// solution with the left's bindings already in the row, so it probes
+// rather than scans; a left solution the right cannot extend is emitted
+// as it stands. conditions are the filter the translation hoisted into
+// the LeftJoin (§18.2.2.6) and belong to the *match*, not to the output:
+// a right solution failing them is not a match, which is why the
+// condition cannot simply be a Filter above the join.
+Plan_Left_Join :: struct {
+	left, right: Plan,
+	conditions:  [dynamic]Expr,
+}
+
+// Plan_Minus removes left solutions that are compatible with some right
+// solution *and* share a variable with it (§18.5's Minus).
+//
+// Unlike OPTIONAL, the right side is evaluated independently — MINUS's
+// variables are not in scope on the left — so it cannot probe with the
+// left's bindings and is materialized once instead.
+Plan_Minus :: struct {
+	left, right: Plan,
+}
+
+// Plan_Join is the general join, for the pairs plan building cannot
+// merge into one basic graph pattern. Correlated: the right side runs
+// once per left solution with the left's bindings in place.
+Plan_Join :: struct {
+	left, right: Plan,
+}
+
+// Plan_Extend is BIND and the SELECT expressions: bind an expression's
+// value to a slot, in order, each able to see the ones before it.
+Plan_Extend :: struct {
+	slots:    [dynamic]int,
+	exprs:    [dynamic]Expr,
+	input:    Plan,
+}
+
+// Plan_Table_Cell is one cell of a VALUES row; bound=false is UNDEF.
+Plan_Table_Cell :: struct {
+	slot:  int,
+	id:    store.Term_ID,
+	bound: bool,
+}
+
+// Plan_Table is a VALUES block: an inline solution sequence. A ground
+// term the store does not hold makes its cell unmatchable rather than
+// its row absent — VALUES supplies bindings, and a binding to a term the
+// data cannot contain simply joins with nothing.
+Plan_Table :: struct {
+	rows:  [dynamic][dynamic]Plan_Table_Cell,
+	slots: [dynamic]int,
+}
+
+// Plan_Materialized is a sub-plan whose solutions are collected once,
+// before the query runs, because its consumer needs them independently
+// of the enclosing bindings: MINUS's right side, and a subquery, whose
+// variables are scoped to itself.
+Plan_Materialized :: struct {
+	input: Plan,
+}
+
 Plan :: union {
 	^Plan_BGP,
 	^Plan_Nothing,
@@ -185,6 +252,13 @@ Plan :: union {
 	^Plan_Distinct,
 	^Plan_Slice,
 	^Plan_Filter,
+	^Plan_Union,
+	^Plan_Left_Join,
+	^Plan_Minus,
+	^Plan_Join,
+	^Plan_Extend,
+	^Plan_Table,
+	^Plan_Materialized,
 }
 
 // Term_Finder resolves a ground term to its store ID without interning
@@ -204,7 +278,11 @@ Plan_Builder :: struct {
 	slots:       ^Var_Slots,
 	find:        Term_Finder,
 	data:        rawptr,
-	graph:       store.Term_ID,
+	// The graph triple patterns match in. Outside a GRAPH clause it is
+	// the default graph; inside one it is that clause's IRI or, for
+	// GRAPH ?g, the variable's slot — which is how ?g comes back bound
+	// to the graph each solution was found in.
+	graph:       Plan_Ref,
 	unsupported: string,
 	allocator:   runtime.Allocator,
 }
@@ -219,7 +297,7 @@ plan_builder_init :: proc(
 	b.slots = slots
 	b.find = find
 	b.data = data
-	b.graph = store.DEFAULT_GRAPH
+	b.graph = Plan_Ref{slot = -1, id = store.DEFAULT_GRAPH}
 	b.allocator = allocator
 }
 
@@ -234,8 +312,7 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		if v.unit {
 			return new(Plan_Unit, b.allocator), true
 		}
-		b.unsupported = "VALUES"
-		return nil, false
+		return build_table(b, v)
 	case ^Alg_Join:
 		left := plan_build(b, v.left) or_return
 		right := plan_build(b, v.right) or_return
@@ -269,7 +346,21 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 	case ^Alg_Path:
 		b.unsupported = "property path"
 	case ^Alg_Left_Join:
-		b.unsupported = "OPTIONAL"
+		for condition in v.conditions {
+			if !expr_check(b, condition) {
+				return nil, false
+			}
+		}
+		left := plan_build(b, v.left) or_return
+		right := plan_build(b, v.right) or_return
+		node := new(Plan_Left_Join, b.allocator)
+		node.left = left
+		node.right = right
+		node.conditions = make([dynamic]Expr, b.allocator)
+		for condition in v.conditions {
+			append(&node.conditions, condition)
+		}
+		return node, true
 	case ^Alg_Filter:
 		for condition in v.conditions {
 			if !expr_check(b, condition) {
@@ -285,13 +376,52 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		filter.input = input
 		return filter, true
 	case ^Alg_Union:
-		b.unsupported = "UNION"
+		left := plan_build(b, v.left) or_return
+		right := plan_build(b, v.right) or_return
+		node := new(Plan_Union, b.allocator)
+		node.left = left
+		node.right = right
+		return node, true
 	case ^Alg_Minus:
-		b.unsupported = "MINUS"
+		left := plan_build(b, v.left) or_return
+		right := plan_build(b, v.right) or_return
+		materialized := new(Plan_Materialized, b.allocator)
+		materialized.input = right
+		node := new(Plan_Minus, b.allocator)
+		node.left = left
+		node.right = materialized
+		return node, true
 	case ^Alg_Graph:
-		b.unsupported = "GRAPH"
+		// GRAPH swaps the graph position every triple pattern below
+		// matches in, and restores it afterwards: the clause is scoped,
+		// and a pattern outside it still means the default graph.
+		outer := b.graph
+		defer b.graph = outer
+		ref, ref_ok, present := graph_ref(b, v.graph)
+		if !ref_ok {
+			return nil, false
+		}
+		if !present {
+			return new(Plan_Nothing, b.allocator), true
+		}
+		b.graph = ref
+		return plan_build(b, v.input)
 	case ^Alg_Extend:
-		b.unsupported = "BIND"
+		for binding in v.bindings {
+			if !expr_check(b, binding.expr) {
+				return nil, false
+			}
+		}
+		input := plan_build(b, v.input) or_return
+		node := new(Plan_Extend, b.allocator)
+		node.slots = make([dynamic]int, b.allocator)
+		node.exprs = make([dynamic]Expr, b.allocator)
+		for binding in v.bindings {
+			append(&node.slots, var_slot(b.slots, binding.v.name))
+			append(&node.exprs, binding.expr)
+		}
+		node.input = input
+		return node, true
 	case ^Alg_Group:
 		b.unsupported = "GROUP BY"
 	case ^Alg_Order:
@@ -337,10 +467,100 @@ join_plans :: proc(b: ^Plan_Builder, left, right: Plan) -> (p: Plan, ok: bool) {
 		}
 		clear(&left_bgp.order)
 		join_order(left_bgp)
+		// The right pattern's node has been absorbed, not kept.
+		discard_bgp(right_bgp, b.allocator)
 		return left_bgp, true
 	}
-	b.unsupported = "join of a non-basic pattern (subquery)"
-	return nil, false
+	node := new(Plan_Join, b.allocator)
+	node.left = left
+	// A side that establishes its own scope — a subquery, which shows up
+	// as a projection — cannot be correlated: its variables are bound
+	// inside it and the enclosing solution must not reach in. Such a side
+	// is materialized once and joined against.
+	node.right = scoped(b, right)
+	return node, true
+}
+
+// scoped wraps a sub-plan whose evaluation must not see the enclosing
+// solution's bindings.
+@(private = "file")
+scoped :: proc(b: ^Plan_Builder, p: Plan) -> Plan {
+	#partial switch v in p {
+	case ^Plan_Project, ^Plan_Distinct, ^Plan_Slice:
+		node := new(Plan_Materialized, b.allocator)
+		node.input = p
+		return node
+	}
+	return p
+}
+
+// graph_ref resolves a GRAPH clause's graph designator: a variable
+// binds to whichever graph matched, an IRI names one.
+@(private = "file")
+graph_ref :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (ref: Plan_Ref, ok: bool, present: bool) {
+	#partial switch v in node {
+	case Var:
+		return Plan_Ref{slot = var_slot(b.slots, v.name)}, true, true
+	case rdf.IRI:
+		return ground_ref(b, v)
+	}
+	b.unsupported = "GRAPH designator"
+	return {}, false, false
+}
+
+@(private = "file")
+build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
+	table := new(Plan_Table, b.allocator)
+	table.rows = make([dynamic][dynamic]Plan_Table_Cell, b.allocator)
+	table.slots = make([dynamic]int, b.allocator)
+	for variable in t.vars {
+		append(&table.slots, var_slot(b.slots, variable.name))
+	}
+	for source_row in t.rows {
+		row := make([dynamic]Plan_Table_Cell, b.allocator)
+		for cell, i in source_row {
+			if i >= len(table.slots) {
+				break
+			}
+			out := Plan_Table_Cell {
+				slot = table.slots[i],
+			}
+			#partial switch v in cell {
+			case rdf.IRI:
+				out.id, _, out.bound = ground_ref_id(b, v)
+			case rdf.Literal:
+				out.id, _, out.bound = ground_ref_id(b, v)
+			case nil:
+			// UNDEF: the cell stays unbound.
+			case:
+				delete(row)
+				for built in table.rows {
+					delete(built)
+				}
+				delete(table.rows)
+				delete(table.slots)
+				free(table, b.allocator)
+				b.unsupported = "VALUES cell"
+				return nil, false
+			}
+			if !out.bound {
+				// A term the store does not hold: this row can bind the
+				// variable to nothing that any pattern will match. Marking
+				// the cell unmatchable is not the same as UNDEF, so the
+				// row is dropped instead.
+				out.slot = -1
+			}
+			append(&row, out)
+		}
+		append(&table.rows, row)
+	}
+	return table, true
+}
+
+@(private = "file")
+ground_ref_id :: proc(b: ^Plan_Builder, term: rdf.Term) -> (id: store.Term_ID, ok: bool, present: bool) {
+	ref, ref_ok, ref_present := ground_ref(b, term)
+	return ref.id, ref_ok, ref_present
 }
 
 @(private = "file")
@@ -366,7 +586,7 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 			}
 			t[i] = ref
 		}
-		t[store.QUAD_G] = Plan_Ref{slot = -1, id = b.graph}
+		t[store.QUAD_G] = b.graph
 		append(&plan.triples, t)
 	}
 	join_order(plan)
@@ -453,6 +673,38 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 		free(v, allocator)
 	case ^Plan_Filter:
 		delete(v.conditions)
+		plan_destroy(v.input, allocator)
+		free(v, allocator)
+	case ^Plan_Union:
+		plan_destroy(v.left, allocator)
+		plan_destroy(v.right, allocator)
+		free(v, allocator)
+	case ^Plan_Left_Join:
+		delete(v.conditions)
+		plan_destroy(v.left, allocator)
+		plan_destroy(v.right, allocator)
+		free(v, allocator)
+	case ^Plan_Minus:
+		plan_destroy(v.left, allocator)
+		plan_destroy(v.right, allocator)
+		free(v, allocator)
+	case ^Plan_Join:
+		plan_destroy(v.left, allocator)
+		plan_destroy(v.right, allocator)
+		free(v, allocator)
+	case ^Plan_Extend:
+		delete(v.slots)
+		delete(v.exprs)
+		plan_destroy(v.input, allocator)
+		free(v, allocator)
+	case ^Plan_Table:
+		for row in v.rows {
+			delete(row)
+		}
+		delete(v.rows)
+		delete(v.slots)
+		free(v, allocator)
+	case ^Plan_Materialized:
 		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	}

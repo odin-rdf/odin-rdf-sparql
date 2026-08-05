@@ -31,11 +31,14 @@
 // would make those unanswerable.
 package sparql
 
+import "base:runtime"
+
 import "core:math"
 import "core:strconv"
 import "core:strings"
 
 import rdf "rdf:rdf"
+import store "store:store"
 
 XSD :: "http://www.w3.org/2001/XMLSchema#"
 XSD_STRING :: rdf.IRI(XSD + "string")
@@ -101,6 +104,11 @@ Date_Time :: struct {
 
 Value :: struct {
 	kind:     Value_Kind,
+	// The store ID this value was read from, when it was read from one.
+	// A solution row holds IDs, so binding a variable to an expression
+	// result needs the ID back — see bindable_id in exec.odin.
+	source:     store.Term_ID,
+	has_source: bool,
 	numeric:  Numeric_Kind,
 	term:     rdf.Term, // the RDF term this came from, where there is one
 	integer:  i64,
@@ -764,7 +772,6 @@ value_negate :: proc(v: Value) -> Value {
 	return out
 }
 
-@(private = "file")
 numeric_datatype :: proc(kind: Numeric_Kind) -> rdf.IRI {
 	switch kind {
 	case .Integer:
@@ -834,4 +841,67 @@ langmatches :: proc(tag, range: string) -> bool {
 		return false
 	}
 	return len(tag) == len(range) || tag[len(range)] == '-'
+}
+
+// value_to_term renders a computed value back into an RDF term, in the
+// datatype's canonical lexical form. Needed by BIND: a solution row
+// holds term IDs, so a value the store has never seen has to become a
+// term before it can be bound to a variable.
+//
+// The caller owns the returned term.
+value_to_term :: proc(v: Value, allocator := context.allocator) -> (term: rdf.Term, ok: bool) {
+	#partial switch v.kind {
+	case .Error, .Unbound:
+		return nil, false
+	case .IRI:
+		return rdf.IRI(strings.clone(v.text, allocator)), true
+	case .Blank_Node:
+		return rdf.Blank_Node(strings.clone(v.text, allocator)), true
+	case .Boolean:
+		return rdf.literal_typed(strings.clone(v.boolean ? "true" : "false", allocator), XSD_BOOLEAN), true
+	case .Simple_String:
+		return rdf.literal_plain(strings.clone(v.text, allocator)), true
+	case .Lang_String:
+		return rdf.literal_lang(strings.clone(v.text, allocator), strings.clone(v.language, allocator)), true
+	case .Numeric:
+		lexical := numeric_lexical(v, allocator)
+		return rdf.literal_typed(lexical, numeric_datatype(v.numeric)), true
+	}
+	// A value that came from the store keeps whatever term it had —
+	// dates, dateTimes, and the datatypes the engine does not interpret
+	// are never *computed*, only carried.
+	if v.term != nil {
+		return rdf.clone_term(v.term, allocator), true
+	}
+	return nil, false
+}
+
+// numeric_lexical writes a number in its datatype's canonical form.
+// xsd:double and xsd:float use exponent notation, which is what the
+// expected results of the operator suites are written in.
+@(private = "file")
+numeric_lexical :: proc(v: Value, allocator: runtime.Allocator) -> string {
+	buf: [64]byte
+	switch v.numeric {
+	case .Integer:
+		return strings.clone(strconv.write_int(buf[:], v.integer, 10), allocator)
+	case .Decimal:
+		text := strip_plus(strconv.write_float(buf[:], v.number, 'f', -1, 64))
+		if !strings.contains(text, ".") {
+			return strings.concatenate({text, ".0"}, allocator)
+		}
+		return strings.clone(text, allocator)
+	case .Float, .Double:
+		return strings.clone(strip_plus(strconv.write_float(buf[:], v.number, 'E', -1, 64)), allocator)
+	case .None:
+	}
+	return strings.clone("", allocator)
+}
+
+@(private = "file")
+strip_plus :: proc(s: string) -> string {
+	if len(s) > 0 && s[0] == '+' {
+		return s[1:]
+	}
+	return s
 }

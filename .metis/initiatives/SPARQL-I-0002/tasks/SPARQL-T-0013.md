@@ -4,14 +4,14 @@ level: task
 title: "Algebra operators: OPTIONAL, UNION, MINUS, BIND, VALUES, GRAPH, subqueries"
 short_code: "SPARQL-T-0013"
 created_at: 2026-08-05T15:15:36.690800+00:00
-updated_at: 2026-08-05T15:15:36.690800+00:00
+updated_at: 2026-08-05T18:02:25.087049+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/active"
 
 
 exit_criteria_met: false
@@ -27,6 +27,8 @@ initiative_id: SPARQL-I-0002
 ## Objective **[REQUIRED]**
 
 The remaining non-blocking algebra operators, completing the operator tree for SELECT queries without aggregation/ordering: leftjoin (OPTIONAL, with the filter-scope semantics §18.2 assigns it), union, minus (with the shared-variable/disjoint-domain rules), extend (BIND), VALUES (join with the inline table), GRAPH (named-graph selection with both constant and variable graph terms), EXISTS/NOT EXISTS (pattern evaluation from inside expressions, per the spec's substitution semantics), projection, DISTINCT/REDUCED, slice (LIMIT/OFFSET), and subqueries (evaluated bottom-up with projection isolation).
+
+## Acceptance Criteria
 
 ## Acceptance Criteria **[REQUIRED]**
 

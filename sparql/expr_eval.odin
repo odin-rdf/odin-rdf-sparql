@@ -46,7 +46,38 @@ Expr_Context :: struct {
 	load:      Term_Loader,
 	load_data: rawptr,
 	scratch:   [dynamic]rdf.Term,
+	// Terms this query computed — BIND results, which the store has
+	// never seen. See the note on synthetic IDs below.
+	computed:  ^[dynamic]rdf.Term,
 	allocator: runtime.Allocator,
+}
+
+// A solution row holds store IDs, so a value a query *computes* —
+// `BIND(?a + ?b AS ?c)` — has no ID to be bound to. Interning it would
+// make a query a write, which is the one thing the term-binding bridge
+// exists to prevent.
+//
+// So the engine names computed terms itself, in a space the store
+// guarantees it will never assign: the Sentinel kind, whose counters 0,
+// 1, and 2 are DEFAULT_GRAPH, WILDCARD, and UNBOUND, and whose counters
+// from 3 up are unused. A synthetic ID is an index into the query's own
+// table of computed terms, and it is resolved before the store is asked.
+//
+// This works, and it is also evidence: an engine that has to invent a
+// term space because the store has no query-local one is describing a
+// gap in the interface. Recorded for SPARQL-T-0019.
+SYNTHETIC_FIRST :: 3
+
+synthetic_id :: proc(index: int) -> store.Term_ID {
+	return store.make_id(.Sentinel, u64(SYNTHETIC_FIRST + index))
+}
+
+is_synthetic :: proc(id: store.Term_ID) -> bool {
+	return store.id_kind(id) == .Sentinel && store.id_counter(id) >= SYNTHETIC_FIRST
+}
+
+synthetic_index :: proc(id: store.Term_ID) -> int {
+	return int(store.id_counter(id)) - SYNTHETIC_FIRST
 }
 
 expr_context_init :: proc(
@@ -54,11 +85,13 @@ expr_context_init :: proc(
 	slots: ^Var_Slots,
 	load: Term_Loader,
 	load_data: rawptr,
+	computed: ^[dynamic]rdf.Term,
 	allocator := context.allocator,
 ) {
 	ctx.slots = slots
 	ctx.load = load
 	ctx.load_data = load_data
+	ctx.computed = computed
 	ctx.allocator = allocator
 	ctx.scratch = make([dynamic]rdf.Term, allocator)
 }
@@ -117,11 +150,20 @@ var_value :: proc(ctx: ^Expr_Context, name: string) -> Value {
 	if id == store.UNBOUND {
 		return UNBOUND_VALUE
 	}
+	if is_synthetic(id) {
+		value := value_of(ctx.computed[synthetic_index(id)])
+		value.source = id
+		value.has_source = true
+		return value
+	}
 	term, owned := ctx.load(ctx.load_data, id, ctx.allocator)
 	if owned {
 		append(&ctx.scratch, term)
 	}
-	return value_of(term)
+	value := value_of(term)
+	value.source = id
+	value.has_source = true
+	return value
 }
 
 @(private = "file")

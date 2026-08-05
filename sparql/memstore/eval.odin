@@ -127,6 +127,11 @@ query_destroy :: proc(q: ^Query) {
 // dictionary is — memstore's lookup_term does not copy, and this engine
 // does not make it copy.
 query_term :: proc(q: ^Query, id: store.Term_ID) -> rdf.Term {
+	// A term the query computed rather than read has no store ID; the
+	// engine named it itself, so it answers first.
+	if computed, is_computed := sparql.exec_computed_term(&q.exec, id); is_computed {
+		return computed
+	}
 	return memstore.lookup_term(q.dictionary, id)
 }
 

@@ -14,13 +14,12 @@ import "core:testing"
 // something.
 //
 // SPARQL-T-0011 enabled the two directories whose queries are basic
-// graph patterns and nothing else. SPARQL-T-0012 adds the four the
-// expression engine unlocks: equality and the value space
-// (expr-equals), numeric promotion (type-promotion), ASK, and
-// blank-node coreference. The rest arrive as their operators do — each
-// of them is currently held back by one named construct, not by
-// semantics: sparql10-open-world, for instance, is fully correct except
-// for a single OPTIONAL.
+// graph patterns and nothing else. SPARQL-T-0012 added the four the
+// expression engine unlocks — equality and the value space, numeric
+// promotion, ASK, blank-node coreference. SPARQL-T-0013 adds the six the
+// algebra operators unlock: OPTIONAL, DISTINCT and REDUCED over real
+// solution sequences, BOUND, EBV in context, and open-world semantics
+// end to end. The rest arrive as their operators do.
 
 @(test)
 test_eval_sparql10_triple_match_memstore :: proc(t: ^testing.T) {
@@ -80,6 +79,67 @@ test_eval_sparql10_type_promotion_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql10_type_promotion_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-type-promotion", .Kvstore)
+}
+
+
+@(test)
+test_eval_sparql10_boolean_effective_value_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-boolean-effective-value", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_boolean_effective_value_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-boolean-effective-value", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_bound_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bound", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_bound_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bound", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_distinct_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-distinct", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_distinct_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-distinct", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_open_world_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-open-world", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_open_world_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-open-world", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_optional_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-optional", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_optional_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-optional", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_reduced_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-reduced", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_reduced_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-reduced", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,

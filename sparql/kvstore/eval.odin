@@ -172,6 +172,9 @@ query_destroy :: proc(q: ^Query) {
 // owned by the query and valid until query_destroy — the same contract
 // the memstore instantiation offers, reached differently.
 query_term :: proc(q: ^Query, id: store.Term_ID) -> rdf.Term {
+	if computed, is_computed := sparql.exec_computed_term(&q.exec, id); is_computed {
+		return computed
+	}
 	term, err := kvstore.lookup_term(q.session.store, id, q.allocator)
 	if err != nil {
 		q.session.err = err

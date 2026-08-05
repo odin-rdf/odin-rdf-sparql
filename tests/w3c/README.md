@@ -135,3 +135,9 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-bnode-coreference/` | SPARQL-T-0012 | 1 |
 | `sparql10-expr-equals/` | SPARQL-T-0012 | 15 |
 | `sparql10-type-promotion/` | SPARQL-T-0012 | 30 |
+| `sparql10-boolean-effective-value/` | SPARQL-T-0013 | 7 |
+| `sparql10-bound/` | SPARQL-T-0013 | 1 |
+| `sparql10-distinct/` | SPARQL-T-0013 | 11 |
+| `sparql10-open-world/` | SPARQL-T-0013 | 18 |
+| `sparql10-optional/` | SPARQL-T-0013 | 7 |
+| `sparql10-reduced/` | SPARQL-T-0013 | 2 |
