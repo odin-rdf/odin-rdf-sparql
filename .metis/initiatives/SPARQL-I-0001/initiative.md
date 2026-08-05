@@ -4,14 +4,14 @@ level: initiative
 title: "SPARQL query parser: grammar to algebra"
 short_code: "SPARQL-I-0001"
 created_at: 2026-08-05T09:15:06.259647+00:00
-updated_at: 2026-08-05T09:52:41.926468+00:00
+updated_at: 2026-08-05T12:10:45.145906+00:00
 parent: SPARQL-V-0001
 blocked_by: []
 archived: false
 
 tags:
   - "#initiative"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -104,4 +104,5 @@ Exit criteria: vendored W3C SPARQL 1.1 syntax suites pass (positive and negative
 
 ## Status Updates
 
+- **2026-08-05 — COMPLETED.** All nine tasks done in sequence, one commit each. Exit criteria verified: the vendored W3C SPARQL 1.1 syntax suites pass with zero unexpected failures — and the SPARQL 1.2 suites beyond the original bar (342 in-scope conformance tests total, at both Term_ID widths); algebra translation is covered by printer-asserted tests (24 pipeline goldens plus per-operator cases); the public API is documented to the family's contract standard with a README-as-contract test. Handovers recorded for the evaluation initiative: the algebra contract and its ownership rule (SPARQL-T-0006/0007 logs), the sparql12 eval-suite directories left unvendored by design, and the SSE goldens' hand-derived provenance (live Jena regeneration remains an open hardening option).
 - **2026-08-05 — Decomposed into 9 tasks** (SPARQL-T-0001 … SPARQL-T-0009): scaffolding+suites → tokenizer → parser core → expressions → grammar completion → algebra types+SSE printer → §18.2 translation → 1.2 suites → API/docs. Dependency chain is linear except SPARQL-T-0006 (algebra types), which can run in parallel with T-0004/T-0005. Awaiting human review before transition to active.
