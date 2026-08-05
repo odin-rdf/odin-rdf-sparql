@@ -42,6 +42,8 @@ import crypto_hash "core:crypto/hash"
 import rdf "rdf:rdf"
 import store "store:store"
 
+// The datatype TIMEZONE answers with (§17.4.5.9); the rest of the XSD
+// vocabulary this engine interprets is in value.odin.
 XSD_DAY_TIME_DURATION :: rdf.IRI(XSD + "dayTimeDuration")
 
 // Odin cannot index a string constant, so the hex alphabets are

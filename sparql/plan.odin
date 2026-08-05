@@ -47,6 +47,8 @@ Var_Slots :: struct {
 	allocator: runtime.Allocator,
 }
 
+// var_slots_init prepares an empty slot table; everything it owns comes
+// from the given allocator. A prepared query holds one for its lifetime.
 var_slots_init :: proc(vs: ^Var_Slots, allocator := context.allocator) {
 	vs.allocator = allocator
 	vs.names = make([dynamic]string, allocator)
@@ -54,6 +56,9 @@ var_slots_init :: proc(vs: ^Var_Slots, allocator := context.allocator) {
 	vs.index = make(map[string]int, allocator)
 }
 
+// var_slots_destroy frees the table. Every slice it handed out — the
+// names an answer is labelled with — becomes invalid, so it is destroyed
+// after the answer has been read, not before.
 var_slots_destroy :: proc(vs: ^Var_Slots) {
 	for key in vs.index {
 		delete(key, vs.allocator)
@@ -137,6 +142,8 @@ Plan_Ref :: struct {
 	id:   store.Term_ID,
 }
 
+// plan_ref_is_var distinguishes the two: a slot to unify against, or a
+// ground ID to match exactly.
 plan_ref_is_var :: proc(r: Plan_Ref) -> bool {
 	return r.slot >= 0
 }
@@ -459,6 +466,10 @@ Plan_Path :: struct {
 	closure:       bool,
 }
 
+// Plan is one operator of the evaluation plan — the algebra after the
+// two things plan building does: variables become slots and ground terms
+// become IDs. The tree is owned by whoever built it and freed with
+// plan_destroy.
 Plan :: union {
 	^Plan_BGP,
 	^Plan_NPS,
@@ -519,6 +530,11 @@ Plan_Builder :: struct {
 	allocator:   runtime.Allocator,
 }
 
+// plan_builder_init prepares a builder against a slot table and a store.
+// find is the store's non-interning lookup and data is what it is called
+// with; both must outlive the plans the builder produces. The builder
+// itself must outlive them too — a plan can borrow a triple term the
+// builder materialized — so destroy it after plan_destroy.
 plan_builder_init :: proc(
 	b: ^Plan_Builder,
 	slots: ^Var_Slots,

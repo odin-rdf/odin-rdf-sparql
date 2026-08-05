@@ -125,6 +125,10 @@ Expr_Context :: struct {
 // gap in the interface. Recorded for SPARQL-T-0019.
 SYNTHETIC_FIRST :: 3
 
+// synthetic_id names the index-th computed term; is_synthetic recognizes
+// one, and synthetic_index reads the index back out. A synthetic ID is
+// valid only inside the query that made it and must never reach a match
+// pattern — plan building asserts on one that does.
 synthetic_id :: proc(index: int) -> store.Term_ID {
 	return store.make_id(.Sentinel, u64(SYNTHETIC_FIRST + index))
 }
@@ -137,6 +141,11 @@ synthetic_index :: proc(id: store.Term_ID) -> int {
 	return int(store.id_counter(id)) - SYNTHETIC_FIRST
 }
 
+// expr_context_init prepares the evaluation context a plan's expressions
+// share. load/load_data materialize a term ID, computed is the execution's
+// table of terms the query invented, and everything the context allocates
+// comes from the given allocator. One context serves a whole execution:
+// only one operator evaluates an expression at a time.
 expr_context_init :: proc(
 	ctx: ^Expr_Context,
 	slots: ^Var_Slots,
@@ -179,6 +188,10 @@ expr_context_set_base :: proc(ctx: ^Expr_Context, base: string) {
 	ctx.base = strings.clone(base, ctx.allocator)
 }
 
+// expr_context_destroy frees what the context owns for the whole query —
+// the compiled regex cache, the BNODE memo, the evaluation scratch. It
+// does not free the computed-term table, which belongs to the execution
+// (see Exec.computed).
 expr_context_destroy :: proc(ctx: ^Expr_Context) {
 	expr_context_release(ctx)
 	expr_context_new_solution(ctx)

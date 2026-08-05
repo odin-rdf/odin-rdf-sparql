@@ -40,6 +40,10 @@ import "core:strings"
 import rdf "rdf:rdf"
 import store "store:store"
 
+// The XSD datatypes this engine interprets — the ones with a value, as
+// opposed to the ones it can only compare as terms. A literal of any
+// other datatype is an Unknown_Literal, which is a perfectly good binding
+// and an error to do arithmetic on.
 XSD :: "http://www.w3.org/2001/XMLSchema#"
 XSD_STRING :: rdf.IRI(XSD + "string")
 XSD_BOOLEAN :: rdf.IRI(XSD + "boolean")
@@ -102,6 +106,11 @@ Date_Time :: struct {
 	seconds: f64, // the instant, for comparison
 }
 
+// Value is one operand of an expression: a term interpreted according to
+// its datatype, with the lexical form parsed once and the term it came
+// from kept (see the file header for why all three). A Value borrows: its
+// text and term are valid for as long as whatever produced them, which
+// for a value read from the store is the current evaluation.
 Value :: struct {
 	kind:     Value_Kind,
 	// The store ID this value was read from, when it was read from one.
@@ -120,6 +129,9 @@ Value :: struct {
 	datetime: Date_Time,
 }
 
+// The two values that are not values: a type error, and an unbound
+// variable. Both are ordinary results — SPARQL propagates rather than
+// stops — and only the operators the spec names look at them.
 ERROR_VALUE :: Value {
 	kind = .Error,
 }
@@ -127,6 +139,10 @@ UNBOUND_VALUE :: Value {
 	kind = .Unbound,
 }
 
+// value_boolean, value_integer, and value_double build the results the
+// operators and the §17 library return. They carry no term: a computed
+// value is rendered back into one only when it has to be bound (see
+// value_to_term).
 value_boolean :: proc(b: bool) -> Value {
 	return Value{kind = .Boolean, boolean = b, datatype = XSD_BOOLEAN}
 }
@@ -155,6 +171,8 @@ value_blank_node :: proc(label: string) -> Value {
 	return Value{kind = .Blank_Node, text = label}
 }
 
+// value_is_error is the test the operators that recover from one make —
+// `||`, `&&`, COALESCE, IF, and FILTER's error-as-false rule.
 value_is_error :: proc(v: Value) -> bool {
 	return v.kind == .Error
 }
@@ -835,6 +853,8 @@ value_arithmetic :: proc(op: Arith_Op, a, b: Value) -> Value {
 	}
 }
 
+// value_negate is unary minus: a number of the same rung, negated. It is
+// an error on anything else.
 value_negate :: proc(v: Value) -> Value {
 	if v.kind != .Numeric {
 		return ERROR_VALUE
@@ -852,6 +872,8 @@ value_negate :: proc(v: Value) -> Value {
 	return out
 }
 
+// numeric_datatype is the datatype a rung of the tower writes itself as,
+// which is what DATATYPE answers for a computed number.
 numeric_datatype :: proc(kind: Numeric_Kind) -> rdf.IRI {
 	switch kind {
 	case .Integer:

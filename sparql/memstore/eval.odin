@@ -170,6 +170,15 @@ query_next :: proc(q: ^Query) -> (row: []store.Term_ID, ok: bool) {
 	return sparql.exec_next(&q.exec, match_adapter, next_adapter, destroy_adapter)
 }
 
+// query_destroy releases everything preparing and running the query
+// allocated: the plan and its EXISTS sub-plans, the slot table, the
+// operator state, every match iterator a run left open, and every term
+// the query computed. Safe on a query whose query_init returned false —
+// a refused query still allocated the part of the plan that built.
+//
+// It does not free the algebra (the parser owns that), the dataset, or a
+// Result_Graph a CONSTRUCT or DESCRIBE handed back. A term from
+// query_term borrows the dictionary and outlives the query.
 query_destroy :: proc(q: ^Query) {
 	sparql.exec_destroy(&q.exec, destroy_adapter)
 	sparql.plan_destroy(q.plan, q.allocator)
@@ -199,6 +208,9 @@ query_term :: proc(q: ^Query, id: store.Term_ID) -> rdf.Term {
 // rather than a query variable. A blank-node slot is never part of an
 // answer, which is what makes `SELECT *` mean "every variable" and not
 // "every slot".
+//
+// Both are indexed by slot, are as wide as a solution row, and borrow the
+// query's slot table — valid until query_destroy.
 query_var_names :: proc(q: ^Query) -> []string {
 	return q.slots.names[:]
 }

@@ -51,6 +51,9 @@ Order_Rank :: enum {
 	Triple,
 }
 
+// order_rank places a value in that sequence. An expression that raised a
+// type error ranks with the unbound: ORDER BY is not a filter, and a row
+// whose key cannot be computed still has to go somewhere.
 order_rank :: proc(v: Value) -> Order_Rank {
 	#partial switch v.kind {
 	case .Error, .Unbound:

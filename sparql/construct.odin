@@ -57,6 +57,9 @@ Result_Graph :: struct {
 	allocator: runtime.Allocator,
 }
 
+// result_graph_make prepares an empty graph. Everything it and the
+// triples added to it own comes from the given allocator; free it with
+// result_graph_destroy.
 result_graph_make :: proc(allocator := context.allocator) -> Result_Graph {
 	return Result_Graph {
 		triples = make([dynamic]rdf.Triple, allocator),
@@ -66,6 +69,9 @@ result_graph_make :: proc(allocator := context.allocator) -> Result_Graph {
 	}
 }
 
+// result_graph_destroy frees the graph and every term in it. The
+// triples result_graph_triples handed out become invalid; a caller that
+// keeps one clones it first.
 result_graph_destroy :: proc(g: ^Result_Graph) {
 	for t in g.triples {
 		rdf.destroy_triple(t, g.allocator)
@@ -123,6 +129,8 @@ Template_Node :: struct {
 // nested term before the one that contains it.
 Template_Term :: distinct [3]Template_Node
 
+// Template_Triple is one triple of a template, compiled: three positions
+// to fill per solution.
 Template_Triple :: distinct [3]Template_Node
 
 // Template is a CONSTRUCT template compiled against a query's slot table.
@@ -210,6 +218,9 @@ template_scratch :: proc(t: ^Template) {
 	t.buffers = make([][48]byte, 3 + 3 * len(t.terms), t.allocator)
 }
 
+// template_destroy frees the compiled template and its per-solution
+// scratch. It does not free the graph a CONSTRUCT built — the two have
+// different lifetimes, and the graph outlives the template that made it.
 template_destroy :: proc(t: ^Template) {
 	delete(t.triples)
 	delete(t.terms)
@@ -522,6 +533,8 @@ describe_build :: proc(
 	}
 }
 
+// describe_destroy frees the compiled clause. As with a template, the
+// graph it helped build is the caller's and is freed separately.
 describe_destroy :: proc(d: ^Describe_Targets) {
 	delete(d.slots)
 	delete(d.ids)

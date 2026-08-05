@@ -209,26 +209,45 @@ nothing rather than failing. It is the smallest answer that is a
 description, and it is stable — which is what a caller can build on when
 the specification promises nothing.
 
-`sparql10-expr-builtin/` is the near miss worth recording: 24 of its 25
-entries pass, and `dawg-lang-3` — `?x :p "string"@EN` against
-`"string"@en` — fails because neither the RDF parser nor the SPARQL
-parser normalizes the case of a language tag, so the query's term and
-the stored term are different dictionary keys. That is a data-model
-question for the family rather than an engine one, and the directory
-stays disabled until it is answered.
+## The five that are not enabled
 
-`sparql11-negation/` is the other one: 11 of 12, with `graph-minus`
-("outer GRAPH operator does not affect MINUS disjointness") failing
-because a MINUS inside a GRAPH clause is evaluated against the merge of
-the named graphs rather than against each in turn. That is the same
-shape as the aggregation-inside-GRAPH case SPARQL-T-0015 fixed for the
-blocking operators, and fixing it for MINUS belongs with the rest of the
-GRAPH work rather than with sorting.
+Forty evaluation directories are vendored and thirty-five are enabled.
+The other five each fail exactly one entry — five in a corpus of 488 —
+and each is recorded here rather than skipped, with what it is waiting
+for. Measured at SPARQL-I-0002's exit verification (SPARQL-T-0019).
 
-`sparql11-subquery/` is the third, and the one blocked by nothing in the
-engine: 4 of its 5 evaluation entries pass, and `sq11` fails because its
-data document is RDF/XML, which the family's parser does not implement.
-The directory waits on a format, not on an operator.
+| Directory | | Entry | Waiting on |
+|---|---|---|---|
+| `sparql10-graph/` | 16/17 | `graph-optional` | SPARQL-T-0020 |
+| `sparql11-negation/` | 11/12 | `graph-minus` | SPARQL-T-0020 |
+| `sparql10-expr-builtin/` | 24/25 | `dawg-lang-3` | SPARQL-T-0021 |
+| `sparql10-i18n/` | 4/5 | `normalization-2` | SPARQL-T-0021 |
+| `sparql11-subquery/` | 4/5 | `sq11` | RDF/XML in odin-rdf-parser |
+
+**The two that are this engine's semantics** are `graph-optional` ("the
+variable bound by the GRAPH operator is not used when evaluating a
+nested OPTIONAL") and `graph-minus` ("outer GRAPH operator does not
+affect MINUS disjointness"). Both are about what a GRAPH clause does to
+an operator inside it that sees more than one solution at a time —
+SPARQL-T-0015 fixed that shape for the blocking operators and the fix
+does not transfer to either of these. SPARQL-T-0013 recorded that the
+reading of §18 producing the DAWG's `graph-optional` answer could not be
+established from the spec text with confidence, and declined to fit the
+code to the expected result; that judgement still stands.
+
+**Two are term identity, and they are the family's question rather than
+this engine's.** `dawg-lang-3` asks for `?x :p "string"@EN` against
+`"string"@en`: BCP 47 tags are case-insensitive, so those are one
+literal, but neither the RDF parser nor the SPARQL parser folds the case
+and they intern as two keys. `normalization-2` is the same shape for
+IRIs — `eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz` against its RFC 3987
+syntax-normalized form. The engine compares Term_IDs; by the time it
+sees them the decision has been made upstream, and the answer has to
+hold for the RDF parser, both store dictionaries, and the SPARQL parser
+at once.
+
+**One waits on a format, not on an operator.** `sq11`'s data document is
+RDF/XML, which odin-rdf-parser does not implement.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs
 pass/mismatch/unsupported counts without asserting anything. It is a

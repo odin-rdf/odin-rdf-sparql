@@ -232,6 +232,15 @@ query_error :: proc(q: ^Query) -> kvstore.Error {
 	return q.session.err
 }
 
+// query_destroy releases everything preparing and running the query
+// allocated: the plan and its EXISTS sub-plans, the slot table, the
+// operator state, every match cursor a run left open, every term the
+// query computed, and — unlike the memstore instantiation — every term
+// query_term materialized, because kvstore's lookup_term builds rather
+// than borrows. Safe on a query whose query_init returned false.
+//
+// It does not free the algebra (the parser owns that), the store, or a
+// Result_Graph a CONSTRUCT or DESCRIBE handed back.
 query_destroy :: proc(q: ^Query) {
 	sparql.exec_destroy(&q.exec, destroy_adapter)
 	sparql.plan_destroy(q.plan, q.allocator)
@@ -263,6 +272,14 @@ query_term :: proc(q: ^Query, id: store.Term_ID) -> rdf.Term {
 	return term
 }
 
+// query_var_names and query_var_internal describe the row's columns: the
+// variable each slot carries, and whether it is a pattern blank node
+// rather than a query variable. A blank-node slot is never part of an
+// answer, which is what makes `SELECT *` mean "every variable" and not
+// "every slot".
+//
+// Both are indexed by slot, are as wide as a solution row, and borrow the
+// query's slot table — valid until query_destroy.
 query_var_names :: proc(q: ^Query) -> []string {
 	return q.slots.names[:]
 }

@@ -78,6 +78,7 @@ Regex_Flag :: enum {
 	Literal, // q: the pattern has no metacharacters at all
 }
 
+// Regex_Flags is the set REGEX's and REPLACE's third argument spells.
 Regex_Flags :: bit_set[Regex_Flag]
 
 // regex_parse_flags reads the flags string. ok is false for a letter
@@ -195,6 +196,9 @@ Regex :: struct {
 // place for.
 REGEX_STEP_BUDGET :: 4_000_000
 
+// regex_destroy frees a compiled pattern. The evaluation context caches
+// them for the life of the query and calls this on the way out; nothing
+// else compiles one.
 regex_destroy :: proc(rx: ^Regex) {
 	for &class in rx.classes {
 		delete(class.ranges)

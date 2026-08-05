@@ -360,6 +360,9 @@ Agg_Accum :: struct {
 	allocator:   runtime.Allocator,
 }
 
+// agg_accum_init prepares one aggregate's state for one group. The
+// Aggregate is the algebra's and is borrowed; everything the accumulator
+// allocates comes from the given allocator.
 agg_accum_init :: proc(a: ^Agg_Accum, agg: ^Aggregate, allocator: runtime.Allocator) {
 	a.op = agg.op
 	a.is_distinct = agg.is_distinct
@@ -374,6 +377,9 @@ agg_accum_init :: proc(a: ^Agg_Accum, agg: ^Aggregate, allocator: runtime.Alloca
 	}
 }
 
+// agg_accum_destroy frees what the accumulator retained: a DISTINCT
+// modifier's seen-set, a GROUP_CONCAT's buffer, and the copy of the term
+// MIN/MAX/SAMPLE is holding on to.
 agg_accum_destroy :: proc(a: ^Agg_Accum) {
 	if a.has_best {
 		rdf.destroy_term(a.best, a.allocator)
@@ -532,6 +538,8 @@ id_key :: proc(b: ^strings.Builder, id: store.Term_ID) {
 	strings.write_byte(b, 0)
 }
 
+// value_key writes a value's identity for a group table or a DISTINCT
+// modifier: the long way round, through the term the value would bind.
 value_key :: proc(b: ^strings.Builder, v: Value) {
 	switch v.kind {
 	case .Error, .Unbound:

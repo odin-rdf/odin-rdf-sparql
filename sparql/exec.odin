@@ -84,6 +84,10 @@ Op_Phase :: enum {
 	Pull_Right,
 }
 
+// Exec_Node is one operator's state, instantiated for a backend's
+// iterator type. Every operator shares the struct — see Exec_Kind for
+// why — so most of its fields belong to one kind and are zero in the
+// rest; the comments below say which.
 Exec_Node :: struct($It: typeid) {
 	kind:  Exec_Kind,
 	input: int, // the (left) input: an index into Exec.nodes; -1 for a leaf
@@ -353,6 +357,10 @@ exec_set_base :: proc(e: ^Exec($D, $It), base: string) {
 	expr_context_set_base(&e.expr, base)
 }
 
+// exec_destroy frees the operator tree, closes every iterator a run left
+// open, and releases the terms the query computed. It does not free the
+// plan the tree was built from: the plan is the caller's, and outlives
+// the execution by exactly the length of a plan_destroy call.
 exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 	// The blocking operators own group tables and sort keys, which the
 	// shared loop below cannot free without knowing which node kind they
