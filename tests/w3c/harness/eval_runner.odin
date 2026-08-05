@@ -88,16 +88,44 @@ evaluate_entry :: proc(
 		return {}, .Failed, "the query did not translate"
 	}
 
-	// Result forms other than SELECT, and FROM/FROM NAMED dataset
-	// construction, arrive with later tasks. They are refused by name
-	// rather than attempted.
-	if p.query.form != .Select {
-		return {}, .Unsupported, "result form other than SELECT"
+	// CONSTRUCT and DESCRIBE build RDF graphs and arrive with
+	// SPARQL-T-0017; FROM / FROM NAMED dataset construction arrives with
+	// SPARQL-T-0013. Both are refused by name rather than attempted.
+	//
+	// ASK is here because it needs nothing the engine does not already
+	// have: its answer is whether the pattern has at least one solution.
+	// Pulling it forward from SPARQL-T-0017 is what makes the operator
+	// suites testable — sparql10-expr-ops and sparql10-type-promotion
+	// state their expectations as ASK queries, so without it a FILTER
+	// task could enable almost nothing.
+	if p.query.form != .Select && p.query.form != .Ask {
+		return {}, .Unsupported, "CONSTRUCT / DESCRIBE"
 	}
 	if len(p.query.datasets) > 0 {
 		return {}, .Unsupported, "FROM / FROM NAMED"
 	}
 
+	rs, status, detail = evaluate_algebra(suite, e, algebra, backend)
+	if status != .Ok || p.query.form != .Ask {
+		return rs, status, detail
+	}
+	// An ASK answer is the existence of a solution, not the solutions.
+	answered := len(rs.rows) > 0
+	result_set_destroy(&rs)
+	return Result_Set{kind = .Boolean, boolean = answered}, .Ok, ""
+}
+
+@(private = "file")
+evaluate_algebra :: proc(
+	suite: Suite,
+	e: Entry,
+	algebra: sparql.Algebra,
+	backend: Backend,
+) -> (
+	rs: Result_Set,
+	status: Eval_Status,
+	detail: string,
+) {
 	switch backend {
 	case .Memstore:
 		return evaluate_memstore(suite, e, algebra)

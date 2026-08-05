@@ -4,14 +4,14 @@ level: task
 title: "Expression engine core: value model, promotion, EBV, FILTER"
 short_code: "SPARQL-T-0012"
 created_at: 2026-08-05T15:15:35.283163+00:00
-updated_at: 2026-08-05T15:15:35.283163+00:00
+updated_at: 2026-08-05T17:48:36.841597+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/active"
 
 
 exit_criteria_met: false
@@ -27,6 +27,8 @@ initiative_id: SPARQL-I-0002
 ## Objective **[REQUIRED]**
 
 The expression engine's core and the FILTER operator: the typed value union (numeric tower xsd:integer/decimal/float/double, boolean, string+lang, dateTime, IRI, blank node, triple term), the single Term_ID → value materialization point through `lookup_term`, spec-faithful numeric type promotion, effective boolean value (EBV), the comparison and arithmetic operator tables (`= != < > <= >=`, `+ - * /`, unary), `sameTerm`/`IN`/`NOT IN`, logical `&& || !` with SPARQL's three-valued error handling, and error-as-unbound at the FILTER boundary. This unlocks the majority of FILTER-dependent evaluation directories.
+
+## Acceptance Criteria
 
 ## Acceptance Criteria **[REQUIRED]**
 

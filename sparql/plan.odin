@@ -76,6 +76,20 @@ blank_slot :: proc(vs: ^Var_Slots, label: string) -> int {
 	return slot_for(vs, "_", label, true)
 }
 
+// var_slot_lookup finds an existing query variable's slot without
+// assigning one and without allocating — it is called per variable
+// occurrence per solution during expression evaluation, where the
+// key-building that var_slot does would be a per-solution allocation.
+// Blank-node slots are skipped: `?x` and `_:x` are different things.
+var_slot_lookup :: proc(vs: ^Var_Slots, name: string) -> (slot: int, found: bool) {
+	for candidate, i in vs.names {
+		if !vs.internal[i] && candidate == name {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
 // var_slots_count is the width of a solution row.
 var_slots_count :: proc(vs: ^Var_Slots) -> int {
 	return len(vs.names)
@@ -147,6 +161,15 @@ Plan_Distinct :: struct {
 	input: Plan,
 }
 
+// Plan_Filter drops the solutions whose conditions are not true. The
+// conditions are a conjunction, kept separate exactly as the algebra
+// grouped them, and a condition that raises a type error drops the
+// solution just as a false one does (§17.2.2).
+Plan_Filter :: struct {
+	conditions: [dynamic]Expr,
+	input:      Plan,
+}
+
 // Plan_Slice is OFFSET/LIMIT; -1 means absent.
 Plan_Slice :: struct {
 	start:  int,
@@ -161,6 +184,7 @@ Plan :: union {
 	^Plan_Project,
 	^Plan_Distinct,
 	^Plan_Slice,
+	^Plan_Filter,
 }
 
 // Term_Finder resolves a ground term to its store ID without interning
@@ -247,7 +271,19 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 	case ^Alg_Left_Join:
 		b.unsupported = "OPTIONAL"
 	case ^Alg_Filter:
-		b.unsupported = "FILTER"
+		for condition in v.conditions {
+			if !expr_check(b, condition) {
+				return nil, false
+			}
+		}
+		input := plan_build(b, v.input) or_return
+		filter := new(Plan_Filter, b.allocator)
+		filter.conditions = make([dynamic]Expr, b.allocator)
+		for condition in v.conditions {
+			append(&filter.conditions, condition)
+		}
+		filter.input = input
+		return filter, true
 	case ^Alg_Union:
 		b.unsupported = "UNION"
 	case ^Alg_Minus:
@@ -413,6 +449,10 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	case ^Plan_Slice:
+		plan_destroy(v.input, allocator)
+		free(v, allocator)
+	case ^Plan_Filter:
+		delete(v.conditions)
 		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	}

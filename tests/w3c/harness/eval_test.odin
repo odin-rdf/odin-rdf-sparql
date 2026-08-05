@@ -13,8 +13,14 @@ import "core:testing"
 // the syntax suites follow, and it is what keeps "enabled" meaning
 // something.
 //
-// SPARQL-T-0011 enables the two directories whose queries are basic graph
-// patterns and nothing else. The rest arrive as their operators do.
+// SPARQL-T-0011 enabled the two directories whose queries are basic
+// graph patterns and nothing else. SPARQL-T-0012 adds the four the
+// expression engine unlocks: equality and the value space
+// (expr-equals), numeric promotion (type-promotion), ASK, and
+// blank-node coreference. The rest arrive as their operators do — each
+// of them is currently held back by one named construct, not by
+// semantics: sparql10-open-world, for instance, is fully correct except
+// for a single OPTIONAL.
 
 @(test)
 test_eval_sparql10_triple_match_memstore :: proc(t: ^testing.T) {
@@ -34,6 +40,46 @@ test_eval_sparql10_basic_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql10_basic_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-basic", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_ask_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-ask", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_ask_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-ask", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_bnode_coreference_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bnode-coreference", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_bnode_coreference_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bnode-coreference", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_expr_equals_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-expr-equals", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_expr_equals_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-expr-equals", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_type_promotion_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-type-promotion", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_type_promotion_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-type-promotion", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,

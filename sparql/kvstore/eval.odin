@@ -61,6 +61,27 @@ destroy_adapter :: proc(it: ^kvstore.Match_Iterator) {
 	kvstore.match_destroy(it)
 }
 
+// load_adapter materializes a result ID during expression evaluation.
+// kvstore builds the term from the database's bytes, so it is owned and
+// the expression context releases it when the evaluation ends.
+@(private)
+load_adapter :: proc(
+	data: rawptr,
+	id: store.Term_ID,
+	allocator: runtime.Allocator,
+) -> (
+	term: rdf.Term,
+	owned: bool,
+) {
+	session := cast(^Session)data
+	loaded, err := kvstore.lookup_term(session.store, id, allocator)
+	if err != nil {
+		session.err = err
+		return nil, false
+	}
+	return loaded, true
+}
+
 // find_adapter is the term-binding bridge. kvstore's find_term serves
 // from a read transaction and writes nothing — the reason STORE-T-0014
 // exists: resolving a query's ground terms with intern_term would turn
@@ -119,7 +140,7 @@ query_init :: proc(
 		q.plan = nil
 		return false
 	}
-	sparql.exec_init(&q.exec, plan, sparql.var_slots_count(&q.slots), &q.session, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, allocator)
 	return true
 }
 

@@ -44,6 +44,22 @@ destroy_adapter :: proc(it: ^memstore.Match_Iterator) {
 	memstore.match_destroy(it)
 }
 
+// load_adapter materializes a result ID during expression evaluation.
+// memstore's lookup_term borrows the dictionary's storage, so nothing is
+// owned and nothing needs freeing.
+@(private)
+load_adapter :: proc(
+	data: rawptr,
+	id: store.Term_ID,
+	allocator: runtime.Allocator,
+) -> (
+	term: rdf.Term,
+	owned: bool,
+) {
+	dictionary := cast(^memstore.Dictionary)data
+	return memstore.lookup_term(dictionary, id), false
+}
+
 // find_adapter is the term-binding bridge: the store's non-interning
 // lookup, so preparing a query never assigns an ID.
 @(private)
@@ -88,7 +104,7 @@ query_init :: proc(
 		return false
 	}
 	q.plan = plan
-	sparql.exec_init(&q.exec, plan, sparql.var_slots_count(&q.slots), dataset, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, allocator)
 	return true
 }
 

@@ -4,14 +4,14 @@ level: task
 title: "Solution model, term-binding bridge, backend-binding spike, and BGP joins"
 short_code: "SPARQL-T-0011"
 created_at: 2026-08-05T15:15:33.868806+00:00
-updated_at: 2026-08-05T15:54:26.338445+00:00
+updated_at: 2026-08-05T17:47:35.946139+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -27,6 +27,8 @@ initiative_id: SPARQL-I-0002
 ## Objective **[REQUIRED]**
 
 The engine's core runtime, in four connected pieces: (1) the solution model — flat `[]Term_ID` rows, per-query variable-slot table, the UNBOUND sentinel (Sentinel counter 2), row ownership/copy contract; (2) the term-binding bridge — resolve the algebra's ground terms to Term_IDs once at query setup, short-circuiting to empty on absent terms; (3) the **backend-binding spike** — prototype both candidate mechanisms (generic $-param executor vs. per-backend instantiation packages) against the real BGP join and record the winner in SPARQL-I-0002 before any further operator work; (4) BGP evaluation — streaming index-probe joins over `match()`, bindings substituted into patterns (UNBOUND → WILDCARD), naive as-written join order behind a single replaceable join-order procedure (the planner seam).
+
+## Acceptance Criteria
 
 ## Acceptance Criteria
 

@@ -59,6 +59,7 @@ Exec_Kind :: enum {
 	Project,
 	Distinct,
 	Slice,
+	Filter,
 }
 
 // Exec_Node is one operator, instantiated for a backend's iterator type.
@@ -92,6 +93,9 @@ Exec_Node :: struct($It: typeid) {
 	length:  int,
 	skipped: int,
 	emitted: int,
+
+	// Filter
+	conditions: []Expr,
 }
 
 // Exec is a plan ready to run against one dataset. work is the solution
@@ -106,6 +110,10 @@ Exec :: struct($D: typeid, $It: typeid) {
 	stack:     [dynamic]int,
 	work:      []store.Term_ID,
 	width:     int,
+	// One expression context for the whole plan: only one operator
+	// evaluates an expression at a time, because a node finishes with a
+	// solution before the driver moves on.
+	expr:      Expr_Context,
 	allocator: runtime.Allocator,
 }
 
@@ -114,13 +122,17 @@ Exec :: struct($D: typeid, $It: typeid) {
 exec_init :: proc(
 	e: ^Exec($D, $It),
 	plan: Plan,
-	width: int,
+	slots: ^Var_Slots,
 	dataset: ^D,
+	load: Term_Loader,
+	load_data: rawptr,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
 	e.dataset = dataset
+	width := var_slots_count(slots)
 	e.width = width
+	expr_context_init(&e.expr, slots, load, load_data, allocator)
 	e.work = make([]store.Term_ID, width, allocator)
 	for &slot in e.work {
 		slot = store.UNBOUND
@@ -151,6 +163,7 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 	delete(e.nodes)
 	delete(e.stack)
 	delete(e.work, e.allocator)
+	expr_context_destroy(&e.expr)
 	e^ = {}
 }
 
@@ -192,6 +205,10 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.input = build_node(e, v.input)
 		node.start = v.start if v.start > 0 else 0
 		node.length = v.length
+	case ^Plan_Filter:
+		node.kind = .Filter
+		node.input = build_node(e, v.input)
+		node.conditions = v.conditions[:]
 	}
 	append(&e.nodes, node)
 	return len(e.nodes) - 1
@@ -311,6 +328,23 @@ consume :: proc(
 			return nil, false, true
 		}
 		node.seen[key] = true
+		return row, true, false
+
+	case .Filter:
+		if !have {
+			return nil, false, false
+		}
+		e.expr.row = row
+		for condition in node.conditions {
+			value := expr_eval(&e.expr, condition)
+			keep, defined := effective_boolean_value(value)
+			expr_context_release(&e.expr)
+			if !defined || !keep {
+				// A condition that errors drops the solution exactly as
+				// a false one does — FILTER's error-as-false rule.
+				return nil, false, true
+			}
+		}
 		return row, true, false
 
 	case .Slice:

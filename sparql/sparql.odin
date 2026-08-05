@@ -21,8 +21,11 @@
 //
 // Evaluation (SPARQL-I-0002) turns that algebra into a stream of
 // solutions: plan.odin binds the query's variables to slots and its
-// ground terms to store IDs, and exec.odin runs the plan as a pull-based
-// chain of index probes over the store's match interface.
+// ground terms to store IDs, exec.odin runs the plan as a pull-based
+// chain of index probes over the store's match interface, and
+// value.odin/expr_eval.odin evaluate expressions -- the numeric tower,
+// effective boolean value, and SPARQL's three-valued treatment of type
+// errors -- for FILTER.
 //
 // Typical use: parser_init → parse → translate → walk p.algebra (or
 // algebra_to_string for the SSE view); parser_destroy frees it all. To

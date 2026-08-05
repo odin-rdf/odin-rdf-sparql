@@ -312,17 +312,114 @@ test_blank_node_in_a_pattern_is_not_projected :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_unsupported_operator_is_reported :: proc(t: ^testing.T) {
-	// An operator the engine cannot evaluate must be named, not silently
-	// answered with an empty result — a wrong answer is much worse than a
-	// refusal, and later tasks rely on this to tell "not implemented"
-	// from "no solutions".
+test_filter_drops_non_matching_solutions :: proc(t: ^testing.T) {
+	f: Fixture
+	fixture_init(&f, t)
+	defer fixture_destroy(&f)
+
+	rows, ok := solve(
+		t,
+		&f,
+		`PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(?n = "Bob") }`,
+	)
+	if !ok {
+		return
+	}
+	defer destroy_rows(&rows)
+	testing.expectf(t, len(rows) == 1, "expected one solution, got %d: %v", len(rows), rows)
+	testing.expectf(t, contains(rows, "s=http://example/bob "), "unexpected solutions: %v", rows)
+}
+
+@(test)
+test_filter_error_drops_the_solution :: proc(t: ^testing.T) {
+	// `?n + 1` is a type error on a string. A type error is not false —
+	// it propagates — but FILTER treats it the same way, so every
+	// solution goes.
+	f: Fixture
+	fixture_init(&f, t)
+	defer fixture_destroy(&f)
+
+	rows, ok := solve(t, &f, `PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(?n + 1 > 0) }`)
+	if !ok {
+		return
+	}
+	defer destroy_rows(&rows)
+	testing.expectf(t, len(rows) == 0, "a type error must drop every solution, got %v", rows)
+}
+
+@(test)
+test_filter_or_recovers_from_an_error :: proc(t: ^testing.T) {
+	// The three-valued rule that is easy to get wrong: `||` is true when
+	// either side is true, even when the other side raised a type error.
+	// A naive implementation propagates the error and returns nothing.
+	f: Fixture
+	fixture_init(&f, t)
+	defer fixture_destroy(&f)
+
+	rows, ok := solve(
+		t,
+		&f,
+		`PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(?n + 1 > 0 || ?n = "Bob") }`,
+	)
+	if !ok {
+		return
+	}
+	defer destroy_rows(&rows)
+	testing.expectf(t, len(rows) == 1, "|| should recover from the errored branch, got %v", rows)
+
+	// …and `&&` is false when either side is false, likewise.
+	nothing, nothing_ok := solve(
+		t,
+		&f,
+		`PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(?n + 1 > 0 && ?n = "nobody") }`,
+	)
+	if !nothing_ok {
+		return
+	}
+	defer destroy_rows(&nothing)
+	testing.expectf(t, len(nothing) == 0, "&& with a false branch is false, got %v", nothing)
+}
+
+@(test)
+test_filter_bound_and_unbound_variables :: proc(t: ^testing.T) {
+	// A variable the pattern never mentions is unbound, not an error, so
+	// BOUND can answer false about it — while using its value is an
+	// error, which drops the row.
+	f: Fixture
+	fixture_init(&f, t)
+	defer fixture_destroy(&f)
+
+	rows, ok := solve(t, &f, `PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(!BOUND(?nowhere)) }`)
+	if !ok {
+		return
+	}
+	defer destroy_rows(&rows)
+	testing.expectf(t, len(rows) == 3, "BOUND(?nowhere) is false, so all three pass: %v", rows)
+
+	used, used_ok := solve(t, &f, `PREFIX : <http://example/> SELECT ?s WHERE { ?s :name ?n FILTER(?nowhere = 1) }`)
+	if !used_ok {
+		return
+	}
+	defer destroy_rows(&used)
+	testing.expectf(t, len(used) == 0, "using an unbound variable is an error: %v", used)
+}
+
+@(test)
+test_unsupported_expression_is_reported :: proc(t: ^testing.T) {
+	// An expression the engine cannot evaluate must be named at
+	// preparation, not answered with a type error at runtime — a filter
+	// that silently matched nothing would look exactly like a correct
+	// query with no results.
 	f: Fixture
 	fixture_init(&f, t)
 	defer fixture_destroy(&f)
 
 	p: sparql.Parser
-	sparql.parser_init(&p, transmute([]byte)string(`SELECT * WHERE { ?s ?p ?o FILTER(?s = ?o) }`), "http://example/")
+	sparql.parser_init(
+		&p,
+		transmute([]byte)string(`SELECT * WHERE { ?s ?p ?o FILTER(REGEX(?o, "x")) }`),
+		"http://example/",
+	)
 	defer sparql.parser_destroy(&p)
 	_, parsed := sparql.parse(&p)
 	testing.expect(t, parsed, "the query should parse")
@@ -331,6 +428,6 @@ test_unsupported_operator_is_reported :: proc(t: ^testing.T) {
 	q: Query
 	ok := query_init(&q, algebra, &f.dictionary, &f.dataset)
 	defer query_destroy(&q)
-	testing.expect(t, !ok, "FILTER is not implemented yet, so preparation must fail")
-	testing.expectf(t, q.unsupported == "FILTER", "expected FILTER to be named, got %q", q.unsupported)
+	testing.expect(t, !ok, "REGEX is not implemented yet, so preparation must fail")
+	testing.expectf(t, q.unsupported == "built-in function", "expected the built-in to be named, got %q", q.unsupported)
 }

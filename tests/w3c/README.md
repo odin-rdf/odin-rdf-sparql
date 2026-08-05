@@ -131,3 +131,7 @@ Enabled for evaluation so far, each fully green against **both** backends
 |---|---|---|
 | `sparql10-triple-match/` | SPARQL-T-0011 | 4 |
 | `sparql10-basic/` | SPARQL-T-0011 | 27 |
+| `sparql10-ask/` | SPARQL-T-0012 | 4 |
+| `sparql10-bnode-coreference/` | SPARQL-T-0012 | 1 |
+| `sparql10-expr-equals/` | SPARQL-T-0012 | 15 |
+| `sparql10-type-promotion/` | SPARQL-T-0012 | 30 |
