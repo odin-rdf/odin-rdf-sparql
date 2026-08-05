@@ -7,6 +7,7 @@ package sparql
 
 import rdf "rdf:rdf"
 
+// Binary_Op tags a Binary_Expr with its operator, || through /.
 Binary_Op :: enum {
 	Or, // ||
 	And, // &&
@@ -22,18 +23,22 @@ Binary_Op :: enum {
 	Div,
 }
 
+// Unary_Op tags a Unary_Expr: !, unary +, unary -.
 Unary_Op :: enum {
 	Not, // !
 	Plus,
 	Minus,
 }
 
+// Binary_Expr is one binary operation, positioned at its operator.
+// Relational operators never chain (the grammar forbids it).
 Binary_Expr :: struct {
 	op:          Binary_Op,
 	left, right: Expr,
 	pos:         Position,
 }
 
+// Unary_Expr is a unary operation, positioned at its operator.
 Unary_Expr :: struct {
 	op:      Unary_Op,
 	operand: Expr,

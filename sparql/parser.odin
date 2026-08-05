@@ -23,6 +23,12 @@ import rdf "rdf:rdf"
 // combined — the same guard the family's Turtle parser applies.
 MAX_DEPTH :: 128
 
+// Parser owns everything one query's parse and translation allocate:
+// the token stream state, the sticky error, the AST (query), the
+// algebra, the intern table holding every derived string, and the
+// registries the 1.2 desugaring and aggregate substitution need. One
+// Parser handles one query; init, parse, optionally translate, use the
+// results, destroy.
 Parser :: struct {
 	scanner:     Scanner,
 	tok:         Token,
@@ -73,6 +79,9 @@ parser_init :: proc(p: ^Parser, source: []byte, base := "", allocator := context
 	}
 }
 
+// parser_destroy frees everything the parser owns: query tree, algebra
+// tree, detached aggregate expressions, triple-term registry, intern
+// table, and scratch buffers. The caller's source buffer is untouched.
 parser_destroy :: proc(p: ^Parser) {
 	destroy_query(p.query, p.allocator)
 	destroy_algebra(p.algebra, p.allocator)

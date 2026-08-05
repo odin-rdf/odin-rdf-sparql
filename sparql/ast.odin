@@ -54,6 +54,7 @@ Triple_Term :: struct {
 	pos:       Position,
 }
 
+// Path_Op tags a Path_Expr node with its property-path operator.
 Path_Op :: enum {
 	Link, // iri (or 'a'); the iri field
 	Sequence, // children joined by '/'
@@ -76,6 +77,8 @@ Path_Expr :: struct {
 	pos:      Position,
 }
 
+// Triple_Pattern is one (possibly path-predicated) triple of a basic
+// pattern, positioned at its subject.
 Triple_Pattern :: struct {
 	subject:   Pattern_Node,
 	predicate: Pattern_Node,
@@ -90,38 +93,49 @@ Basic_Pattern :: struct {
 	pos:     Position,
 }
 
+// Group_Pattern is a group graph pattern: '{ … }' with its elements in
+// syntactic order.
 Group_Pattern :: struct {
 	elements: [dynamic]Pattern,
 	pos:      Position,
 }
 
+// Optional_Pattern is OPTIONAL over a group.
 Optional_Pattern :: struct {
 	group: ^Group_Pattern,
 	pos:   Position,
 }
 
+// Union_Pattern is a UNION chain of two or more group alternatives.
 Union_Pattern :: struct {
 	alternatives: [dynamic]^Group_Pattern, // always 2 or more
 	pos:          Position,
 }
 
+// Graph_Pattern is GRAPH over a group, named by an IRI or a variable.
 Graph_Pattern :: struct {
 	graph: Pattern_Node, // rdf.IRI or Var
 	group: ^Group_Pattern,
 	pos:   Position,
 }
 
+// Filter_Pattern is one FILTER constraint; §18.2 collects a group's
+// filters and applies them at the group's end.
 Filter_Pattern :: struct {
 	condition: Expr,
 	pos:       Position,
 }
 
+// Bind_Pattern is BIND(expr AS var); the target is fresh in its group
+// (§19.8, enforced at parse time).
 Bind_Pattern :: struct {
 	expr: Expr,
 	v:    Var,
 	pos:  Position,
 }
 
+// Minus_Pattern is MINUS over a group; its variables are not in scope
+// outside it.
 Minus_Pattern :: struct {
 	group: ^Group_Pattern,
 	pos:   Position,
@@ -157,6 +171,7 @@ Pattern :: union {
 	^Sub_Select,
 }
 
+// Query_Form is the query's top-level form.
 Query_Form :: enum {
 	Select,
 	Ask,
@@ -164,23 +179,29 @@ Query_Form :: enum {
 	Describe,
 }
 
+// Select_Modifier is the SELECT clause's DISTINCT/REDUCED marker.
 Select_Modifier :: enum {
 	None,
 	Distinct,
 	Reduced,
 }
 
+// Dataset_Clause is one FROM or FROM NAMED clause.
 Dataset_Clause :: struct {
 	iri:   rdf.IRI,
 	named: bool, // FROM NAMED as opposed to FROM
 	pos:   Position,
 }
 
+// Order_Direction is an ORDER BY condition's direction; bare
+// conditions are ascending.
 Order_Direction :: enum {
 	Ascending,
 	Descending,
 }
 
+// Order_Condition is one ORDER BY condition: a variable, a Constraint
+// call, or an ASC/DESC bracketted expression.
 Order_Condition :: struct {
 	expr:      Expr, // a bare Var, a bracketted expression, or a Constraint call
 	direction: Order_Direction,

@@ -17,6 +17,9 @@ package sparql
 
 import "core:unicode/utf8"
 
+// Scanner is the tokenizer's state over one caller-owned source buffer.
+// The error is sticky: after a failure every scanner_next returns
+// ok=false with err unchanged.
 Scanner :: struct {
 	source:     []byte,
 	pos:        int,
@@ -25,6 +28,8 @@ Scanner :: struct {
 	err:        Error,
 }
 
+// scanner_init prepares s to scan source, which must stay valid and
+// unmoved for the scanner's lifetime (tokens borrow from it).
 scanner_init :: proc(s: ^Scanner, source: []byte) {
 	s^ = {
 		source = source,
@@ -270,8 +275,8 @@ scanner_next :: proc(s: ^Scanner) -> (tok: Token, ok: bool) {
 		return scan_pname(s, &tok, start)
 
 	case:
-		// PN_CHARS_BASE start (possibly via a codepoint escape): a
-		// keyword, 'a', a boolean, or the prefix part of a prefixed name.
+		// PN_CHARS_BASE start: a keyword, 'a', a boolean, or the prefix
+		// part of a prefixed name.
 		return scan_name(s, &tok)
 	}
 }
