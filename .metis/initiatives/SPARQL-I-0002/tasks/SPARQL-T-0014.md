@@ -4,14 +4,14 @@ level: task
 title: "Built-in function library: the full §17 set"
 short_code: "SPARQL-T-0014"
 created_at: 2026-08-05T15:15:38.105123+00:00
-updated_at: 2026-08-05T18:59:09.162557+00:00
+updated_at: 2026-08-05T19:38:23.811294+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -30,14 +30,16 @@ The complete §17 built-in function library on top of the T-0012 value model: te
 
 ## Acceptance Criteria
 
+## Acceptance Criteria
+
 ## Acceptance Criteria **[REQUIRED]**
 
-- [ ] Every §17 function callable with spec-conformant argument-type checking and error propagation; unit tests per function sourced from the spec's definitions and examples.
-- [ ] REGEX/REPLACE semantics documented against Odin's `core:text/regex` capabilities; any deviation from XPath regex flavor is called out explicitly and every suite-exercised pattern works.
-- [ ] Hash functions via `core:crypto`; UUID/BNODE/RAND/NOW deterministic-enough handling for tests (suites avoid asserting exact values; NOW fixed per query per spec).
-- [ ] XSD casts per the §17.5 cast table, reusing T-0012's lexical parsing module.
-- [ ] String functions correct on unicode (argument compatibility rules for lang-tagged strings per §17.4.3.1 — the derived-lang rules for CONCAT/SUBSTR etc.).
-- [ ] Function-heavy evaluation directories enabled and fully green (candidates: functions, regex, cast, type-promotion remainder, project-expression per final harness mapping); dual-width matrix green.
+- [x] Every §17 function callable with spec-conformant argument-type checking and error propagation; unit tests per function sourced from the spec's definitions and examples.
+- [x] REGEX/REPLACE semantics documented against Odin's `core:text/regex` capabilities; any deviation from XPath regex flavor is called out explicitly and every suite-exercised pattern works. — measured, then implemented directly; `sparql/regex.odin`'s header carries the evidence and the upstream fixes.
+- [x] Hash functions via `core:crypto`; UUID/BNODE/RAND/NOW deterministic-enough handling for tests (suites avoid asserting exact values; NOW fixed per query per spec).
+- [x] XSD casts per the §17.5 cast table, reusing T-0012's lexical parsing module.
+- [x] String functions correct on unicode (argument compatibility rules for lang-tagged strings per §17.4.3.1 — the derived-lang rules for CONCAT/SUBSTR etc.).
+- [x] Function-heavy evaluation directories enabled and fully green (candidates: functions, regex, cast, type-promotion remainder, project-expression per final harness mapping); dual-width matrix green. — **final mapping: functions, regex, sparql10-cast, sparql11-cast** (type-promotion was already green and enabled by T-0012). Two candidates fell out of the mapping for reasons outside §17, both recorded below: `project-expression` is 6/7 with the seventh blocked on ORDER BY (SPARQL-T-0015), and `expr-builtin` is 24/25 with the holdout blocked on language-tag case normalization in the family's term model.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
 
