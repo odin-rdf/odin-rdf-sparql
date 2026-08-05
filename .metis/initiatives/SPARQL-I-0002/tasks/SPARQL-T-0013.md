@@ -4,14 +4,14 @@ level: task
 title: "Algebra operators: OPTIONAL, UNION, MINUS, BIND, VALUES, GRAPH, subqueries"
 short_code: "SPARQL-T-0013"
 created_at: 2026-08-05T15:15:36.690800+00:00
-updated_at: 2026-08-05T18:02:25.087049+00:00
+updated_at: 2026-08-05T18:35:25.712082+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -27,6 +27,8 @@ initiative_id: SPARQL-I-0002
 ## Objective **[REQUIRED]**
 
 The remaining non-blocking algebra operators, completing the operator tree for SELECT queries without aggregation/ordering: leftjoin (OPTIONAL, with the filter-scope semantics §18.2 assigns it), union, minus (with the shared-variable/disjoint-domain rules), extend (BIND), VALUES (join with the inline table), GRAPH (named-graph selection with both constant and variable graph terms), EXISTS/NOT EXISTS (pattern evaluation from inside expressions, per the spec's substitution semantics), projection, DISTINCT/REDUCED, slice (LIMIT/OFFSET), and subqueries (evaluated bottom-up with projection isolation).
+
+## Acceptance Criteria
 
 ## Acceptance Criteria
 
@@ -105,3 +107,22 @@ Largest task by operator count, but each operator is small once T-0011/T-0012 ex
   - `sparql11-bindings` 10/11 — the remaining entry is VALUES inside GRAPH binding the same variable as the graph name.
   - `sparql11-subquery` still blocked on the 10 RDF/XML data documents (SPARQL-T-0010).
   - Out of this task's scope but visible in the survey: `sparql10-expr-builtin` 22/25 and `sparql10-i18n` 4/5 (Unicode normalization of IRIs — a parser/store question).
+
+- **2026-08-05 (final) — Complete.** Both criteria that were open are met. **203 evaluation tests across nineteen directories**, both backends, both Term_ID widths; `make check` clean. Three more directories enabled: `sparql10-dataset` 12, `sparql11-exists` 6, `sparql11-bindings` 11.
+
+  **EXISTS.** A pattern that lives inside a value, so evaluating one means running a sub-plan against the solution currently in the row. Two things made it work:
+  - *Getting back into generic code.* Expression evaluation is not generic over the backend; the executor is. A direct call from one to the other completes an instantiation cycle of the kind that hangs the compiler (the T-0011 finding). It goes through a procedure value instead — `Exists_Runner`, supplied by each instantiation package — which is concrete and breaks the cycle. This compiled and ran first try, which also *bounds* the T-0011 constraint usefully: it is direct self-reference the compiler cannot close, not mutual reference through a procedure pointer.
+  - *A re-entrant walk.* Sub-plans are built into the same node array as the main plan, and `run` now takes its stack base from where it started rather than from zero, so a nested EXISTS walk runs above whatever the outer walk has pushed. The sub-plan is reset before and after, so a variable it happened to bind never leaks into the answer.
+
+  **FROM / FROM NAMED** needed no engine machinery. A query that names its own dataset has its FROM documents merged into the store's default graph and its FROM NAMED documents loaded as named graphs; after that the store's default graph *is* the query's default graph, and the only named graphs present are the ones the query asked for. FROM NAMED with no FROM therefore gives an empty default graph for free. Purely a harness change (`eval_runner.odin`), and the right one — the alternative was a dataset-view abstraction the store cannot support.
+
+  **Two more fixes, both real semantics rather than test quirks:**
+  1. **A GRAPH clause whose body matches no triples still ranges over the named graphs.** `GRAPH ?g {}` and `GRAPH ?g { VALUES … }` cannot bind ?g by the usual mechanism, which works by pushing the graph into triple patterns — there are none. `Plan_Graph_Scan` enumerates the distinct named graphs, which means scanning everything, because the store cannot be asked what graphs it holds. **Third store-evidence item for SPARQL-T-0019**, and the most clearly useful of the three: a query engine wants the named-graph list constantly.
+  2. **A VALUES cell naming a term the store has never seen must still bind it.** VALUES supplies bindings; a binding to an absent term simply matches nothing later. It was being treated as making the whole row unmatchable. Absent cells now get a synthetic ID exactly as computed BIND values do, which makes the two paths uniform.
+
+  **Two entries left, both documented rather than guessed at:**
+  - `sparql10-graph` 16/17 — `graph-optional` ("the variable bound by the GRAPH operator is not used when evaluating a nested OPTIONAL"). The expected result is a single solution where four left-side solutions exist and OPTIONAL cannot remove any; the reading that produces the DAWG's answer is not one I could establish from the spec text with confidence, so it is left rather than fitted to.
+  - `sparql11-negation` 9/12 — two entries need ORDER BY (SPARQL-T-0015), and `graph-minus` ("outer GRAPH operator does not affect MINUS disjointness") is the same family of GRAPH-scoping question as `graph-optional`. Both belong with whoever next has GRAPH semantics in hand.
+  - `sparql11-subquery` remains blocked on the 10 RDF/XML data documents recorded in SPARQL-T-0010.
+
+  Neither directory is *enabled*, so the harness's "enabled means fully green" discipline is intact.
