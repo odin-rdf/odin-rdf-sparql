@@ -1,13 +1,14 @@
 # Vendored W3C SPARQL test suites
 
-Official conformance test suites for SPARQL 1.1 Query, vendored so the
-harness runs hermetically with no network access.
+Official conformance test suites for SPARQL 1.1 and 1.2 Query, vendored
+so the harness runs hermetically with no network access.
 
 - **Source**: https://github.com/w3c/rdf-tests
 - **Upstream commit**: `767554e135eb6665949d870e6fa7bbc813837293` (main) —
   the same commit odin-rdf-parser pins for its format suites
 - **Retrieved**: 2026-08-05 (syntax suites), 2026-08-05 (evaluation
-  suites, SPARQL-T-0010)
+  suites, SPARQL-T-0010), 2026-08-05 (SPARQL 1.2 evaluation suites,
+  SPARQL-T-0018)
 - **License**: W3C Test Suite License / W3C 3-clause BSD License (see the
   header of each `manifest.ttl`)
 
@@ -78,6 +79,19 @@ under `sparql11/`.
 | `sparql11-property-path/` | `sparql/sparql11/property-path/` | §18.4 property paths |
 | `sparql11-subquery/` | `sparql/sparql11/subquery/` | Subqueries |
 
+The SPARQL 1.2 evaluation directories were vendored by SPARQL-T-0018,
+from the same pinned commit: the top-level `sparql/sparql12/manifest.ttl`
+includes all four there, so no second pin and no documented gap was
+needed. `rdf11/` is one the SPARQL-T-0010 note did not name; it is an
+evaluation directory of the 1.2 suite like the others, so it rides along.
+
+| Directory | Upstream path | Covers |
+|---|---|---|
+| `sparql12-eval-triple-terms/` | `sparql/sparql12/eval-triple-terms/` | Triple terms and reified triples in patterns, expressions, CONSTRUCT, GRAPH, ORDER BY (3 Update entries; rest evaluation) |
+| `sparql12-expression/` | `sparql/sparql12/expression/` | TRIPLE() over every argument shape, and `!!` |
+| `sparql12-grouping/` | `sparql/sparql12/grouping/` | 1.2's grouping clarifications |
+| `sparql12-rdf11/` | `sparql/sparql12/rdf11/` | RDF 1.1 literal handling (rdf:langString, xsd:string) |
+
 Not vendored, per the vision's scope: the SPARQL Update directories
 (`add/`, `basic-update/`, `clear/`, `copy/`, `delete*/`, `drop/`,
 `move/`, `update-silent/`, `syntax-update-1/`, `syntax-update-2/`),
@@ -87,9 +101,7 @@ protocol directories (`protocol/`, `graph-store-protocol/`,
 syntax directories (`syntax-sparql1/` … `syntax-sparql5/`, superseded by
 the 1.1 syntax suite), and the result-serialization suites
 (`csv-tsv-res/`, `json-res/`) — writing result formats is a later
-initiative, and this one needs expected-result *readers* only. The
-SPARQL 1.2 evaluation directories (`eval-triple-terms/`, `expression/`,
-`grouping/`) are vendored by SPARQL-T-0018.
+initiative, and this one needs expected-result *readers* only.
 
 ## The harness
 
@@ -104,7 +116,10 @@ Expected results are read by `harness/`'s own readers, which handle the
 four formats the suites use: `.srx` (SPARQL Results XML), `.srj` (SPARQL
 Results JSON), `.ttl` (the DAWG result-set vocabulary, or a plain graph
 for CONSTRUCT/DESCRIBE), and `.rdf` (the result-set vocabulary in
-RDF/XML, used only by `sparql10-sort/`). The XML and RDF/XML readers work
+RDF/XML, used only by `sparql10-sort/`). Both the XML and the JSON reader
+handle SPARQL 1.2's additions: a `triple` binding whose value is a
+subject/predicate/object object, and a literal's base direction beside
+its language tag. The XML and RDF/XML readers work
 over deliberately narrow subsets — see the notes at the top of
 `harness/xml.odin` and `harness/rsvocab.odin` — and `readers_test.odin`
 holds those assumptions to the whole vendored corpus by reading every
@@ -115,13 +130,20 @@ it must be fully green — no skip lists, no expected-failure files.
 Positive syntax tests and the query side of evaluation tests must parse;
 negative syntax tests must be rejected. SPARQL Update entries mixed into
 a vendored directory are counted and acknowledged as out of engine
-scope, never silently skipped. Each test's base IRI is the upstream
-suite location plus the file name.
+scope, never silently skipped — the three in
+`sparql12-eval-triple-terms/` are pinned as `UPDATE_ENTRIES` in
+`harness/readers_test.odin`. Each test's base IRI is the upstream suite
+location plus the file name.
+
+Data documents load through the store's own bulk loaders, in the four
+formats the suites name them in: `.ttl`, `.nt`, `.trig`, and `.nq`. A
+quad-bearing document names its own graphs, so one loads as it stands
+rather than into a graph the manifest chose.
 
 Evaluation *enablement* — running a directory's queries and comparing
 their answers — arrives per task through the evaluation initiative. The
 floor for every vendored evaluation directory, enabled or not, is that
-its manifest reads, its expectations parse (508 across four formats), its
+its manifest reads, its expectations parse (556 across four formats), its
 data loads, and its queries parse and translate.
 
 Enabled for evaluation so far, each fully green against **both** backends
@@ -160,8 +182,12 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql11-property-path/` | SPARQL-T-0016 | 33 |
 | `sparql10-construct/` | SPARQL-T-0017 | 5 |
 | `sparql11-construct/` | SPARQL-T-0017 | 5 |
+| `sparql12-eval-triple-terms/` | SPARQL-T-0018 | 38 |
+| `sparql12-expression/` | SPARQL-T-0018 | 5 |
+| `sparql12-grouping/` | SPARQL-T-0018 | 2 |
+| `sparql12-rdf11/` | SPARQL-T-0018 | 3 |
 
-That is **435 evaluation tests across thirty-one directories**, each run
+That is **483 evaluation tests across thirty-five directories**, each run
 against both backends at both Term_ID widths.
 
 ## What DESCRIBE returns

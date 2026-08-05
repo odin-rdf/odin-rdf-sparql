@@ -101,7 +101,13 @@ Exec_Node :: struct($It: typeid) {
 	bgp:         ^Plan_BGP,
 	iters:       []It,
 	iter_open:   []bool,
-	bound_slots: [][4]int,
+	// What each depth bound, so backtracking can release exactly that.
+	// A depth binds at most the four quad positions — plus, when the
+	// pattern has triple terms in it, the three components of each of
+	// its shapes.
+	bound_slots: [][]int,
+	// The one array every row above is a slice of.
+	bound_backing: []int,
 	bound_count: []int,
 	depth:       int,
 	started:     bool,
@@ -221,6 +227,23 @@ Path_Expander :: #type proc(
 	out: ^[dynamic]store.Term_ID,
 )
 
+// Triple_Reader answers what a triple term's components are, by ID.
+//
+// It is the one thing a non-ground triple-term pattern needs that the
+// match interface does not offer. `find_term` goes forwards — the
+// components of a term the query wrote, to that term's ID — and every
+// backend implements it. Nothing goes back. But a pattern like
+// `<<( ?s ?p ?o )>> ?q ?z` matches whatever triple term the store has in
+// that position, and checking it against the pattern means taking it
+// apart again.
+//
+// memstore answers from the component array its dictionary already keeps
+// and allocates nothing; kvstore has to materialize the whole term and
+// look each component up again. That asymmetry is store evidence for
+// SPARQL-T-0019: a `triple_parts(d, id)` in the backend convention would
+// make the second one a single read as well.
+Triple_Reader :: #type proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term_ID, ok: bool)
+
 // Exec is a plan ready to run against one dataset. work is the solution
 // row every operator reads and the basic graph patterns write; a row
 // handed to a consumer is valid until the next call.
@@ -255,6 +278,9 @@ Exec :: struct($D: typeid, $It: typeid) {
 	// out to be one the store already holds.
 	find:      Term_Finder,
 	find_data: rawptr,
+	// The other direction, for triple-term patterns. See Triple_Reader.
+	read_triple:      Triple_Reader,
+	read_triple_data: rawptr,
 	// The root node of each EXISTS sub-plan, in the order plan building
 	// registered them. They live in the same node array as the main plan
 	// — a sub-plan is an ordinary operator tree, just one nothing pulls
@@ -278,6 +304,8 @@ exec_init :: proc(
 	load_data: rawptr,
 	find: Term_Finder,
 	find_data: rawptr,
+	read_triple: Triple_Reader,
+	read_triple_data: rawptr,
 	exists_plans: []Plan,
 	exists_nodes: []^Exists_Expr,
 	exists: Exists_Runner,
@@ -290,6 +318,8 @@ exec_init :: proc(
 	e.expand_data = e
 	e.find = find
 	e.find_data = find_data
+	e.read_triple = read_triple
+	e.read_triple_data = read_triple_data
 	width := var_slots_count(slots)
 	e.width = width
 	e.computed = make([dynamic]rdf.Term, allocator)
@@ -346,6 +376,7 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 		}
 		delete(node.iters, e.allocator)
 		delete(node.iter_open, e.allocator)
+		delete(node.bound_backing, e.allocator)
 		delete(node.bound_slots, e.allocator)
 		delete(node.bound_count, e.allocator)
 		delete(node.keep, e.allocator)
@@ -407,15 +438,15 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		depth := len(v.order)
 		node.iters = make([]It, depth, e.allocator)
 		node.iter_open = make([]bool, depth, e.allocator)
-		node.bound_slots = make([][4]int, depth, e.allocator)
 		node.bound_count = make([]int, depth, e.allocator)
+		bind_bound_slots(e, &node, depth, 4 + 3 * len(v.shapes))
 	case ^Plan_NPS:
 		node.kind = .NPS
 		node.nps = v
 		node.iters = make([]It, 1, e.allocator)
 		node.iter_open = make([]bool, 1, e.allocator)
-		node.bound_slots = make([][4]int, 1, e.allocator)
 		node.bound_count = make([]int, 1, e.allocator)
+		bind_bound_slots(e, &node, 1, 4)
 	case ^Plan_Path:
 		node.kind = .Path
 		node.path = v
@@ -470,6 +501,9 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.kind = .Union
 		node.input = build_node(e, v.left)
 		node.right = build_node(e, v.right)
+		// The bindings in force when the union starts, so the right branch
+		// begins where the left one did. See start_child.
+		node.saved = make([]store.Term_ID, e.width, e.allocator)
 	case ^Plan_Left_Join:
 		node.kind = .Left_Join
 		node.input = build_node(e, v.left)
@@ -544,13 +578,25 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.graph_seen = make(map[store.Term_ID]bool, e.allocator)
 		node.iters = make([]It, 1, e.allocator)
 		node.iter_open = make([]bool, 1, e.allocator)
-		node.bound_slots = make([][4]int, 1, e.allocator)
 		node.bound_count = make([]int, 1, e.allocator)
+		bind_bound_slots(e, &node, 1, 4)
 		node.set_slots = make([dynamic]int, e.allocator)
 	}
 	node.subtree_start = start
 	append(&e.nodes, node)
 	return len(e.nodes) - 1
+}
+
+// bind_bound_slots allocates the per-depth record of what a matching
+// operator bound: one row of `width` slot indices per depth, in one
+// backing array so releasing a depth is a walk over contiguous memory.
+@(private = "file")
+bind_bound_slots :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, width: int) {
+	node.bound_backing = make([]int, depth * width, e.allocator)
+	node.bound_slots = make([][]int, depth, e.allocator)
+	for d in 0 ..< depth {
+		node.bound_slots[d] = node.bound_backing[d * width:][:width]
+	}
 }
 
 // exec_next yields the next solution, or ok=false when the plan is
@@ -685,7 +731,22 @@ start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 		// place; descending into it here would hand its raw solutions to
 		// whatever asked for a path.
 		return -1
-	case .Union, .Left_Join, .Join:
+	case .Union:
+		if node.phase != .Need_Left {
+			return node.right
+		}
+		// The bindings the union runs inside. Both branches have to see
+		// them and only them, and the left branch may leave the working
+		// row in any state at all: a blocking operator replays a whole row
+		// over it, and a LIMIT can stop the branch without its operators
+		// ever being asked to release what they bound. So the state is
+		// snapshotted here and restored when the right branch starts.
+		if !node.started {
+			node.started = true
+			copy(node.saved, e.work)
+		}
+		return node.input
+	case .Left_Join, .Join:
 		return node.input if node.phase == .Need_Left else node.right
 	case .Materialized:
 		// A materialized node has an input, but only so collect_all knows
@@ -996,6 +1057,16 @@ consume :: proc(
 			if id, bindable := bindable_id(e, value); bindable {
 				e.work[slot] = id
 			}
+			// A projection below hands out a masked *copy* of the working
+			// row, so a binding written only into the working row would
+			// not be in the solution this operator returns — which is what
+			// `{ SELECT ?v {…} } BIND(… AS ?i)` is: an Extend directly over
+			// a subquery. Both have to carry it: the copy is what the
+			// consumer reads, the working row is what an enclosing pattern
+			// probes with and what the next binding here reads.
+			if raw_data(row) != raw_data(e.work) && slot < len(row) {
+				row[slot] = e.work[slot]
+			}
 			expr_context_release(&e.expr)
 		}
 		return row, true, -1
@@ -1005,9 +1076,12 @@ consume :: proc(
 			return row, true, -1
 		}
 		if node.phase == .Need_Left {
-			// The left side is spent; start the right. Its slots are
-			// clean because an exhausted operator releases what it bound.
+			// The left side is spent; start the right, on the bindings the
+			// union began with rather than on whatever the left branch
+			// left behind (see start_child).
 			node.phase = .Pull_Right
+			node_reset(e, node.input, DESTROY)
+			copy(e.work, node.saved)
 			node_reset(e, node.right, DESTROY)
 			return nil, false, node.right
 		}
@@ -2135,7 +2209,8 @@ probe_pattern :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) -> st
 // the value the first bound.
 @(private = "file")
 unify_quad :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, quad: store.Encoded_Quad) -> bool {
-	triple := node.bgp.triples[node.bgp.order[depth]]
+	pattern := node.bgp.order[depth]
+	triple := node.bgp.triples[pattern]
 	count := 0
 	for position, i in triple {
 		if !plan_ref_is_var(position) {
@@ -2171,6 +2246,59 @@ unify_quad :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, quad: st
 		count += 1
 	}
 	node.bound_count[depth] = count
+	if len(node.bgp.shapes) == 0 {
+		return true
+	}
+	// The triple terms this pattern wrote out. A shape's own slot was
+	// bound above (or by an earlier shape, for a nested one), so one
+	// forward pass suffices: the list is in pre-order.
+	range := node.bgp.shape_range[pattern]
+	for at in range[0] ..< range[1] {
+		if unify_shape(e, node, depth, at) {
+			continue
+		}
+		unbind_depth(e, node, depth)
+		return false
+	}
+	return true
+}
+
+// unify_shape checks one matched triple term against the components the
+// pattern wrote, binding the variables among them. It is the same
+// bind-or-compare unification unify_quad does for a quad's positions,
+// over a term the store handed back whole.
+@(private = "file")
+unify_shape :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, at: int) -> bool {
+	shape := node.bgp.shapes[at]
+	id := e.work[shape.slot]
+	if store.id_kind(id) != .Triple {
+		// The position matched something that is not a triple term at
+		// all — an IRI, a literal. Not an error: the pattern simply does
+		// not hold here.
+		return false
+	}
+	parts, read := e.read_triple(e.read_triple_data, id)
+	if !read {
+		return false
+	}
+	for part, i in shape.parts {
+		if !plan_ref_is_var(part) {
+			if part.id != parts[i] {
+				return false
+			}
+			continue
+		}
+		current := e.work[part.slot]
+		if current != store.UNBOUND {
+			if current != parts[i] {
+				return false
+			}
+			continue
+		}
+		e.work[part.slot] = parts[i]
+		node.bound_slots[depth][node.bound_count[depth]] = part.slot
+		node.bound_count[depth] += 1
+	}
 	return true
 }
 

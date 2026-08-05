@@ -752,15 +752,29 @@ eval_triple_constructor :: proc(ctx: ^Expr_Context, e: ^Builtin_Call, subject, p
 	if len(e.args) != 3 {
 		return ERROR_VALUE
 	}
-	object := expr_eval(ctx, e.args[2])
+	return build_triple_value(ctx, subject, predicate, expr_eval(ctx, e.args[2]))
+}
+
+// build_triple_value is the construction TRIPLE(s, p, o) and SPARQL
+// 1.2's `<<( s p o )>>` written as an expression both perform: the same
+// term, and the same refusals — a subject that is not a resource, a
+// predicate that is not an IRI, an argument that is unbound or errored.
+@(private)
+build_triple_value :: proc(ctx: ^Expr_Context, subject, predicate, object: Value) -> Value {
 	if object.kind == .Error || object.kind == .Unbound {
+		return ERROR_VALUE
+	}
+	if subject.kind == .Error || predicate.kind == .Error {
 		return ERROR_VALUE
 	}
 	if subject.kind == .Unbound || predicate.kind == .Unbound || predicate.kind != .IRI {
 		return ERROR_VALUE
 	}
+	// RDF 1.2 admits a triple term as an object and nowhere else, so a
+	// triple term in the subject position is an error rather than a
+	// nested term — which is what `triple-on-triple-terms` pins.
 	#partial switch subject.kind {
-	case .IRI, .Blank_Node, .Triple:
+	case .IRI, .Blank_Node:
 	case:
 		return ERROR_VALUE
 	}

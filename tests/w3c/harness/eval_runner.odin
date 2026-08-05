@@ -424,6 +424,12 @@ load_kv_document :: proc(
 		_, parse_err, err = kvstore.load_turtle(s, content, base, graph)
 	case strings.has_suffix(name, ".nt"):
 		_, parse_err, err = kvstore.load_triples(s, content, graph)
+	case strings.has_suffix(name, ".trig"):
+		// See load_document (dataset.odin): a quad document names its
+		// own graphs.
+		_, parse_err, err = kvstore.load_trig(s, content, base)
+	case strings.has_suffix(name, ".nq"):
+		_, parse_err, err = kvstore.load_quads(s, content)
 	case strings.has_suffix(name, ".rdf"):
 		return false, "data document is RDF/XML, which the family's parser does not implement"
 	case:

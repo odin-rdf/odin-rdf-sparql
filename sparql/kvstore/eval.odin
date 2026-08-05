@@ -97,6 +97,46 @@ find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found:
 	return resolved, present
 }
 
+// triple_adapter takes a stored triple term apart, for a triple-term
+// pattern that is not ground. Where memstore reads the component IDs it
+// already holds, kvstore has to materialize the whole term and look each
+// component up again — two round trips through the database for
+// something the dictionary knows outright. That is the store evidence
+// sparql.Triple_Reader records for SPARQL-T-0019.
+@(private)
+triple_adapter :: proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term_ID, ok: bool) {
+	session := cast(^Session)data
+	if store.id_kind(id) != .Triple {
+		return {}, false
+	}
+	term, err := kvstore.lookup_term(session.store, id, context.allocator)
+	if err != nil {
+		session.err = err
+		return {}, false
+	}
+	defer rdf.destroy_term(term, context.allocator)
+	triple, is_triple := term.(^rdf.Triple)
+	if !is_triple || triple == nil {
+		return {}, false
+	}
+	for component, i in ([3]rdf.Term{triple.subject, triple.predicate, triple.object}) {
+		resolved, present, find_err := kvstore.find_term(session.store, component)
+		if find_err != nil {
+			session.err = find_err
+			return {}, false
+		}
+		if !present {
+			// A component of a stored term is itself stored, so this
+			// cannot happen against a consistent store; reporting it as
+			// "no match" rather than asserting keeps a corrupted database
+			// from taking the process down.
+			return {}, false
+		}
+		parts[i] = resolved
+	}
+	return parts, true
+}
+
 // exists_adapter is the door back into the generic executor. An
 // expression cannot call it directly — the call would complete a cycle
 // of generic instantiations that the compiler cannot close — so it goes
@@ -174,7 +214,7 @@ query_init :: proc(
 		q.plan = nil
 		return false
 	}
-	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, expand_adapter, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, triple_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, expand_adapter, allocator)
 	sparql.exec_set_base(&q.exec, base)
 	return true
 }

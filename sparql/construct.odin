@@ -102,13 +102,26 @@ result_graph_add :: proc(g: ^Result_Graph, t: rdf.Triple) -> bool {
 }
 
 // Template_Node is one position of a CONSTRUCT template triple: a
-// variable to read out of the solution, a template blank node, or a
-// ground term written in the query.
+// variable to read out of the solution, a template blank node, a ground
+// term written in the query, or a triple term to build per solution
+// out of nodes of its own.
 Template_Node :: struct {
 	slot:  int, // >= 0: a variable slot
 	blank: int, // >= 0: a template blank node, fresh in every solution
+	// >= 0: the index in Template.terms of a triple term to instantiate.
+	triple: int,
 	term:  rdf.Term, // otherwise: the term as written, borrowing the query's parse
 }
+
+// Template_Term is a SPARQL 1.2 triple term in a template: its three
+// positions, compiled exactly as a triple's are.
+//
+// A triple term's own components can be triple terms, so the compiled
+// forms live in one list and refer to each other by index — the same
+// reason the plan's shapes do (plan.odin). A child is always listed
+// after its parent, so instantiating the list backwards builds every
+// nested term before the one that contains it.
+Template_Term :: distinct [3]Template_Node
 
 Template_Triple :: distinct [3]Template_Node
 
@@ -120,8 +133,20 @@ Template_Triple :: distinct [3]Template_Node
 // what the compiled form keeps is an index rather than a name.
 Template :: struct {
 	triples:   [dynamic]Template_Triple,
+	// The triple terms the template writes, in the order compiled: a
+	// parent before the terms nested inside it.
+	terms:     [dynamic]Template_Term,
 	blanks:    int,
 	labels:    [dynamic]string, // template label -> blank index, by position
+	// Per-solution scratch, sized once when the template is compiled.
+	// nodes is the triple each compiled term is instantiated into and
+	// built says whether this solution could instantiate it; buffers
+	// holds one blank-node label per position, because a label is a
+	// slice of the buffer it was written into and two positions of one
+	// triple must not share.
+	nodes:     []rdf.Triple,
+	built:     []rdf.Term,
+	buffers:   [][48]byte,
 	allocator: runtime.Allocator,
 }
 
@@ -145,7 +170,9 @@ template_build :: proc(
 ) {
 	t.allocator = allocator
 	t.triples = make([dynamic]Template_Triple, allocator)
+	t.terms = make([dynamic]Template_Term, allocator)
 	t.labels = make([dynamic]string, allocator)
+	defer template_scratch(t)
 	if bp == nil {
 		return true
 	}
@@ -158,7 +185,7 @@ template_build :: proc(
 			if !node_ok {
 				return false
 			}
-			if resolved.slot < 0 && resolved.blank < 0 && resolved.term == nil {
+			if template_node_empty(resolved) {
 				// A variable the pattern never binds.
 				instantiable = false
 				break
@@ -172,24 +199,46 @@ template_build :: proc(
 	return true
 }
 
+// template_scratch sizes the per-solution working memory: one node per
+// compiled triple term, and a label buffer for every position that could
+// hold a blank node — the three of the triple being built plus the three
+// of each term.
+@(private = "file")
+template_scratch :: proc(t: ^Template) {
+	t.nodes = make([]rdf.Triple, len(t.terms), t.allocator)
+	t.built = make([]rdf.Term, len(t.terms), t.allocator)
+	t.buffers = make([][48]byte, 3 + 3 * len(t.terms), t.allocator)
+}
+
 template_destroy :: proc(t: ^Template) {
 	delete(t.triples)
+	delete(t.terms)
 	delete(t.labels)
+	delete(t.nodes, t.allocator)
+	delete(t.built, t.allocator)
+	delete(t.buffers, t.allocator)
 	t^ = {}
+}
+
+// template_node_empty reports a position that can never be instantiated:
+// a variable the pattern never binds. Every field is at its "nothing"
+// value, which the caller reads as a triple it can drop.
+@(private = "file")
+template_node_empty :: proc(node: Template_Node) -> bool {
+	return node.slot < 0 && node.blank < 0 && node.triple < 0 && node.term == nil
 }
 
 @(private = "file")
 template_node :: proc(t: ^Template, slots: ^Var_Slots, node: Pattern_Node) -> (out: Template_Node, ok: bool) {
 	out = Template_Node {
-		slot  = -1,
-		blank = -1,
+		slot   = -1,
+		blank  = -1,
+		triple = -1,
 	}
 	switch v in node {
 	case Var:
 		slot, found := var_slot_lookup(slots, v.name)
 		if !found {
-			// Every field left at its "nothing" value: the caller reads
-			// that as a triple it can drop.
 			return out, true
 		}
 		out.slot = slot
@@ -204,13 +253,43 @@ template_node :: proc(t: ^Template, slots: ^Var_Slots, node: Pattern_Node) -> (o
 		out.term = v
 		return out, true
 	case ^Triple_Term:
-		return out, false
+		index, term_ok := template_term(t, slots, v)
+		if !term_ok {
+			return out, false
+		}
+		out.triple = index
+		return out, true
 	case ^Path_Expr:
 		// The grammar forbids a path in a template, so reaching here is a
 		// parser bug rather than an unsupported query.
 		return out, false
 	}
 	return out, false
+}
+
+// template_term compiles a triple term and returns its index. The
+// placeholder is appended before the components are compiled, so a
+// nested term lands after the one that contains it — which is what lets
+// instantiation walk the list backwards and build children first.
+//
+// A component that can never be instantiated is left as it is rather
+// than making the whole template invalid: the term simply produces
+// nothing in every solution, and so does whatever contains it.
+@(private = "file")
+template_term :: proc(t: ^Template, slots: ^Var_Slots, tt: ^Triple_Term) -> (index: int, ok: bool) {
+	if tt == nil {
+		return -1, false
+	}
+	index = len(t.terms)
+	append(&t.terms, Template_Term{})
+	for node, i in ([3]Pattern_Node{tt.subject, tt.predicate, tt.object}) {
+		resolved, node_ok := template_node(t, slots, node)
+		if !node_ok {
+			return -1, false
+		}
+		t.terms[index][i] = resolved
+	}
+	return index, true
 }
 
 @(private = "file")
@@ -246,40 +325,97 @@ construct_solution :: proc(
 	resolve: Term_Resolver,
 	resolve_data: rawptr,
 ) {
-	// One buffer per position, not one per triple: a label is a slice of
-	// the buffer it was written into, and `_:a rdf:rest _:b` writes two of
-	// them into one triple. Sharing a buffer would leave the subject
-	// reading the object's label — which the CONSTRUCT-list test catches
-	// and nothing else does.
-	buffer: [3][48]byte
+	template_build_terms(template, row, solution, resolve, resolve_data)
 	for source in template.triples {
 		triple: rdf.Triple
 		complete := true
 		for i in 0 ..< 3 {
-			node := source[i]
-			switch {
-			case node.blank >= 0:
-				label := blank_label(buffer[i][:], solution, node.blank)
-				triple_set(&triple, i, rdf.Blank_Node(label))
-			case node.slot >= 0:
-				id := row[node.slot]
-				if id == store.UNBOUND {
-					complete = false
-				} else {
-					triple_set(&triple, i, resolve(resolve_data, id))
-				}
-			case:
-				triple_set(&triple, i, node.term)
-			}
-			if !complete {
+			// One buffer per position, not one per triple: a label is a
+			// slice of the buffer it was written into, and
+			// `_:a rdf:rest _:b` writes two of them into one triple.
+			// Sharing a buffer would leave the subject reading the
+			// object's label — which the CONSTRUCT-list test catches and
+			// nothing else does.
+			term, ok := template_value(template, source[i], row, solution, resolve, resolve_data, i)
+			if !ok {
+				complete = false
 				break
 			}
+			triple_set(&triple, i, term)
 		}
 		if !complete || !triple_is_rdf(triple) {
 			continue
 		}
 		result_graph_add(graph, triple)
 	}
+}
+
+// template_build_terms instantiates this solution's triple terms, from
+// the end of the list to the front: a nested term is compiled after the
+// one that contains it, so building backwards means every component is
+// ready when the term that holds it is reached.
+@(private = "file")
+template_build_terms :: proc(
+	t: ^Template,
+	row: []store.Term_ID,
+	solution: int,
+	resolve: Term_Resolver,
+	resolve_data: rawptr,
+) {
+	#reverse for source, index in t.terms {
+		t.built[index] = nil
+		node := &t.nodes[index]
+		node^ = {}
+		complete := true
+		for i in 0 ..< 3 {
+			term, ok := template_value(t, source[i], row, solution, resolve, resolve_data, 3 + 3 * index + i)
+			if !ok {
+				complete = false
+				break
+			}
+			triple_set(node, i, term)
+		}
+		// A triple term the data model does not admit — a literal
+		// subject, a predicate that is not an IRI — is not built, and
+		// nothing that would have contained it is either. Same rule as
+		// the enclosing triple's, for the same reason.
+		if complete && triple_is_rdf(node^) {
+			t.built[index] = node
+		}
+	}
+}
+
+// template_value is one instantiated template position, or ok=false when
+// this solution cannot fill it: an unbound variable, or a triple term
+// that could not be built. buffer names the label scratch a blank node
+// in this position writes into.
+@(private = "file")
+template_value :: proc(
+	t: ^Template,
+	node: Template_Node,
+	row: []store.Term_ID,
+	solution: int,
+	resolve: Term_Resolver,
+	resolve_data: rawptr,
+	buffer: int,
+) -> (
+	term: rdf.Term,
+	ok: bool,
+) {
+	switch {
+	case node.blank >= 0:
+		return rdf.Blank_Node(blank_label(t.buffers[buffer][:], solution, node.blank)), true
+	case node.slot >= 0:
+		id := row[node.slot]
+		if id == store.UNBOUND {
+			return nil, false
+		}
+		return resolve(resolve_data, id), true
+	case node.triple >= 0:
+		built := t.built[node.triple]
+		return built, built != nil
+	}
+	return node.term, node.term != nil
 }
 
 @(private = "file")

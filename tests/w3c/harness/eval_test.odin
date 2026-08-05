@@ -355,6 +355,50 @@ test_eval_sparql11_construct_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-construct", .Kvstore)
 }
 
+// The SPARQL 1.2 evaluation directories (SPARQL-T-0018). The three
+// mf:UpdateEvaluationTest entries in eval-triple-terms are counted as
+// out-of-engine-scope entries by run_eval_suite, the same way a syntax
+// entry in an evaluation directory is.
+@(test)
+test_eval_sparql12_eval_triple_terms_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-eval-triple-terms", .Memstore)
+}
+
+@(test)
+test_eval_sparql12_eval_triple_terms_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-eval-triple-terms", .Kvstore)
+}
+
+@(test)
+test_eval_sparql12_expression_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-expression", .Memstore)
+}
+
+@(test)
+test_eval_sparql12_expression_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-expression", .Kvstore)
+}
+
+@(test)
+test_eval_sparql12_grouping_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-grouping", .Memstore)
+}
+
+@(test)
+test_eval_sparql12_grouping_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-grouping", .Kvstore)
+}
+
+@(test)
+test_eval_sparql12_rdf11_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-rdf11", .Memstore)
+}
+
+@(test)
+test_eval_sparql12_rdf11_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-rdf11", .Kvstore)
+}
+
 // run_eval_suite runs every evaluation entry of a directory: load,
 // evaluate, compare. The suite's pinned entry count is asserted here too,
 // so a manifest-reader regression cannot quietly shrink what "fully
@@ -384,12 +428,15 @@ run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
 		suite.entries,
 	)
 
-	passed, syntax_only := 0, 0
+	passed, not_evaluated := 0, 0
 	for e in entries {
 		if !strings.contains(e.type_str, "QueryEvaluationTest") {
 			// A syntax entry mixed into an evaluation directory is
-			// covered by the syntax-level guard in readers_test.odin.
-			syntax_only += 1
+			// covered by the syntax-level guard in readers_test.odin; a
+			// SPARQL Update entry is out of the engine's scope by the
+			// vision and counted there too. Either way it is accounted
+			// for, never silently skipped.
+			not_evaluated += 1
 			continue
 		}
 
@@ -447,12 +494,12 @@ run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
 		)
 	}
 	log.infof(
-		"%s [%s]: %d/%d evaluation tests passed (%d syntax-only entries)",
+		"%s [%s]: %d/%d evaluation tests passed (%d entries not evaluated)",
 		suite.dir,
 		backend_name(backend),
 		passed,
-		len(entries) - syntax_only,
-		syntax_only,
+		len(entries) - not_evaluated,
+		not_evaluated,
 	)
 }
 

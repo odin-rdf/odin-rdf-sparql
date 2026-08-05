@@ -419,11 +419,51 @@ expr_eval :: proc(ctx: ^Expr_Context, e: Expr) -> Value {
 			return ERROR_VALUE
 		}
 		return eval_cast(ctx, v.iri, expr_eval(ctx, v.args[0]))
-	case ^Aggregate, ^Triple_Term:
+	case ^Triple_Term:
+		return eval_triple_term(ctx, v)
+	case ^Aggregate:
 	// Refused at plan time (expr_check); reaching here would be a bug
 	// in that check rather than a query the engine should answer.
 	}
 	return ERROR_VALUE
+}
+
+// eval_triple_term evaluates `<<( s p o )>>` written as an expression
+// (SPARQL 1.2's ExprTripleTerm). It is TRIPLE(s, p, o) in surface
+// syntax, so it is TRIPLE(s, p, o) here too — the same construction and
+// the same refusals, over components that are terms or variables rather
+// than arbitrary expressions.
+@(private = "file")
+eval_triple_term :: proc(ctx: ^Expr_Context, tt: ^Triple_Term) -> Value {
+	if tt == nil {
+		return ERROR_VALUE
+	}
+	subject := expr_eval(ctx, pattern_node_expr(tt.subject))
+	predicate := expr_eval(ctx, pattern_node_expr(tt.predicate))
+	object := expr_eval(ctx, pattern_node_expr(tt.object))
+	return build_triple_value(ctx, subject, predicate, object)
+}
+
+// pattern_node_expr reads a triple term's component as the expression it
+// is. The parser restricts an expression triple term's components to
+// variables, IRIs, literals, and nested triple terms — the four the Expr
+// union already carries — so this is a change of type and not a
+// conversion.
+@(private)
+pattern_node_expr :: proc(node: Pattern_Node) -> Expr {
+	switch v in node {
+	case Var:
+		return v
+	case rdf.IRI:
+		return v
+	case rdf.Literal:
+		return v
+	case ^Triple_Term:
+		return v
+	case rdf.Blank_Node, ^Path_Expr:
+	// Neither can occur in an expression; the parser rejects both.
+	}
+	return nil
 }
 
 @(private = "file")
@@ -634,7 +674,16 @@ expr_check :: proc(b: ^Plan_Builder, e: Expr) -> bool {
 	case ^Aggregate:
 		b.unsupported = "aggregate"
 	case ^Triple_Term:
-		b.unsupported = "triple-term expression"
+		if v == nil {
+			b.unsupported = "empty triple term"
+			return false
+		}
+		for component in ([3]Pattern_Node{v.subject, v.predicate, v.object}) {
+			if !expr_check(b, pattern_node_expr(component)) {
+				return false
+			}
+		}
+		return true
 	case nil:
 		b.unsupported = "empty expression"
 	}
@@ -689,7 +738,17 @@ expr_within :: proc(slots: ^Var_Slots, e: Expr, bindable: []bool) -> bool {
 			}
 		}
 		return true
-	case ^Aggregate, ^Triple_Term:
+	case ^Triple_Term:
+		if v == nil {
+			return false
+		}
+		for component in ([3]Pattern_Node{v.subject, v.predicate, v.object}) {
+			if !expr_within(slots, pattern_node_expr(component), bindable) {
+				return false
+			}
+		}
+		return true
+	case ^Aggregate:
 		return false
 	case nil:
 		return false

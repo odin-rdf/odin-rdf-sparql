@@ -12,7 +12,8 @@
 // SPARQL 1.2 "triple", whose "value" is an object of subject/predicate/
 // object. A literal carries an optional "datatype" or "xml:lang" (the
 // key is spelled that way in the specification; "lang" is accepted too,
-// as some writers emit it).
+// as some writers emit it), and — SPARQL 1.2 again — an "its:dir"
+// base direction beside the language tag.
 package w3c
 
 import "core:encoding/json"
@@ -126,6 +127,16 @@ srj_term :: proc(value: json.Value) -> (term: rdf.Term, ok: bool) {
 			language, has_language = json_string(object, "lang")
 		}
 		if has_language {
+			// SPARQL 1.2 writes a base direction alongside the language
+			// tag, under the key the ITS vocabulary gives it.
+			if direction, has_direction := json_string(object, "its:dir"); has_direction {
+				switch direction {
+				case "ltr":
+					return rdf.literal_dir_lang(lexical, language, .LTR), true
+				case "rtl":
+					return rdf.literal_dir_lang(lexical, language, .RTL), true
+				}
+			}
 			return rdf.literal_lang(lexical, language), true
 		}
 		return rdf.literal_plain(lexical), true

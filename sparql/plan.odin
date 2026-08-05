@@ -146,6 +146,20 @@ plan_ref_is_var :: proc(r: Plan_Ref) -> bool {
 // active graph — store.DEFAULT_GRAPH outside a GRAPH clause.
 Plan_Triple :: distinct [4]Plan_Ref
 
+// Plan_Term_Shape is a triple-term pattern that is not ground: what a
+// matched triple term's components have to be for the pattern to hold.
+//
+// slot is a fresh internal slot the matched term's ID lands in — the
+// position in the enclosing triple pattern *is* that slot, so the
+// ordinary unification binds it and the shape reads it back. parts are
+// the components, each a slot to unify or a ground ID to equal; a
+// component that is itself a non-ground triple term is the slot of its
+// own shape, which is listed after this one and reads it the same way.
+Plan_Term_Shape :: struct {
+	slot:  int,
+	parts: [3]Plan_Ref,
+}
+
 // Plan_BGP is a basic graph pattern to be evaluated as a chain of
 // index probes: for each pattern in join order, substitute what the
 // row already binds and match.
@@ -154,9 +168,19 @@ Plan_Triple :: distinct [4]Plan_Ref
 // Today it is the identity permutation (patterns in the order written),
 // which is what "naive fixed join order" means; nothing else in the
 // engine assumes anything about it.
+//
+// shapes holds the triple-term decompositions the patterns need, with
+// shape_range naming each pattern's slice of them (parallel to triples,
+// indexed the same way — by pattern, not by depth). Within a slice a
+// parent precedes its children, so one forward pass fills every nested
+// slot before the shape that reads it is reached. Both are empty for a
+// pattern with no non-ground triple term, which is every SPARQL 1.1
+// query.
 Plan_BGP :: struct {
-	triples: [dynamic]Plan_Triple,
-	order:   [dynamic]int,
+	triples:     [dynamic]Plan_Triple,
+	order:       [dynamic]int,
+	shapes:      [dynamic]Plan_Term_Shape,
+	shape_range: [dynamic][2]int,
 }
 
 // Plan_Nothing yields no solutions. It is what a pattern collapses to
@@ -487,6 +511,11 @@ Plan_Builder :: struct {
 	// sub-plans alongside the main one.
 	exists_nodes: [dynamic]^Exists_Expr,
 	exists_plans: [dynamic]Plan,
+	// Triple terms the builder materialized and a plan node kept: a
+	// ground `<<( … )>>` written where the plan holds the term itself
+	// rather than only its ID — a VALUES cell, a path endpoint. Only the
+	// nodes are owned; the strings inside are the query's.
+	terms:        [dynamic]rdf.Term,
 	allocator:   runtime.Allocator,
 }
 
@@ -503,14 +532,29 @@ plan_builder_init :: proc(
 	b.graph = Plan_Ref{slot = -1, id = store.DEFAULT_GRAPH}
 	b.exists_nodes = make([dynamic]^Exists_Expr, allocator)
 	b.exists_plans = make([dynamic]Plan, allocator)
+	b.terms = make([dynamic]rdf.Term, allocator)
 	b.allocator = allocator
 }
 
 // plan_builder_destroy releases the builder's own bookkeeping. The plans
-// it produced belong to the caller.
+// it produced belong to the caller — but the triple terms they borrow
+// are the builder's, so it must outlive them.
 plan_builder_destroy :: proc(b: ^Plan_Builder) {
 	delete(b.exists_nodes)
 	delete(b.exists_plans)
+	for term in b.terms {
+		triple_term_free(term, b.allocator)
+	}
+	delete(b.terms)
+}
+
+// builder_term materializes a ground triple term the builder will own,
+// for a plan node that keeps the term and not only its ID.
+@(private = "file")
+builder_term :: proc(b: ^Plan_Builder, tt: ^Triple_Term) -> rdf.Term {
+	term := triple_term_term(tt, b.allocator)
+	append(&b.terms, term)
+	return term
 }
 
 // exists_register builds the sub-plan for an EXISTS pattern and returns
@@ -840,8 +884,18 @@ path_end :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (end: Plan_Path_End, o
 	case rdf.Literal:
 		return ground_end(b, v), true
 	case ^Triple_Term:
-		b.unsupported = "triple term pattern"
-		return {}, false
+		// A ground triple term is a term like any other, so a path can
+		// start or end at one. A non-ground one would need the shape
+		// machinery a basic graph pattern has and a path endpoint does
+		// not: there is no unification step to hang it on.
+		if !triple_term_is_ground(v) {
+			b.unsupported = "triple term pattern"
+			return {}, false
+		}
+		// The builder owns the node: an endpoint the store does not hold
+		// keeps its term, to be named synthetically when the execution is
+		// built.
+		return ground_end(b, builder_term(b, v)), true
 	case ^Path_Expr:
 		b.unsupported = "property path in a path endpoint"
 		return {}, false
@@ -988,12 +1042,18 @@ build_path_link :: proc(
 	plan := new(Plan_BGP, b.allocator)
 	plan.triples = make([dynamic]Plan_Triple, b.allocator)
 	plan.order = make([dynamic]int, b.allocator)
+	plan.shapes = make([dynamic]Plan_Term_Shape, b.allocator)
+	plan.shape_range = make([dynamic][2]int, b.allocator)
 	triple: Plan_Triple
 	triple[store.QUAD_S] = subject_ref
 	triple[store.QUAD_P] = predicate_ref
 	triple[store.QUAD_O] = object_ref
 	triple[store.QUAD_G] = b.graph
 	append(&plan.triples, triple)
+	// No triple term can occur in a path step — a path endpoint that is
+	// one is ground, and its predicate is an IRI — but the range still
+	// has to be there, because merging two patterns reads one per triple.
+	append(&plan.shape_range, [2]int{0, 0})
 	join_order(plan)
 	return plan, true
 }
@@ -1221,8 +1281,17 @@ join_plans :: proc(b: ^Plan_Builder, left, right: Plan) -> (p: Plan, ok: bool) {
 	left_bgp, left_is_bgp := left.(^Plan_BGP)
 	right_bgp, right_is_bgp := right.(^Plan_BGP)
 	if left_is_bgp && right_is_bgp {
-		for t in right_bgp.triples {
+		// The shapes move with their patterns: a merged pattern keeps its
+		// own triple-term decompositions, and its range slides by however
+		// many shapes the left side already had.
+		base := len(left_bgp.shapes)
+		for shape in right_bgp.shapes {
+			append(&left_bgp.shapes, shape)
+		}
+		for t, i in right_bgp.triples {
 			append(&left_bgp.triples, t)
+			range := right_bgp.shape_range[i]
+			append(&left_bgp.shape_range, [2]int{base + range[0], base + range[1]})
 		}
 		clear(&left_bgp.order)
 		join_order(left_bgp)
@@ -1489,6 +1558,14 @@ build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
 				out.id, _, out.bound = ground_ref_id(b, v)
 				out.absent = !out.bound
 				out.term = v
+			case ^Triple_Term:
+				// A data block is ground by the grammar, so a triple term
+				// here always names a term; the builder owns the node
+				// because an absent cell keeps it.
+				term := builder_term(b, v)
+				out.id, _, out.bound = ground_ref_id(b, term)
+				out.absent = !out.bound
+				out.term = term
 			case nil:
 			// UNDEF: the cell binds nothing, and that is an answer.
 			case:
@@ -1520,12 +1597,15 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 	plan := new(Plan_BGP, b.allocator)
 	plan.triples = make([dynamic]Plan_Triple, b.allocator)
 	plan.order = make([dynamic]int, b.allocator)
+	plan.shapes = make([dynamic]Plan_Term_Shape, b.allocator)
+	plan.shape_range = make([dynamic][2]int, b.allocator)
 
 	for triple in bgp.triples {
 		t: Plan_Triple
+		start := len(plan.shapes)
 		positions := [3]Pattern_Node{triple.subject, triple.predicate, triple.object}
 		for node, i in positions {
-			ref, ref_ok, present := plan_ref(b, node)
+			ref, ref_ok, present := plan_ref(b, node, &plan.shapes)
 			if !ref_ok {
 				discard_bgp(plan, b.allocator)
 				return nil, false
@@ -1540,6 +1620,7 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 		}
 		t[store.QUAD_G] = b.graph
 		append(&plan.triples, t)
+		append(&plan.shape_range, [2]int{start, len(plan.shapes)})
 	}
 	join_order(plan)
 	return plan, true
@@ -1551,11 +1632,25 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 discard_bgp :: proc(plan: ^Plan_BGP, allocator: runtime.Allocator) {
 	delete(plan.triples)
 	delete(plan.order)
+	delete(plan.shapes)
+	delete(plan.shape_range)
 	free(plan, allocator)
 }
 
+// plan_ref resolves one pattern position. shapes is where a non-ground
+// triple term deposits its decomposition; a caller that has nowhere to
+// put one passes nil and gets an unsupported instead — a property path's
+// endpoint, which has no unification step to hang a shape on.
 @(private = "file")
-plan_ref :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (ref: Plan_Ref, ok: bool, present: bool) {
+plan_ref :: proc(
+	b: ^Plan_Builder,
+	node: Pattern_Node,
+	shapes: ^[dynamic]Plan_Term_Shape = nil,
+) -> (
+	ref: Plan_Ref,
+	ok: bool,
+	present: bool,
+) {
 	switch v in node {
 	case Var:
 		return Plan_Ref{slot = var_slot(b.slots, v.name)}, true, true
@@ -1566,14 +1661,163 @@ plan_ref :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (ref: Plan_Ref, ok: bo
 	case rdf.Literal:
 		return ground_ref(b, v)
 	case ^Triple_Term:
-		b.unsupported = "triple term pattern"
-		return {}, false, false
+		return triple_term_ref(b, v, shapes)
 	case ^Path_Expr:
 		b.unsupported = "property path"
 		return {}, false, false
 	}
 	b.unsupported = "empty pattern position"
 	return {}, false, false
+}
+
+// --- Triple terms ----------------------------------------------------
+//
+// A SPARQL 1.2 triple term in a pattern position is one of two things,
+// and which one it is is decided here rather than per solution.
+//
+// **Ground** — every component is an IRI or a literal, all the way down.
+// Then the term has an identity the dictionary can answer for, and it
+// resolves to a Term_ID exactly as an IRI does: `find_term` walks the
+// components itself, and a term the store does not hold makes the
+// pattern unsatisfiable, so the whole basic graph pattern collapses.
+// Nothing about matching changes — the position is an ID and the store
+// probes it.
+//
+// **Non-ground** — some component is a variable or a blank node. Then
+// the position matches *any* triple term whose components unify, which
+// the store cannot express: a match pattern binds a position to one ID
+// or leaves it open. So the position becomes a fresh internal slot, the
+// store hands back whatever triple term sits there, and the components
+// are checked afterwards against the shape — the same
+// bind-or-compare unification a repeated variable within one pattern
+// gets. Taking the matched term apart is what Triple_Reader is for
+// (exec.odin).
+
+// triple_term_ref resolves a triple term in a pattern position.
+@(private = "file")
+triple_term_ref :: proc(
+	b: ^Plan_Builder,
+	tt: ^Triple_Term,
+	shapes: ^[dynamic]Plan_Term_Shape,
+) -> (
+	ref: Plan_Ref,
+	ok: bool,
+	present: bool,
+) {
+	if triple_term_is_ground(tt) {
+		term := triple_term_term(tt, b.allocator)
+		defer triple_term_free(term, b.allocator)
+		return ground_ref(b, term)
+	}
+	if shapes == nil {
+		b.unsupported = "triple term pattern"
+		return {}, false, false
+	}
+	slot, shape_ok, shape_present := build_shape(b, shapes, tt)
+	return Plan_Ref{slot = slot}, shape_ok, shape_present
+}
+
+// build_shape appends the shape for a non-ground triple term (and,
+// depth-first, for the non-ground triple terms inside it) and returns the
+// slot its ID will be matched into. present is false when a ground
+// component is a term the store does not hold: then no triple term in the
+// store can have it, and the pattern matches nothing.
+@(private = "file")
+build_shape :: proc(
+	b: ^Plan_Builder,
+	shapes: ^[dynamic]Plan_Term_Shape,
+	tt: ^Triple_Term,
+) -> (
+	slot: int,
+	ok: bool,
+	present: bool,
+) {
+	at := len(shapes^)
+	slot = fresh_internal_slot(b.slots)
+	append(shapes, Plan_Term_Shape{slot = slot})
+	positions := [3]Pattern_Node{tt.subject, tt.predicate, tt.object}
+	for node, i in positions {
+		// The nested case is spelled out rather than left to plan_ref so
+		// that a nested shape lands in the same list, after this one.
+		part, part_ok, part_present := plan_ref(b, node, shapes)
+		if !part_ok {
+			return 0, false, false
+		}
+		if !part_present {
+			return 0, true, false
+		}
+		shapes[at].parts[i] = part
+	}
+	return slot, true, true
+}
+
+// triple_term_is_ground reports whether a triple-term pattern names one
+// term — every component an IRI or a literal, all the way down. A
+// variable or a blank node anywhere inside makes it a pattern instead.
+//
+// Groundness is asked separately from materializing so that building the
+// term cannot fail halfway and leave nodes with no owner.
+@(private)
+triple_term_is_ground :: proc(tt: ^Triple_Term) -> bool {
+	if tt == nil {
+		return false
+	}
+	for position in ([3]Pattern_Node{tt.subject, tt.predicate, tt.object}) {
+		switch v in position {
+		case rdf.IRI, rdf.Literal:
+		case ^Triple_Term:
+			if !triple_term_is_ground(v) {
+				return false
+			}
+		case Var, rdf.Blank_Node, ^Path_Expr:
+			return false
+		case nil:
+			return false
+		}
+	}
+	return true
+}
+
+// triple_term_term materializes a ground triple-term pattern as the RDF
+// term it names. Only the ^rdf.Triple nodes are allocated; every string
+// is the query's, which outlives anything built here. Free with
+// triple_term_free.
+@(private)
+triple_term_term :: proc(tt: ^Triple_Term, allocator: runtime.Allocator) -> rdf.Term {
+	node := new(rdf.Triple, allocator)
+	parts: [3]rdf.Term
+	for position, i in ([3]Pattern_Node{tt.subject, tt.predicate, tt.object}) {
+		switch v in position {
+		case rdf.IRI:
+			parts[i] = v
+		case rdf.Literal:
+			parts[i] = v
+		case ^Triple_Term:
+			parts[i] = triple_term_term(v, allocator)
+		case Var, rdf.Blank_Node, ^Path_Expr:
+			panic("triple_term_term: not a ground triple term")
+		}
+	}
+	node^ = rdf.Triple {
+		subject   = parts[0],
+		predicate = parts[1],
+		object    = parts[2],
+	}
+	return node
+}
+
+// triple_term_free releases what triple_term_term allocated: the nodes,
+// and nothing else — the strings inside are borrowed.
+@(private)
+triple_term_free :: proc(term: rdf.Term, allocator: runtime.Allocator) {
+	node, is_triple := term.(^rdf.Triple)
+	if !is_triple || node == nil {
+		return
+	}
+	triple_term_free(node.subject, allocator)
+	triple_term_free(node.predicate, allocator)
+	triple_term_free(node.object, allocator)
+	free(node, allocator)
 }
 
 @(private = "file")
@@ -1608,6 +1852,8 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 	case ^Plan_BGP:
 		delete(v.triples)
 		delete(v.order)
+		delete(v.shapes)
+		delete(v.shape_range)
 		free(v, allocator)
 	case ^Plan_NPS:
 		delete(v.excluded)

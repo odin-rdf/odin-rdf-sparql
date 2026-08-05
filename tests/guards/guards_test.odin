@@ -271,6 +271,88 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 	)
 }
 
+// A triple-term pattern's memory contract (SPARQL-T-0018).
+//
+// Matching `<<( ?a ?b ?c )>>` means taking apart whatever triple term the
+// store had in that position, once per candidate — which is exactly the
+// kind of step that quietly materializes a term per solution and undoes
+// the streaming promise above. It does not have to: memstore's dictionary
+// already holds the component IDs it interned the term from, and the
+// Triple_Reader adapter reads them straight out. So the guard is the same
+// one, over a pattern the earlier one cannot reach.
+//
+// A backend that has to materialize instead — kvstore does — will not
+// satisfy this, and that difference is the store evidence the adapter's
+// comment records.
+@(test)
+test_triple_term_matching_streams_without_allocating :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d)
+	defer memstore.dictionary_destroy(&d)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds)
+	defer memstore.dataset_destroy(&ds)
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for i in 0 ..< 500 {
+		fmt.sbprintf(
+			&b,
+			"<http://e/s%d> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/o%d> )>> .\n",
+			i,
+			i,
+		)
+	}
+	_, load_err := memstore.load_triples(&d, &ds, transmute([]byte)strings.to_string(b))
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	p: sparql.Parser
+	sparql.parser_init(
+		&p,
+		transmute([]byte)string(`SELECT * WHERE { ?s <http://e/r> <<( ?a <http://e/p> ?o )>> }`),
+	)
+	defer sparql.parser_destroy(&p)
+	_, parsed := sparql.parse(&p)
+	testing.expect(t, parsed, "the query should parse")
+	algebra, translated := sparql.translate(&p)
+	testing.expect(t, translated, "the query should translate")
+
+	q: sparql_mem.Query
+	prepared := sparql_mem.query_init(&q, algebra, &d, &ds)
+	defer sparql_mem.query_destroy(&q)
+	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
+
+	// As above: the first match makes memstore merge its pending inserts,
+	// which is the store's business and happens once.
+	_, first := sparql_mem.query_next(&q)
+	testing.expect(t, first, "the query should have solutions")
+
+	before := track.total_allocation_count
+	solutions := 1
+	for {
+		_, more := sparql_mem.query_next(&q)
+		if !more {
+			break
+		}
+		solutions += 1
+	}
+	after := track.total_allocation_count
+
+	testing.expectf(t, solutions == 500, "expected 500 solutions, got %d", solutions)
+	testing.expectf(
+		t,
+		after == before,
+		"streaming %d triple-term solutions performed %d allocations; taking a term apart must allocate none",
+		solutions,
+		after - before,
+	)
+}
+
 // Aggregation's memory contract (SPARQL-T-0015).
 //
 // A GROUP BY is a blocking operator, but it must not be a *buffering*
@@ -484,7 +566,9 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 		&ds,
 		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
 <http://e/b> <http://e/p> <http://e/c> .
-<http://e/c> <http://e/p> <http://e/a> .`),
+<http://e/c> <http://e/p> <http://e/a> .
+<http://e/a> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> .
+<http://e/b> <http://e/r> <<( <http://e/b> <http://e/p> <<( <http://e/c> <http://e/p> <http://e/a> )>> )>> .`),
 	)
 	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
 
@@ -543,6 +627,22 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 		// binds it anyway, so it is named rather than short-circuited, and
 		// the name it is given is owned by the execution.
 		`SELECT ?o WHERE { <http://e/missing> <http://e/p>* ?o }`,
+		// A triple term owns things at three different moments
+		// (SPARQL-T-0018). A *ground* one is materialized at plan time to
+		// be looked up and released again — unless a VALUES cell or a path
+		// endpoint keeps it, when the builder owns it instead. A
+		// *non-ground* one adds a shape and the internal slots it binds
+		// into. And one the query *computes* is a node in the evaluation
+		// scratch that has to survive exactly until it has been named.
+		`SELECT * WHERE { ?s <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> }`,
+		`SELECT * WHERE { ?s <http://e/r> <<( <http://e/a> <http://e/p> <http://e/nowhere> )>> }`,
+		`SELECT * WHERE { ?s <http://e/r> <<( ?a <http://e/p> ?b )>> }`,
+		`SELECT * WHERE { ?s <http://e/r> <<( ?a <http://e/p> <<( ?x ?y ?z )>> )>> }`,
+		`SELECT ?t WHERE { VALUES ?t { <<( <http://e/a> <http://e/p> <http://e/b> )>>
+		                               <<( <http://e/x> <http://e/p> <http://e/y> )>> } }`,
+		`SELECT (<<( ?s <http://e/p> ?o )>> AS ?t) (TRIPLE(?s, <http://e/p>, ?o) AS ?u)
+		 WHERE { ?s <http://e/p> ?o }`,
+		`SELECT ?o WHERE { <<( <http://e/a> <http://e/p> <http://e/b> )>> <http://e/p>* ?o }`,
 	}
 	for query in QUERIES {
 		for stop_early in ([?]bool{false, true}) {
@@ -608,7 +708,8 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 		&ds,
 		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
 <http://e/b> <http://e/p> <http://e/c> .
-<http://e/c> <http://e/p> "text" .`),
+<http://e/c> <http://e/p> "text" .
+<http://e/a> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> .`),
 	)
 	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
 
@@ -629,6 +730,14 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 		`DESCRIBE ?o WHERE { ?s <http://e/p> ?o }`,
 		`DESCRIBE * WHERE { ?s <http://e/p> ?o }`,
 		`DESCRIBE <http://e/nobody>`,
+		// A template that builds a triple term keeps a node and a label
+		// buffer per compiled term, reused across solutions and freed with
+		// the template — and a term with an unbound component is not built
+		// at all, which must not leave a half-filled node behind
+		// (SPARQL-T-0018).
+		`CONSTRUCT { ?s <http://e/states> <<( ?s ?p ?o )>> } WHERE { ?s ?p ?o }`,
+		`CONSTRUCT { ?s <http://e/states> <<( ?s ?p ?missing )>> } WHERE { ?s ?p ?o }`,
+		`CONSTRUCT { ?s <http://e/states> <<( ?s ?p <<( ?s ?p ?o )>> )>> } WHERE { ?s ?p ?o }`,
 	}
 	for query in QUERIES {
 		p: sparql.Parser

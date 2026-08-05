@@ -270,6 +270,68 @@ test_describe_star :: proc(t: ^testing.T) {
 	)
 }
 
+// A SPARQL 1.2 triple term in a template is built per solution out of
+// positions of its own, so a variable inside one is read from the
+// solution exactly as a variable beside one is (SPARQL-T-0018).
+@(test)
+test_construct_builds_a_triple_term :: proc(t: ^testing.T) {
+	lines, ok := constructed(t, DATA, `PREFIX : <http://example/>
+	     CONSTRUCT { ?o :states <<( ?o :q ?v )>> } WHERE { ?o :q ?v }`)
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(
+		t,
+		lines,
+		{
+			`<http://example/a> <http://example/states> ` +
+			`<<( <http://example/a> <http://example/q> "2"^^xsd:string )>>`,
+			`<http://example/b> <http://example/states> ` +
+			`<<( <http://example/b> <http://example/q> "2"^^xsd:string )>>`,
+		},
+	)
+}
+
+// RDF 1.2 admits a triple term as an object and nowhere else, so a
+// template that writes one as a subject produces nothing — the same
+// silent drop §16.2 gives a literal subject, and the reason the
+// suite's CONSTRUCT entries all use the *reified* form, whose reifier
+// is a blank node.
+@(test)
+test_construct_drops_a_triple_term_subject :: proc(t: ^testing.T) {
+	lines, ok := constructed(t, DATA, `PREFIX : <http://example/>
+	     CONSTRUCT { <<( ?o :q ?v )>> :source :ABC } WHERE { ?o :q ?v }`)
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(t, lines, {})
+}
+
+// The §16.2 rule that drops a template triple applies inside a triple
+// term too: a term whose component this solution leaves unbound is not
+// built, and neither is the triple that would have held it — while the
+// triples beside it still are.
+@(test)
+test_construct_drops_a_triple_term_with_an_unbound_component :: proc(t: ^testing.T) {
+	lines, ok := constructed(t, DATA, `PREFIX : <http://example/>
+	     CONSTRUCT { ?o :states <<( ?o :q ?missing )>> . ?o :kind :thing }
+	     WHERE { ?x :p ?o }`)
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(
+		t,
+		lines,
+		{
+			`<http://example/a> <http://example/kind> <http://example/thing>`,
+			`<http://example/b> <http://example/kind> <http://example/thing>`,
+		},
+	)
+}
+
 // --- helpers --------------------------------------------------------
 
 @(private = "file")
@@ -430,7 +492,13 @@ write_form_term :: proc(b: ^strings.Builder, term: rdf.Term) {
 		strings.write_string(b, string(v.datatype))
 		strings.write_byte(b, '>')
 	case ^rdf.Triple:
-		strings.write_string(b, "<<triple>>")
+		strings.write_string(b, "<<( ")
+		write_form_term(b, v.subject)
+		strings.write_byte(b, ' ')
+		write_form_term(b, v.predicate)
+		strings.write_byte(b, ' ')
+		write_form_term(b, v.object)
+		strings.write_string(b, " )>>")
 	case nil:
 		strings.write_string(b, "UNBOUND")
 	}

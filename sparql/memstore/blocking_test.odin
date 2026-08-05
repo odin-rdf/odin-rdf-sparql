@@ -344,6 +344,59 @@ test_order_by_an_unprojected_variable :: proc(t: ^testing.T) {
 	expect_rows(t, rows, {`?s=<http://example/s2>`, `?s=<http://example/s3>`, `?s=<http://example/s1>`})
 }
 
+// A blocking operator hands out a whole row at a time, and a LIMIT above
+// it can stop asking before it is finished. Neither is visible on its
+// own; put them under a UNION and they are, because the right branch
+// then starts on whatever the left one happened to leave in the row.
+//
+// Both branches here bind the same variable, so a left-over ?v would
+// narrow the right branch's pattern to the value the left branch
+// produced and the second solution would go missing. Found through
+// sparql12-eval-triple-terms' `order-by`, which is twenty of these in a
+// row; it is not a 1.2 question at all.
+@(test)
+test_union_branches_start_from_the_same_bindings :: proc(t: ^testing.T) {
+	rows, ok := solutions(
+		t,
+		`@prefix : <http://example/> .
+		 :s :p 1, 2 .`,
+		`PREFIX : <http://example/>
+		 SELECT ?v WHERE {
+		   { SELECT ?v { ?s :p ?v } ORDER BY ?v LIMIT 1 }
+		   UNION
+		   { SELECT ?v { ?s :p ?v } ORDER BY ?v OFFSET 1 LIMIT 1 }
+		 }`,
+	)
+	defer destroy_rows(&rows)
+	if !ok {
+		return
+	}
+	expect_rows(t, rows, {`?v="1"^^xsd:integer`, `?v="2"^^xsd:integer`})
+}
+
+// A subquery hands its consumer a *projected copy* of the row rather than
+// the row itself, so a BIND above one has to write the binding into that
+// copy as well — otherwise the value is computed, is visible to
+// everything that probes, and is missing from the answer.
+@(test)
+test_bind_over_a_subquery_reaches_the_answer :: proc(t: ^testing.T) {
+	rows, ok := solutions(
+		t,
+		`@prefix : <http://example/> .
+		 :s :p 1 .`,
+		`PREFIX : <http://example/>
+		 SELECT * WHERE {
+		   { SELECT ?v { ?s :p ?v } }
+		   BIND("tag" AS ?label)
+		 }`,
+	)
+	defer destroy_rows(&rows)
+	if !ok {
+		return
+	}
+	expect_rows(t, rows, {`?label="tag"^^xsd:string ?v="1"^^xsd:integer`})
+}
+
 // --- helpers --------------------------------------------------------
 
 // solutions evaluates a query against a freshly loaded store and renders

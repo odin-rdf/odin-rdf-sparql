@@ -62,4 +62,8 @@ EVAL_SUITES := [?]Suite {
 	{"sparql11-project-expression", DATA_SPARQL11 + "project-expression/", 7},
 	{"sparql11-property-path", DATA_SPARQL11 + "property-path/", 33},
 	{"sparql11-subquery", DATA_SPARQL11 + "subquery/", 14},
+	{"sparql12-eval-triple-terms", SPARQL12 + "eval-triple-terms/", 41},
+	{"sparql12-expression", SPARQL12 + "expression/", 5},
+	{"sparql12-grouping", SPARQL12 + "grouping/", 2},
+	{"sparql12-rdf11", SPARQL12 + "rdf11/", 3},
 }

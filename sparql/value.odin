@@ -615,7 +615,7 @@ value_equal :: proc(a, b: Value) -> (equal: bool, ok: bool) {
 		return a.text == b.text, true
 	}
 	if a.kind == .Triple && b.kind == .Triple {
-		return rdf.equal_term(a.term, b.term), true
+		return triple_equal(a.term, b.term)
 	}
 
 	if is_literal_kind(a) && is_literal_kind(b) {
@@ -662,6 +662,37 @@ value_equal :: proc(a, b: Value) -> (equal: bool, ok: bool) {
 	// A literal is not an IRI and not a blank node, an IRI is not a
 	// blank node: all definite inequalities, whatever the literal means.
 	return false, true
+}
+
+// triple_equal is `=` over two triple terms: component-wise, by value.
+// Two triple terms are equal when all three components are equal, and
+// unequal as soon as one is definitely unequal — so
+// `<<( :a :b 1 )>> = <<( :a :b 1.0 )>>` is true where sameTerm is false,
+// which is exactly what the 1.2 suite's `op-2` pins.
+//
+// An error in a component is only decisive when nothing else already
+// decided: a pair with one definitely-unequal component is unequal
+// whatever the engine can or cannot say about the others.
+@(private = "file")
+triple_equal :: proc(a, b: rdf.Term) -> (equal: bool, ok: bool) {
+	left, left_is_triple := a.(^rdf.Triple)
+	right, right_is_triple := b.(^rdf.Triple)
+	if !left_is_triple || !right_is_triple || left == nil || right == nil {
+		return false, false
+	}
+	comparable := true
+	for component, i in ([3]rdf.Term{left.subject, left.predicate, left.object}) {
+		other := ([3]rdf.Term{right.subject, right.predicate, right.object})[i]
+		same, decided := value_equal(value_of(component), value_of(other))
+		if !decided {
+			comparable = false
+			continue
+		}
+		if !same {
+			return false, true
+		}
+	}
+	return comparable, comparable
 }
 
 @(private = "file")

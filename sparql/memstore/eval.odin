@@ -68,6 +68,24 @@ find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found:
 	return memstore.find_term(dictionary, term)
 }
 
+// triple_adapter takes a stored triple term apart, for a triple-term
+// pattern that is not ground. memstore's dictionary keeps the component
+// IDs it interned the term from, so this is an array read and the
+// pattern costs no allocation — see sparql.Triple_Reader for the
+// direction the match interface is missing.
+@(private)
+triple_adapter :: proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term_ID, ok: bool) {
+	dictionary := cast(^memstore.Dictionary)data
+	if store.id_kind(id) != .Triple {
+		return {}, false
+	}
+	counter := int(store.id_counter(id))
+	if counter >= len(dictionary.triples) {
+		return {}, false
+	}
+	return dictionary.triples[counter], true
+}
+
 // exists_adapter is the door back into the generic executor. An
 // expression cannot call it directly — the call would complete a cycle
 // of generic instantiations that the compiler cannot close — so it goes
@@ -140,7 +158,7 @@ query_init :: proc(
 	q.plan = plan
 	q.exists_plans = q.builder.exists_plans[:]
 	q.exists_nodes = q.builder.exists_nodes[:]
-	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, q.exists_plans, q.exists_nodes, exists_adapter, expand_adapter, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, triple_adapter, dictionary, q.exists_plans, q.exists_nodes, exists_adapter, expand_adapter, allocator)
 	sparql.exec_set_base(&q.exec, base)
 	return true
 }

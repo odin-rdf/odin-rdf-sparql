@@ -135,7 +135,7 @@ test_expected_result_readers :: proc(t: ^testing.T) {
 // mysteriously runs no tests.
 @(test)
 test_evaluation_entries_are_complete :: proc(t: ^testing.T) {
-	with_data, with_graph_data := 0, 0
+	with_data, with_graph_data, update_out_of_scope := 0, 0, 0
 	for suite in EVAL_SUITES {
 		manifest_path, _ := filepath.join({SUITE_ROOT, suite.dir, "manifest.ttl"})
 		defer delete(manifest_path)
@@ -148,6 +148,15 @@ test_evaluation_entries_are_complete :: proc(t: ^testing.T) {
 		entries := parse_manifest(string(manifest_data))
 		defer destroy_entries(&entries)
 		for e in entries {
+			if strings.contains(e.type_str, "UpdateEvaluationTest") {
+				// SPARQL Update is out of the engine's scope by design
+				// (vision constraint), and an Update entry names a
+				// ut:request rather than a qt:query. Counted and
+				// acknowledged, the way the syntax harness does it, never
+				// silently skipped.
+				update_out_of_scope += 1
+				continue
+			}
 			testing.expectf(t, e.action != "", "%s/%s: entry has no resolvable query file", suite.dir, e.id)
 			if !strings.contains(e.type_str, "QueryEvaluationTest") {
 				continue
@@ -163,8 +172,26 @@ test_evaluation_entries_are_complete :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, with_data > 0, "no entry resolved a qt:data document")
 	testing.expect(t, with_graph_data > 0, "no entry resolved a qt:graphData document")
-	log.infof("%d entries carry qt:data, %d carry qt:graphData", with_data, with_graph_data)
+	testing.expectf(
+		t,
+		update_out_of_scope == UPDATE_ENTRIES,
+		"%d Update entries in the vendored evaluation suites, expected %d — the exclusion moved",
+		update_out_of_scope,
+		UPDATE_ENTRIES,
+	)
+	log.infof(
+		"%d entries carry qt:data, %d carry qt:graphData (%d Update entries out of engine scope)",
+		with_data,
+		with_graph_data,
+		update_out_of_scope,
+	)
 }
+
+// The number of SPARQL Update entries mixed into the vendored evaluation
+// directories: the three in sparql12-eval-triple-terms. Update is out of
+// the engine's scope by the vision, and pinning the count means neither
+// growing nor shrinking it can pass unnoticed.
+UPDATE_ENTRIES :: 3
 
 // The number of evaluation entries whose data is RDF/XML, a format
 // odin-rdf-parser does not implement. Pinned rather than tolerated: the
@@ -260,7 +287,9 @@ test_evaluation_queries_parse :: proc(t: ^testing.T) {
 		entries := parse_manifest(string(manifest_data))
 		defer destroy_entries(&entries)
 		for e in entries {
-			if strings.contains(e.type_str, "NegativeSyntaxTest") || e.action == "" {
+			if strings.contains(e.type_str, "NegativeSyntaxTest") ||
+			   strings.contains(e.type_str, "UpdateEvaluationTest") ||
+			   e.action == "" {
 				continue
 			}
 			path, _ := filepath.join({SUITE_ROOT, suite.dir, e.action})

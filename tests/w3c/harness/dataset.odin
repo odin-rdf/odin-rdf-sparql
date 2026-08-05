@@ -102,6 +102,15 @@ load_document :: proc(td: ^Test_Dataset, suite: Suite, name: string, graph: rdf.
 		_, load_err = memstore.load_turtle(&td.dictionary, &td.dataset, content, base, graph)
 	case strings.has_suffix(name, ".nt"):
 		_, load_err = memstore.load_triples(&td.dictionary, &td.dataset, content, graph)
+	case strings.has_suffix(name, ".trig"):
+		// A quad-bearing document names its own graphs, so the target
+		// graph is the document's rather than the caller's. The suites
+		// only ever name one as qt:data, which is what "load it as it
+		// stands" means for a document that already says where each
+		// statement lives.
+		_, load_err = memstore.load_trig(&td.dictionary, &td.dataset, content, base)
+	case strings.has_suffix(name, ".nq"):
+		_, load_err = memstore.load_quads(&td.dictionary, &td.dataset, content)
 	case strings.has_suffix(name, ".rdf"):
 		// RDF/XML. odin-rdf-parser implements N-Triples, N-Quads,
 		// Turtle, and TriG — not RDF/XML — so the ten sparql11-subquery
