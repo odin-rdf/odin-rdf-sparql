@@ -107,6 +107,21 @@ exists_adapter :: proc(data: rawptr, index: int) -> bool {
 	return sparql.exec_exists(e, index, match_adapter, next_adapter, destroy_adapter)
 }
 
+// expand_adapter is the same door for a property path's step: the
+// traversal is running inside the executor and has to run an operator tree
+// to expand a frontier node, which only a concrete procedure can ask for.
+@(private)
+expand_adapter :: proc(
+	data: rawptr,
+	node: int,
+	from: store.Term_ID,
+	backward: bool,
+	out: ^[dynamic]store.Term_ID,
+) {
+	e := cast(^sparql.Exec(Session, kvstore.Match_Iterator))data
+	sparql.exec_path_expand(e, node, from, backward, out, match_adapter, next_adapter, destroy_adapter)
+}
+
 // Query is a prepared query bound to one store.
 Query :: struct {
 	session:      Session,
@@ -159,7 +174,7 @@ query_init :: proc(
 		q.plan = nil
 		return false
 	}
-	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, allocator)
+	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, expand_adapter, allocator)
 	sparql.exec_set_base(&q.exec, base)
 	return true
 }

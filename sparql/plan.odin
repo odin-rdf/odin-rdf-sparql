@@ -66,8 +66,12 @@ var_slots_destroy :: proc(vs: ^Var_Slots) {
 
 // var_slot returns the slot of a query variable, assigning one on first
 // sight. The returned slot is stable for the life of the query.
+//
+// A variable the path translation invented gets an internal slot: it is
+// fresh, which is to say not in scope, so it behaves like a pattern blank
+// node and never reaches an answer. See PATH_VAR_PREFIX.
 var_slot :: proc(vs: ^Var_Slots, name: string) -> int {
-	return slot_for(vs, "?", name, false)
+	return slot_for(vs, "?", name, strings.has_prefix(name, PATH_VAR_PREFIX))
 }
 
 // blank_slot returns the slot of a pattern blank node. It behaves as a
@@ -93,6 +97,23 @@ var_slot_lookup :: proc(vs: ^Var_Slots, name: string) -> (slot: int, found: bool
 // var_slots_count is the width of a solution row.
 var_slots_count :: proc(vs: ^Var_Slots) -> int {
 	return len(vs.names)
+}
+
+// PATH_SLOT_NAME is the name every slot the path compiler invents carries.
+// The name is shared and the slots are not: a fresh slot bypasses the index
+// map entirely, so two of them can be called the same thing without becoming
+// the same thing. Nothing looks these up by name — they are marked internal,
+// which is what keeps them out of `SELECT *` and out of var_slot_lookup —
+// so the name exists only to make a plan dump readable.
+PATH_SLOT_NAME :: "!path"
+
+// fresh_internal_slot returns a slot for a variable the engine invented
+// rather than the query. It is never findable by name and never projected.
+fresh_internal_slot :: proc(vs: ^Var_Slots) -> int {
+	slot := len(vs.names)
+	append(&vs.names, PATH_SLOT_NAME)
+	append(&vs.internal, true)
+	return slot
 }
 
 @(private = "file")
@@ -343,8 +364,81 @@ Plan_Materialized :: struct {
 	correlated: bool,
 }
 
+// Plan_Path_End is one endpoint of a property-path pattern: a variable
+// slot, or a ground term.
+//
+// It exists because a path endpoint cannot use Plan_Ref's rule that a
+// ground term the store does not hold makes the pattern unsatisfiable. A
+// zero-length path binds its endpoint to itself whether or not the data
+// has ever mentioned it — `:s :p* ?o` over the empty graph answers
+// `?o = :s`, which the suite pins as `zero_or_more_set_end`. So an absent
+// term is carried as the term it is and named with a synthetic ID when
+// the execution is built, exactly as a VALUES cell naming an unknown term
+// is.
+Plan_Path_End :: struct {
+	slot:   int, // >= 0: a variable slot; < 0: ground, use id
+	id:     store.Term_ID,
+	// A ground term the store does not hold. id is filled in at exec
+	// setup; term borrows the query's parse, which outlives the plan.
+	absent: bool,
+	term:   rdf.Term,
+}
+
+// Plan_NPS is a negated property set in one direction: every triple whose
+// predicate is *not* one of the excluded IDs.
+//
+// One direction, because §18.4's negated set with both forward and
+// inverse members is the union of two of them — `!(:a|^:b)` is
+// "everything but :a forwards" union "everything but :b backwards", and
+// not "everything but both in both directions". Plan building emits the
+// union; this node is one side of it.
+//
+// A member the store does not hold is dropped rather than kept: it cannot
+// equal any predicate in the data, so excluding it excludes nothing.
+Plan_NPS :: struct {
+	subject:  Plan_Ref,
+	object:   Plan_Ref,
+	graph:    Plan_Ref,
+	excluded: [dynamic]store.Term_ID,
+	// inverse swaps which quad position each end matches: the subject end
+	// against the object position and back.
+	inverse:  bool,
+}
+
+// Plan_Path is §18.4's three repeat forms — `?`, `*`, `+` — as one
+// operator over two flags: whether the zero-length path counts
+// (`include_start`, for `?` and `*`) and whether the step is followed
+// transitively (`closure`, for `*` and `+`).
+//
+// The operand is compiled as an ordinary sub-plan over two dedicated
+// internal slots: `Path(?in, P, ?out)`. Reachability then never has to
+// know what a step *is* — binding ?in and reading ?out drives an inner
+// path, a sequence, an alternative, or another repeat with no extra case.
+// The step is not an input: nothing pulls from it, and the executor runs
+// it once per frontier node (see exec.odin).
+//
+// The whole node is decided by the *pattern*, never by what happens to be
+// bound when it runs. When both endpoints are variables the zero-length
+// pairs range over the active graph's nodes (§18.4's nodes(G)), and that
+// stays true when an enclosing solution has already bound one of them —
+// a binding filters the answer, it does not change which definition
+// applies. That is what makes the operator safe to correlate, and it is
+// what `values_and_path` in the suite is testing.
+Plan_Path :: struct {
+	subject:       Plan_Path_End,
+	object:        Plan_Path_End,
+	graph:         Plan_Ref,
+	step:          Plan,
+	in_slot:       int,
+	out_slot:      int,
+	include_start: bool,
+	closure:       bool,
+}
+
 Plan :: union {
 	^Plan_BGP,
+	^Plan_NPS,
+	^Plan_Path,
 	^Plan_Nothing,
 	^Plan_Unit,
 	^Plan_Project,
@@ -497,7 +591,15 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		node.input = input
 		return node, true
 	case ^Alg_Path:
-		b.unsupported = "property path"
+		subject, subject_ok := path_end(b, v.subject)
+		if !subject_ok {
+			return nil, false
+		}
+		object, object_ok := path_end(b, v.object)
+		if !object_ok {
+			return nil, false
+		}
+		return build_path(b, subject, v.path, object)
 	case ^Alg_Left_Join:
 		for condition in v.conditions {
 			if !expr_check(b, condition) {
@@ -611,6 +713,18 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 			node.right = collected
 			return node, true
 		}
+		if plan_ref_is_var(ref) && plan_has_path(inner) {
+			// A path operator reads the active graph rather than binding
+			// it, so a body holding one needs ?g bound before it runs even
+			// when the body also has triple patterns that could have bound
+			// it themselves. See plan_has_path.
+			scan := new(Plan_Graph_Scan, b.allocator)
+			scan.slot = ref.slot
+			node := new(Plan_Join, b.allocator)
+			node.left = scan
+			node.right = scoped(b, inner)
+			return node, true
+		}
 		return inner, true
 	case ^Alg_Extend:
 		for binding in v.bindings {
@@ -703,6 +817,335 @@ build_group :: proc(b: ^Plan_Builder, g: ^Alg_Group) -> (p: Plan, ok: bool) {
 	return node, true
 }
 
+// --- Property paths -------------------------------------------------
+//
+// §18.4's path expressions, compiled into plan operators. The translation
+// already turned the forms that *are* triple patterns into triple
+// patterns (a bare link, and the sequences and inverses built from them),
+// so what arrives here is an alternative, a negated property set, one of
+// the three repeats, or any of those nested inside a repeat's operand.
+
+// path_end resolves one endpoint of a path pattern. Unlike plan_ref it
+// has no "absent" answer: a ground term the store does not hold is
+// carried as itself, because a zero-length path binds it regardless.
+@(private = "file")
+path_end :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (end: Plan_Path_End, ok: bool) {
+	switch v in node {
+	case Var:
+		return Plan_Path_End{slot = var_slot(b.slots, v.name)}, true
+	case rdf.Blank_Node:
+		return Plan_Path_End{slot = blank_slot(b.slots, string(v))}, true
+	case rdf.IRI:
+		return ground_end(b, v), true
+	case rdf.Literal:
+		return ground_end(b, v), true
+	case ^Triple_Term:
+		b.unsupported = "triple term pattern"
+		return {}, false
+	case ^Path_Expr:
+		b.unsupported = "property path in a path endpoint"
+		return {}, false
+	}
+	b.unsupported = "empty pattern position"
+	return {}, false
+}
+
+@(private = "file")
+ground_end :: proc(b: ^Plan_Builder, term: rdf.Term) -> Plan_Path_End {
+	id, found := b.find(b.data, term)
+	if !found {
+		return Plan_Path_End{slot = -1, absent = true, term = term}
+	}
+	return Plan_Path_End{slot = -1, id = id}
+}
+
+@(private = "file")
+slot_end :: proc(slot: int) -> Plan_Path_End {
+	return Plan_Path_End{slot = slot}
+}
+
+// end_ref narrows a path endpoint to a triple-pattern position. present
+// is false for a ground term the store does not hold: a *step* through
+// such a term matches nothing, even though a zero-length path over it
+// does not.
+@(private = "file")
+end_ref :: proc(end: Plan_Path_End) -> (ref: Plan_Ref, present: bool) {
+	if end.slot >= 0 {
+		return Plan_Ref{slot = end.slot}, true
+	}
+	if end.absent {
+		return {}, false
+	}
+	return Plan_Ref{slot = -1, id = end.id}, true
+}
+
+// build_path compiles one path expression between two endpoints.
+@(private = "file")
+build_path :: proc(
+	b: ^Plan_Builder,
+	subject: Plan_Path_End,
+	path: ^Path_Expr,
+	object: Plan_Path_End,
+) -> (
+	p: Plan,
+	ok: bool,
+) {
+	if path == nil {
+		b.unsupported = "empty property path"
+		return nil, false
+	}
+	switch path.op {
+	case .Link:
+		return build_path_link(b, subject, path.iri, object)
+	case .Inverse:
+		return build_path(b, object, path.children[0], subject)
+	case .Sequence:
+		// X (P1/…/Pn) Y — a fresh internal slot joins each pair of steps.
+		// The steps are BGPs whenever the parts are links, and join_plans
+		// folds those back into one probe chain.
+		acc: Plan
+		current := subject
+		for part, i in path.children {
+			target := object
+			if i < len(path.children) - 1 {
+				target = slot_end(fresh_internal_slot(b.slots))
+			}
+			step, step_ok := build_path(b, current, part, target)
+			if !step_ok {
+				plan_destroy(acc, b.allocator)
+				return nil, false
+			}
+			if acc == nil {
+				acc = step
+			} else {
+				joined, joined_ok := join_plans(b, acc, step)
+				if !joined_ok {
+					return nil, false
+				}
+				acc = joined
+			}
+			current = target
+		}
+		if acc == nil {
+			return new(Plan_Unit, b.allocator), true
+		}
+		return acc, true
+	case .Alternative:
+		// A union, not a set: `(:p1|:p2)/(:p3|:p4)` answers twice when both
+		// alternatives reach the same node, which the suite's path-p2 pins.
+		acc: Plan
+		for part in path.children {
+			branch, branch_ok := build_path(b, subject, part, object)
+			if !branch_ok {
+				plan_destroy(acc, b.allocator)
+				return nil, false
+			}
+			if acc == nil {
+				acc = branch
+				continue
+			}
+			node := new(Plan_Union, b.allocator)
+			node.left = acc
+			node.right = branch
+			acc = node
+		}
+		if acc == nil {
+			return new(Plan_Nothing, b.allocator), true
+		}
+		return acc, true
+	case .Negated_Set:
+		return build_path_negated(b, subject, path, object)
+	case .Zero_Or_One:
+		return build_path_repeat(b, subject, path, object, include_start = true, closure = false)
+	case .Zero_Or_More:
+		return build_path_repeat(b, subject, path, object, include_start = true, closure = true)
+	case .One_Or_More:
+		return build_path_repeat(b, subject, path, object, include_start = false, closure = true)
+	}
+	b.unsupported = "property path operator"
+	return nil, false
+}
+
+@(private = "file")
+build_path_link :: proc(
+	b: ^Plan_Builder,
+	subject: Plan_Path_End,
+	iri: rdf.IRI,
+	object: Plan_Path_End,
+) -> (
+	p: Plan,
+	ok: bool,
+) {
+	subject_ref, subject_present := end_ref(subject)
+	object_ref, object_present := end_ref(object)
+	predicate_ref, predicate_ok, predicate_present := ground_ref(b, iri)
+	if !predicate_ok {
+		return nil, false
+	}
+	if !subject_present || !object_present || !predicate_present {
+		return new(Plan_Nothing, b.allocator), true
+	}
+	plan := new(Plan_BGP, b.allocator)
+	plan.triples = make([dynamic]Plan_Triple, b.allocator)
+	plan.order = make([dynamic]int, b.allocator)
+	triple: Plan_Triple
+	triple[store.QUAD_S] = subject_ref
+	triple[store.QUAD_P] = predicate_ref
+	triple[store.QUAD_O] = object_ref
+	triple[store.QUAD_G] = b.graph
+	append(&plan.triples, triple)
+	join_order(plan)
+	return plan, true
+}
+
+// build_path_negated compiles `!(…)`. §18.4 splits the set by direction:
+// the forward members and the inverse members are two separate negated
+// sets, and the pattern is their union. A set with no inverse members —
+// including the empty `!()` — is the forward side alone.
+@(private = "file")
+build_path_negated :: proc(
+	b: ^Plan_Builder,
+	subject: Plan_Path_End,
+	path: ^Path_Expr,
+	object: Plan_Path_End,
+) -> (
+	p: Plan,
+	ok: bool,
+) {
+	subject_ref, subject_present := end_ref(subject)
+	object_ref, object_present := end_ref(object)
+	if !subject_present || !object_present {
+		return new(Plan_Nothing, b.allocator), true
+	}
+	forward := make([dynamic]store.Term_ID, b.allocator)
+	inverse := make([dynamic]store.Term_ID, b.allocator)
+	inverse_members := false
+	for member in path.children {
+		target := &forward
+		iri_node := member
+		if member.op == .Inverse {
+			target = &inverse
+			inverse_members = true
+			iri_node = member.children[0]
+		}
+		if iri_node.op != .Link {
+			delete(forward)
+			delete(inverse)
+			b.unsupported = "negated property set member"
+			return nil, false
+		}
+		// A member the store never saw excludes nothing, so it is dropped
+		// rather than kept as an ID that could not match anyway.
+		if id, found := b.find(b.data, iri_node.iri); found {
+			append(target, id)
+		}
+	}
+
+	acc: Plan
+	if !inverse_members || len(forward) > 0 {
+		node := new(Plan_NPS, b.allocator)
+		node.subject = subject_ref
+		node.object = object_ref
+		node.graph = b.graph
+		node.excluded = forward
+		acc = node
+	} else {
+		delete(forward)
+	}
+	if inverse_members {
+		node := new(Plan_NPS, b.allocator)
+		node.subject = subject_ref
+		node.object = object_ref
+		node.graph = b.graph
+		node.excluded = inverse
+		node.inverse = true
+		if acc == nil {
+			acc = node
+		} else {
+			union_node := new(Plan_Union, b.allocator)
+			union_node.left = acc
+			union_node.right = node
+			acc = union_node
+		}
+	} else {
+		delete(inverse)
+	}
+	return acc, true
+}
+
+@(private = "file")
+build_path_repeat :: proc(
+	b: ^Plan_Builder,
+	subject: Plan_Path_End,
+	path: ^Path_Expr,
+	object: Plan_Path_End,
+	include_start: bool,
+	closure: bool,
+) -> (
+	p: Plan,
+	ok: bool,
+) {
+	in_slot := fresh_internal_slot(b.slots)
+	out_slot := fresh_internal_slot(b.slots)
+	step, step_ok := build_path(b, slot_end(in_slot), path.children[0], slot_end(out_slot))
+	if !step_ok {
+		return nil, false
+	}
+	node := new(Plan_Path, b.allocator)
+	node.subject = subject
+	node.object = object
+	node.graph = b.graph
+	node.step = step
+	node.in_slot = in_slot
+	node.out_slot = out_slot
+	node.include_start = include_start
+	node.closure = closure
+	return node, true
+}
+
+// plan_has_path reports whether a sub-plan holds a property-path operator.
+//
+// It decides one thing: whether `GRAPH ?g` has to enumerate its graphs.
+// A triple pattern carries the graph position and binds ?g by matching, so
+// a body made of triple patterns needs no help. A path operator instead
+// *reads* the active graph — its traversal and its nodes(G) enumeration
+// both have to know which graph they are in before they start — so ?g has
+// to be bound before it runs, whatever else the body contains.
+@(private = "file")
+plan_has_path :: proc(p: Plan) -> bool {
+	switch v in p {
+	case ^Plan_NPS, ^Plan_Path:
+		return true
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+		return false
+	case ^Plan_Filter:
+		return plan_has_path(v.input)
+	case ^Plan_Project:
+		return plan_has_path(v.input)
+	case ^Plan_Distinct:
+		return plan_has_path(v.input)
+	case ^Plan_Slice:
+		return plan_has_path(v.input)
+	case ^Plan_Extend:
+		return plan_has_path(v.input)
+	case ^Plan_Materialized:
+		return plan_has_path(v.input)
+	case ^Plan_Group:
+		return plan_has_path(v.input)
+	case ^Plan_Order:
+		return plan_has_path(v.input)
+	case ^Plan_Union:
+		return plan_has_path(v.left) || plan_has_path(v.right)
+	case ^Plan_Join:
+		return plan_has_path(v.left) || plan_has_path(v.right)
+	case ^Plan_Left_Join:
+		return plan_has_path(v.left) || plan_has_path(v.right)
+	case ^Plan_Minus:
+		return plan_has_path(v.left)
+	}
+	return false
+}
+
 // plan_blocks reports whether a sub-plan holds an operator whose answer
 // depends on having seen all of its input — which is what makes it wrong
 // to run once across several graphs. See the GRAPH case in plan_build.
@@ -711,7 +1154,11 @@ plan_blocks :: proc(p: Plan) -> bool {
 	switch v in p {
 	case ^Plan_Group, ^Plan_Order:
 		return true
-	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan, ^Plan_NPS:
+		return false
+	case ^Plan_Path:
+		// The step sub-plan is evaluated inside the traversal, one frontier
+		// node at a time, so it is never re-run across graphs on its own.
 		return false
 	case ^Plan_Filter:
 		return plan_blocks(v.input)
@@ -846,7 +1293,11 @@ probe_safe :: proc(b: ^Plan_Builder, p: Plan) -> bool {
 @(private = "file")
 probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
 	switch v in p {
-	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan, ^Plan_NPS, ^Plan_Path:
+		// A path operator is safe to correlate for the same reason a
+		// pattern is, and for one more: which of §18.4's cases applies is
+		// decided by the pattern's endpoints, not by what is bound when it
+		// runs, so a binding narrows the answer without redefining it.
 		return true
 	case ^Plan_Filter:
 		for condition in v.conditions {
@@ -881,7 +1332,9 @@ plan_matches_triples :: proc(p: Plan) -> bool {
 	switch v in p {
 	case ^Plan_BGP:
 		return len(v.triples) > 0
-	case ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+	case ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan, ^Plan_NPS, ^Plan_Path:
+		// A path operator reads the graph position instead of binding it,
+		// so it cannot carry a GRAPH variable — see plan_has_path.
 		return false
 	case ^Plan_Filter:
 		return plan_matches_triples(v.input)
@@ -930,6 +1383,18 @@ plan_bindable :: proc(p: Plan, out: []bool) {
 			}
 		}
 	case ^Plan_Nothing, ^Plan_Unit:
+	case ^Plan_NPS:
+		for position in ([2]Plan_Ref{v.subject, v.object}) {
+			if plan_ref_is_var(position) && position.slot < len(out) {
+				out[position.slot] = true
+			}
+		}
+	case ^Plan_Path:
+		for end in ([2]Plan_Path_End{v.subject, v.object}) {
+			if end.slot >= 0 && end.slot < len(out) {
+				out[end.slot] = true
+			}
+		}
 	case ^Plan_Graph_Scan:
 		if v.slot >= 0 && v.slot < len(out) {
 			out[v.slot] = true
@@ -1143,6 +1608,12 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 	case ^Plan_BGP:
 		delete(v.triples)
 		delete(v.order)
+		free(v, allocator)
+	case ^Plan_NPS:
+		delete(v.excluded)
+		free(v, allocator)
+	case ^Plan_Path:
+		plan_destroy(v.step, allocator)
 		free(v, allocator)
 	case ^Plan_Nothing:
 		free(v, allocator)

@@ -489,6 +489,21 @@ fresh_agg_var :: proc(p: ^Parser) -> Var {
 	return {name = rdf.intern(&p.intern, string(buf[:1 + n]))}
 }
 
+// PATH_VAR_PREFIX marks the variables §18.2.2.5's path translation
+// invents to join the steps of a sequence. VARNAME cannot begin with '.',
+// so the prefix cannot collide with anything the query wrote — and it has
+// to travel in the *name*, because by the time plan building sees a
+// triple-pattern position there is nothing else left of where the variable
+// came from.
+//
+// The translation calls such a variable "fresh", which means it is not in
+// scope: `SELECT *` must not project it, any more than it projects a
+// pattern blank node. So var_slot marks its slot internal. The aggregate
+// substitution's ".N" variables share the leading '.' and are deliberately
+// *not* marked: those are read back by the SELECT expressions, HAVING, and
+// ORDER BY that §18.2.4.1 rewrote to use them.
+PATH_VAR_PREFIX :: ".p"
+
 @(private = "file")
 fresh_path_var :: proc(p: ^Parser) -> Pattern_Node {
 	buf: [24]byte

@@ -354,6 +354,114 @@ grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
 	return int(peak)
 }
 
+// A property path's memory contract (SPARQL-T-0016).
+//
+// A repeat form cannot stream: `*` and `+` are sets, and a set is not a
+// set until something remembers what has been in it. What it *must* not do
+// is remember the answer — the visited set, the frontier, and the start
+// list are bounded by the graph's nodes, and the solutions built from them
+// are handed out one at a time and never retained.
+//
+// Two measurements, because the property has two halves. Ten times the
+// solutions over the same graph must cost the same: the traversal follows
+// the graph, not the answer. Four times the graph must cost more: that is
+// what proves the traversal's memory is being taken from the query's
+// allocator at all, rather than from somewhere this guard cannot see.
+@(test)
+test_property_path_traversal_is_bounded_by_the_graph :: proc(t: ^testing.T) {
+	one_answer := path_query_peak(t, 12, 1)
+	ten_answers := path_query_peak(t, 12, 10)
+	four_times_the_graph := path_query_peak(t, 48, 1)
+
+	// The slack covers the dynamic arrays' growth doubling; what it does
+	// not cover is a retained solution per answer, which would be more than
+	// a thousand rows of difference.
+	testing.expectf(
+		t,
+		ten_answers <= one_answer + 8192,
+		"10x the solutions over the same graph took %d bytes at peak against %d — the traversal is following the answer",
+		ten_answers,
+		one_answer,
+	)
+	testing.expectf(
+		t,
+		four_times_the_graph > one_answer,
+		"4x the graph took %d bytes at peak against %d — the traversal's state is not coming from the query's allocator",
+		four_times_the_graph,
+		one_answer,
+	)
+}
+
+// path_query_peak walks every pair of a clique of `nodes` under `:p*` and
+// returns the query's peak. fanout multiplies the *answers* without
+// touching what the traversal has to hold: the extra triples use a
+// predicate the path never follows, and the join above the path re-runs
+// per path solution.
+@(private = "file")
+path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d)
+	defer memstore.dictionary_destroy(&d)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds)
+	defer memstore.dataset_destroy(&ds)
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for from in 0 ..< nodes {
+		for to in 0 ..< nodes {
+			if from == to {
+				continue
+			}
+			fmt.sbprintf(&b, "<http://e/n%d> <http://e/p> <http://e/n%d> .\n", from, to)
+		}
+	}
+	for i in 0 ..< fanout {
+		fmt.sbprintf(&b, "<http://e/f%d> <http://e/q> <http://e/g%d> .\n", i, i)
+	}
+	_, load_err := memstore.load_triples(&d, &ds, transmute([]byte)strings.to_string(b))
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	p: sparql.Parser
+	sparql.parser_init(
+		&p,
+		transmute([]byte)string(`SELECT * WHERE { ?x <http://e/p>* ?y . ?f <http://e/q> ?g }`),
+	)
+	defer sparql.parser_destroy(&p)
+	_, parsed := sparql.parse(&p)
+	testing.expect(t, parsed, "the query should parse")
+	algebra, translated := sparql.translate(&p)
+	testing.expect(t, translated, "the query should translate")
+
+	// Only the query's allocations are tracked; the store's memory does
+	// scale with the data, and that is its business.
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+
+	q: sparql_mem.Query
+	prepared := sparql_mem.query_init(&q, algebra, &d, &ds, "", mem.tracking_allocator(&track))
+	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
+	solutions := 0
+	for {
+		_, more := sparql_mem.query_next(&q)
+		if !more {
+			break
+		}
+		solutions += 1
+	}
+	// Every node of the clique reaches every node, itself included. The
+	// fanout triples add nodes too — nodes(G) is the whole graph's, not the
+	// path's — so each contributes its own zero-length pair; and the join
+	// multiplies the lot. Asserted so the guard cannot end up measuring a
+	// query that answered nothing.
+	want := (nodes * nodes + 2 * fanout) * fanout
+	testing.expectf(t, solutions == want, "expected %d solutions, got %d", want, solutions)
+	peak := track.peak_memory_allocated
+	sparql_mem.query_destroy(&q)
+	return int(peak)
+}
+
 // Preparing, running, and destroying a query must release everything —
 // the plan, the slot table, the operator state, and every match iterator
 // the run opened, including the ones abandoned mid-stream.
@@ -417,6 +525,22 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 		`SELECT ?s ?o WHERE { ?s <http://e/p> ?o } ORDER BY DESC(?o) STR(?s)`,
 		`SELECT ?s WHERE { ?s <http://e/p> ?o } ORDER BY (?o + 1) LIMIT 2 OFFSET 1`,
 		`SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { SELECT (COUNT(*) AS ?c) { ?s ?p ?o } } } GROUP BY ?g`,
+		// A property path owns a traversal: a start list, a result list, a
+		// frontier, and three membership sets. It also runs its step
+		// sub-plan itself rather than through the driver, so the iterators
+		// that sub-plan opens are released on a path of their own — and the
+		// abandoned-mid-stream half of this loop is where a traversal left
+		// part-way through a frontier would show up (SPARQL-T-0016).
+		`SELECT * WHERE { ?s <http://e/p>* ?o }`,
+		`SELECT ?o WHERE { <http://e/a> <http://e/p>+ ?o }`,
+		`SELECT ?s WHERE { ?s <http://e/p>? <http://e/b> }`,
+		`SELECT ?o WHERE { <http://e/a> (<http://e/p>/<http://e/p>)+ ?o }`,
+		`SELECT ?x WHERE { <http://e/a> ((<http://e/p>)*)* ?x }`,
+		`SELECT * WHERE { ?s !(<http://e/p>|^<http://e/q>) ?o }`,
+		// A path endpoint the store does not hold: the zero-length path
+		// binds it anyway, so it is named rather than short-circuited, and
+		// the name it is given is owned by the execution.
+		`SELECT ?o WHERE { <http://e/missing> <http://e/p>* ?o }`,
 	}
 	for query in QUERIES {
 		for stop_early in ([?]bool{false, true}) {

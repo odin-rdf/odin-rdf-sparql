@@ -57,6 +57,8 @@ Exec_Kind :: enum {
 	Nothing,
 	Unit,
 	BGP,
+	NPS,
+	Path,
 	Project,
 	Distinct,
 	Slice,
@@ -165,7 +167,59 @@ Exec_Node :: struct($It: typeid) {
 
 	order:     ^Plan_Order,
 	sort_keys: [dynamic][]Sort_Key,
+
+	// NPS: a negated property set in one direction. It shares the basic
+	// graph pattern's single-depth iterator machinery, so node_reset closes
+	// its cursor and releases its bindings without a case of its own.
+	nps:           ^Plan_NPS,
+
+	// Path: §18.4's repeat forms, evaluated as a breadth-first traversal.
+	//
+	// starts is what the traversal begins from — one endpoint, or every
+	// node of the active graph when neither end is fixed. result is the set
+	// of nodes reached from the current start, in the order they were
+	// found, and it is a list as well as a set because solutions are handed
+	// out one at a time across calls. queue is the frontier; expanded keeps
+	// a cycle from queueing a node twice, which is the whole of the
+	// termination argument.
+	path:          ^Plan_Path,
+	path_starts:   [dynamic]store.Term_ID,
+	path_result:   [dynamic]store.Term_ID,
+	path_queue:    [dynamic]store.Term_ID,
+	path_step_out: [dynamic]store.Term_ID,
+	path_seen:     map[store.Term_ID]bool,
+	path_expanded: map[store.Term_ID]bool,
+	path_nodes:    map[store.Term_ID]bool,
+	path_start:    store.Term_ID,
+	path_at:       int,
+	start_at:      int,
+	queue_at:      int,
+	// backward traverses the step from its object end, which is how a
+	// pattern with a fixed object is answered without enumerating a graph.
+	backward:      bool,
+	// check_nodes is §18.4's nodes(G) restriction on the zero-length path,
+	// which applies exactly when both endpoints are variables in the
+	// pattern. Decided once per run, from the plan and not from the row.
+	check_nodes:   bool,
 }
+
+// Path_Expander runs a property path's step sub-plan for one node of the
+// frontier and appends every node it reaches.
+//
+// It is a procedure value for the same reason Exists_Runner is: expanding
+// a frontier node means running an operator tree, and the tree walk is
+// already running one. A generic procedure taking compile-time procedure
+// constants cannot be part of a call cycle without hanging the Odin
+// compiler (dev-2026-07), so the cycle is broken here — out through a
+// concrete adapter in the instantiation package and back into
+// exec_path_expand, which is generic again.
+Path_Expander :: #type proc(
+	data: rawptr,
+	node: int,
+	from: store.Term_ID,
+	backward: bool,
+	out: ^[dynamic]store.Term_ID,
+)
 
 // Exec is a plan ready to run against one dataset. work is the solution
 // row every operator reads and the basic graph patterns write; a row
@@ -206,6 +260,10 @@ Exec :: struct($D: typeid, $It: typeid) {
 	// — a sub-plan is an ordinary operator tree, just one nothing pulls
 	// from until an expression asks.
 	exists_roots: [dynamic]int,
+	// The door back into the executor for a property path's step, bound by
+	// the instantiation package. See Path_Expander.
+	expand:      Path_Expander,
+	expand_data: rawptr,
 	allocator: runtime.Allocator,
 }
 
@@ -223,10 +281,13 @@ exec_init :: proc(
 	exists_plans: []Plan,
 	exists_nodes: []^Exists_Expr,
 	exists: Exists_Runner,
+	expand: Path_Expander,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
 	e.dataset = dataset
+	e.expand = expand
+	e.expand_data = e
 	e.find = find
 	e.find_data = find_data
 	width := var_slots_count(slots)
@@ -300,6 +361,13 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 		}
 		delete(node.seen)
 		delete(node.graph_seen)
+		delete(node.path_starts)
+		delete(node.path_result)
+		delete(node.path_queue)
+		delete(node.path_step_out)
+		delete(node.path_seen)
+		delete(node.path_expanded)
+		delete(node.path_nodes)
 	}
 	delete(e.nodes)
 	delete(e.exists_roots)
@@ -341,6 +409,42 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.iter_open = make([]bool, depth, e.allocator)
 		node.bound_slots = make([][4]int, depth, e.allocator)
 		node.bound_count = make([]int, depth, e.allocator)
+	case ^Plan_NPS:
+		node.kind = .NPS
+		node.nps = v
+		node.iters = make([]It, 1, e.allocator)
+		node.iter_open = make([]bool, 1, e.allocator)
+		node.bound_slots = make([][4]int, 1, e.allocator)
+		node.bound_count = make([]int, 1, e.allocator)
+	case ^Plan_Path:
+		node.kind = .Path
+		node.path = v
+		// The step is built as a child so that node_reset covers it and so
+		// that its nodes are laid out below this one, but it is not an
+		// input: start_child never descends into it, and the traversal runs
+		// it itself, one frontier node at a time.
+		node.input = build_node(e, v.step)
+		node.set_slots = make([dynamic]int, e.allocator)
+		node.path_starts = make([dynamic]store.Term_ID, e.allocator)
+		node.path_result = make([dynamic]store.Term_ID, e.allocator)
+		node.path_queue = make([dynamic]store.Term_ID, e.allocator)
+		node.path_step_out = make([dynamic]store.Term_ID, e.allocator)
+		node.path_seen = make(map[store.Term_ID]bool, e.allocator)
+		node.path_expanded = make(map[store.Term_ID]bool, e.allocator)
+		node.path_nodes = make(map[store.Term_ID]bool, e.allocator)
+		// A ground endpoint the store does not hold is still an endpoint:
+		// the zero-length path binds it to itself whether or not the data
+		// has ever mentioned it. So it gets a name of the engine's own,
+		// exactly as a VALUES cell naming an unknown term does — and, like
+		// that name, it must never reach a match pattern, which is what the
+		// synthetic check in the traversal is for.
+		for end in ([2]^Plan_Path_End{&v.subject, &v.object}) {
+			if !end.absent || end.term == nil {
+				continue
+			}
+			end.id = computed_id(e, rdf.clone_term(end.term, e.allocator))
+			end.absent = false
+		}
 	case ^Plan_Project:
 		node.kind = .Project
 		node.input = build_node(e, v.input)
@@ -574,6 +678,13 @@ run :: proc(
 start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 	node := &e.nodes[at]
 	#partial switch node.kind {
+	case .Path:
+		// A path node has an input — its step sub-plan — but the driver
+		// must never pull from it. The step is run inside the traversal,
+		// once per frontier node, with the traversal's own bindings in
+		// place; descending into it here would hand its raw solutions to
+		// whatever asked for a path.
+		return -1
 	case .Union, .Left_Join, .Join:
 		return node.input if node.phase == .Need_Left else node.right
 	case .Materialized:
@@ -633,6 +744,10 @@ source_next :: proc(
 		return e.work, true
 	case .BGP:
 		return bgp_next(e, at, MATCH, NEXT, DESTROY)
+	case .NPS:
+		return nps_next(e, at, MATCH, NEXT, DESTROY)
+	case .Path:
+		return path_next(e, at, MATCH, NEXT, DESTROY)
 	case .Table:
 		return table_next(e, at)
 	case .Materialized:
@@ -1406,6 +1521,15 @@ node_reset :: proc(e: ^Exec($D, $It), at: int, $DESTROY: proc(it: ^It)) {
 		node.row_at = 0
 		node.skipped = 0
 		node.emitted = 0
+		node.path_at = 0
+		node.start_at = 0
+		node.queue_at = 0
+		clear(&node.path_starts)
+		clear(&node.path_result)
+		clear(&node.path_queue)
+		clear(&node.path_seen)
+		clear(&node.path_expanded)
+		clear(&node.path_nodes)
 		clear(&node.graph_seen)
 		// Deliberately not reset: a Distinct's seen-set and a
 		// Materialized node's collected rows. Both are properties of the
@@ -1475,6 +1599,462 @@ bgp_next :: proc(
 		node.depth += 1
 	}
 	return nil, false
+}
+
+// --- Property paths -------------------------------------------------
+
+// nps_next yields the next match of a negated property set: any triple in
+// the active graph whose predicate is not one of the excluded IDs, read
+// forwards or backwards.
+//
+// It is a basic graph pattern with the predicate left open and a rejection
+// test on the way out, so it borrows the depth-0 iterator slot and the
+// bound-slot bookkeeping and lets node_reset clean up after it.
+@(private = "file")
+nps_next :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) -> (
+	row: []store.Term_ID,
+	ok: bool,
+) {
+	node := &e.nodes[at]
+	plan := node.nps
+	subject_position := store.QUAD_O if plan.inverse else store.QUAD_S
+	object_position := store.QUAD_S if plan.inverse else store.QUAD_O
+
+	if !node.iter_open[0] {
+		pattern: store.Match_Pattern
+		pattern[store.QUAD_P] = store.WILDCARD
+		pattern[subject_position] = probe_id(e, plan.subject)
+		pattern[object_position] = probe_id(e, plan.object)
+		pattern[store.QUAD_G] = probe_id(e, plan.graph)
+		assert(
+			pattern[0] != store.UNBOUND &&
+			pattern[1] != store.UNBOUND &&
+			pattern[2] != store.UNBOUND &&
+			pattern[3] != store.UNBOUND,
+			"UNBOUND leaked into a match pattern",
+		)
+		node.iters[0] = MATCH(e.dataset, pattern)
+		node.iter_open[0] = true
+		node.bound_count[0] = 0
+	}
+
+	for {
+		unbind_depth(e, node, 0)
+		quad, more := NEXT(&node.iters[0])
+		if !more {
+			DESTROY(&node.iters[0])
+			node.iter_open[0] = false
+			return nil, false
+		}
+		if id_excluded(plan.excluded[:], quad[store.QUAD_P]) {
+			continue
+		}
+		if !nps_unify(e, node, quad, subject_position, object_position) {
+			continue
+		}
+		return e.work, true
+	}
+}
+
+@(private = "file")
+id_excluded :: proc(excluded: []store.Term_ID, id: store.Term_ID) -> bool {
+	for candidate in excluded {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
+}
+
+// probe_id is a plan reference as a match-pattern position: a ground ID,
+// the value a bound slot holds, or a wildcard.
+@(private = "file")
+probe_id :: proc(e: ^Exec($D, $It), ref: Plan_Ref) -> store.Term_ID {
+	if !plan_ref_is_var(ref) {
+		return ref.id
+	}
+	value := e.work[ref.slot]
+	return store.WILDCARD if value == store.UNBOUND else value
+}
+
+@(private = "file")
+nps_unify :: proc(
+	e: ^Exec($D, $It),
+	node: ^Exec_Node($It2),
+	quad: store.Encoded_Quad,
+	subject_position, object_position: int,
+) -> bool {
+	plan := node.nps
+	count := 0
+	pairs := [3][2]int {
+		{subject_position, 0},
+		{object_position, 1},
+		{store.QUAD_G, 2},
+	}
+	refs := [3]Plan_Ref{plan.subject, plan.object, plan.graph}
+	for pair in pairs {
+		ref := refs[pair[1]]
+		if !plan_ref_is_var(ref) {
+			continue
+		}
+		value := quad[pair[0]]
+		current := e.work[ref.slot]
+		if current != store.UNBOUND {
+			if current != value {
+				for i in 0 ..< count {
+					e.work[node.bound_slots[0][i]] = store.UNBOUND
+				}
+				node.bound_count[0] = 0
+				return false
+			}
+			continue
+		}
+		e.work[ref.slot] = value
+		node.bound_slots[0][count] = ref.slot
+		count += 1
+	}
+	node.bound_count[0] = count
+	return true
+}
+
+// path_next hands out the solutions of one repeat form (§18.4's `?`, `*`,
+// and `+`), a start node at a time.
+//
+// Each start gets its reachable set computed in full — the set is what
+// makes the three forms sets rather than bags, and it is per start, so two
+// starts reaching the same node are two solutions — and the set is then
+// handed out one solution per call.
+@(private = "file")
+path_next :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) -> (
+	row: []store.Term_ID,
+	ok: bool,
+) {
+	node := &e.nodes[at]
+	if !node.started {
+		node.started = true
+		path_setup(e, at, MATCH, NEXT, DESTROY)
+	}
+	for {
+		release_set_slots(e, node)
+		if node.path_at >= len(node.path_result) {
+			if node.start_at >= len(node.path_starts) {
+				return nil, false
+			}
+			node.path_start = node.path_starts[node.start_at]
+			node.start_at += 1
+			path_closure(e, at, MATCH, NEXT, DESTROY)
+			node.path_at = 0
+			continue
+		}
+		reached := node.path_result[node.path_at]
+		node.path_at += 1
+		if path_emit(e, at, node.path_start, reached) {
+			return e.work, true
+		}
+	}
+}
+
+// path_setup picks which of §18.4's cases this pattern is, and what the
+// traversal starts from.
+//
+// The case comes from the *pattern*: a ground endpoint fixes an end
+// whatever the row says, and two variable endpoints mean the zero-length
+// pairs are restricted to nodes(G) even when an enclosing solution has
+// already bound one of them. A binding is then only a filter, which is
+// what makes the operator safe to evaluate correlated — and it is why
+// `VALUES ?v { 1 } . ?v :p? ?v` over a graph without 1 answers nothing.
+@(private = "file")
+path_setup :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) {
+	node := &e.nodes[at]
+	plan := node.path
+	// An execution that can be handed a property path has to have been
+	// given the way back into itself. Failing here names the omission;
+	// failing at the call site would not.
+	assert(e.expand != nil, "a property path ran in an execution with no path expander")
+	clear(&node.path_starts)
+	clear(&node.path_result)
+	node.path_at = 0
+	node.start_at = 0
+	node.backward = false
+	node.check_nodes = plan.subject.slot >= 0 && plan.object.slot >= 0
+
+	if value, fixed := path_end_value(e, plan.subject); fixed {
+		append(&node.path_starts, value)
+		return
+	}
+	if value, fixed := path_end_value(e, plan.object); fixed {
+		// Nothing fixes the subject, so the traversal runs the step from
+		// its object end instead of enumerating a graph to find the
+		// subjects that reach this one.
+		node.backward = true
+		append(&node.path_starts, value)
+		return
+	}
+	// Both ends are unbound variables: §18.4 ranges over the active
+	// graph's nodes. Every start is then in nodes(G) by construction, so
+	// the zero-length restriction needs no test of its own.
+	node.check_nodes = false
+	path_collect_nodes(e, at, MATCH, NEXT, DESTROY)
+}
+
+// path_end_value is the term an endpoint is pinned to, if any: a ground
+// term, or whatever an enclosing solution has already bound the variable
+// to.
+@(private = "file")
+path_end_value :: proc(e: ^Exec($D, $It), end: Plan_Path_End) -> (id: store.Term_ID, fixed: bool) {
+	if end.slot < 0 {
+		return end.id, true
+	}
+	value := e.work[end.slot]
+	if value == store.UNBOUND {
+		return store.UNBOUND, false
+	}
+	return value, true
+}
+
+// path_collect_nodes fills the start list with nodes(G): every subject and
+// every object of the active graph, each once. Objects included — a
+// literal is a node of the graph, and `?X foaf:knows* ?Y` over data with a
+// literal object has to answer for it.
+//
+// It reads every quad of the graph to do it, which is the same gap
+// Plan_Graph_Scan runs into from the other side: the match interface can
+// stream quads but cannot be asked for the terms it holds. Recorded as
+// store evidence for SPARQL-T-0019.
+@(private = "file")
+path_collect_nodes :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) {
+	node := &e.nodes[at]
+	clear(&node.path_nodes)
+	pattern := store.Match_Pattern {
+		store.WILDCARD,
+		store.WILDCARD,
+		store.WILDCARD,
+		path_graph_id(e, node.path.graph),
+	}
+	it := MATCH(e.dataset, pattern)
+	defer DESTROY(&it)
+	for {
+		quad, more := NEXT(&it)
+		if !more {
+			return
+		}
+		for position in ([2]int{store.QUAD_S, store.QUAD_O}) {
+			id := quad[position]
+			if id in node.path_nodes {
+				continue
+			}
+			node.path_nodes[id] = true
+			append(&node.path_starts, id)
+		}
+	}
+}
+
+// path_in_nodes reports whether a term is a node of the active graph.
+@(private = "file")
+path_in_nodes :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	id: store.Term_ID,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) -> bool {
+	// A term the engine named itself is by construction not in the data,
+	// and its ID is in a space the store must never be shown.
+	if is_synthetic(id) {
+		return false
+	}
+	graph := path_graph_id(e, e.nodes[at].path.graph)
+	for position in ([2]int{store.QUAD_S, store.QUAD_O}) {
+		pattern := store.Match_Pattern{store.WILDCARD, store.WILDCARD, store.WILDCARD, graph}
+		pattern[position] = id
+		it := MATCH(e.dataset, pattern)
+		_, found := NEXT(&it)
+		DESTROY(&it)
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// path_graph_id is the graph a path evaluates in. A variable here is
+// always bound by the time a path runs: plan building puts a graph scan
+// above any GRAPH ?g body that holds one (see plan_has_path).
+@(private = "file")
+path_graph_id :: proc(e: ^Exec($D, $It), ref: Plan_Ref) -> store.Term_ID {
+	if !plan_ref_is_var(ref) {
+		return ref.id
+	}
+	value := e.work[ref.slot]
+	assert(value != store.UNBOUND, "a property path ran with its graph variable unbound")
+	return value
+}
+
+// path_closure fills the result list with the nodes the current start
+// reaches, breadth first.
+//
+// The frontier is an explicit queue and the expanded set is what makes a
+// cycle terminate: a node is expanded at most once, so the walk is bounded
+// by the graph and a chain of any depth costs stack depth of zero.
+@(private = "file")
+path_closure :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) {
+	node := &e.nodes[at]
+	plan := node.path
+	clear(&node.path_result)
+	clear(&node.path_seen)
+	clear(&node.path_expanded)
+	clear(&node.path_queue)
+	node.queue_at = 0
+	start := node.path_start
+
+	if plan.include_start {
+		if !node.check_nodes || path_in_nodes(e, at, start, MATCH, NEXT, DESTROY) {
+			node.path_seen[start] = true
+			append(&node.path_result, start)
+		}
+	}
+	// `+` does not put the start in the result, but it does expand it: a
+	// start that a cycle leads back to *is* reached in one or more steps,
+	// and arrives through the frontier like any other node.
+	append(&node.path_queue, start)
+	node.path_expanded[start] = true
+
+	for node.queue_at < len(node.path_queue) {
+		from := node.path_queue[node.queue_at]
+		node.queue_at += 1
+		// A term the store does not hold has no edges, and asking would
+		// mean handing the store an ID it never issued.
+		if is_synthetic(from) {
+			continue
+		}
+		clear(&node.path_step_out)
+		e.expand(e.expand_data, at, from, node.backward, &node.path_step_out)
+		for reached in node.path_step_out {
+			if !(reached in node.path_seen) {
+				node.path_seen[reached] = true
+				append(&node.path_result, reached)
+			}
+			if plan.closure && !(reached in node.path_expanded) {
+				node.path_expanded[reached] = true
+				append(&node.path_queue, reached)
+			}
+		}
+	}
+}
+
+// path_emit binds one (start, reached) pair into the solution row, or
+// reports that the row already says otherwise.
+@(private = "file")
+path_emit :: proc(e: ^Exec($D, $It), at: int, start, reached: store.Term_ID) -> bool {
+	node := &e.nodes[at]
+	plan := node.path
+	subject_value := reached if node.backward else start
+	object_value := start if node.backward else reached
+	// Subject first: a pattern whose two ends are the same variable —
+	// `?v :p* ?v` — is answered by the object test seeing what the subject
+	// just bound.
+	if !path_bind(e, node, plan.subject, subject_value) {
+		release_set_slots(e, node)
+		return false
+	}
+	if !path_bind(e, node, plan.object, object_value) {
+		release_set_slots(e, node)
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+path_bind :: proc(
+	e: ^Exec($D, $It),
+	node: ^Exec_Node($It2),
+	end: Plan_Path_End,
+	value: store.Term_ID,
+) -> bool {
+	if end.slot < 0 {
+		return end.id == value
+	}
+	current := e.work[end.slot]
+	if current != store.UNBOUND {
+		return current == value
+	}
+	e.work[end.slot] = value
+	append(&node.set_slots, end.slot)
+	return true
+}
+
+// exec_path_expand runs a property path's step sub-plan from one node and
+// collects everything it reaches in one step.
+//
+// The step is an ordinary operator tree over two internal slots — bind the
+// one end, read the other — which is what lets a step be any path at all:
+// a sequence, an alternative, a negated set, or another repeat. It is
+// reset before and after, and the two slots are restored, so a traversal
+// leaves nothing of itself in the row.
+exec_path_expand :: proc(
+	e: ^Exec($D, $It),
+	at: int,
+	from: store.Term_ID,
+	backward: bool,
+	out: ^[dynamic]store.Term_ID,
+	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
+	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
+	$DESTROY: proc(it: ^It),
+) {
+	plan := e.nodes[at].path
+	step := e.nodes[at].input
+	entry := plan.out_slot if backward else plan.in_slot
+	exit := plan.in_slot if backward else plan.out_slot
+
+	saved_entry := e.work[entry]
+	saved_exit := e.work[exit]
+	node_reset(e, step, DESTROY)
+	e.work[entry] = from
+	e.work[exit] = store.UNBOUND
+	for {
+		_, more := run(e, step, MATCH, NEXT, DESTROY)
+		if !more {
+			break
+		}
+		reached := e.work[exit]
+		if reached != store.UNBOUND {
+			append(out, reached)
+		}
+	}
+	node_reset(e, step, DESTROY)
+	e.work[entry] = saved_entry
+	e.work[exit] = saved_exit
 }
 
 // probe_pattern substitutes the row's current bindings into the pattern

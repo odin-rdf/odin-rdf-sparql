@@ -25,7 +25,11 @@ import "core:testing"
 // the 42-entry aggregates directory, grouping, the two sorting
 // directories (sort, and solution-seq for the slice-after-sort layering),
 // and project-expression, whose seventh entry was the one ORDER BY held
-// back. The rest arrive as their operators do.
+// back. SPARQL-T-0016 adds the 33-entry property-path directory, which is
+// the whole of §18.4 in one place: the repeat forms and their zero-length
+// cases, negated property sets in both directions, and the precedence
+// tests that pin alternation and sequence as bags against the repeats as
+// sets. The rest arrive as their operators do.
 //
 // sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
 // of its 25 entries pass, and the one that does not — dawg-lang-3,
@@ -317,6 +321,16 @@ test_eval_sparql11_project_expression_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql11_project_expression_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-project-expression", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_property_path_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-property-path", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_property_path_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-property-path", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,
