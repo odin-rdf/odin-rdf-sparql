@@ -4,14 +4,14 @@ level: task
 title: "Evaluation harness: vendored eval suites, SRX/SRJ readers, result comparison"
 short_code: "SPARQL-T-0010"
 created_at: 2026-08-05T15:15:32.945635+00:00
-updated_at: 2026-08-05T15:35:13.034335+00:00
+updated_at: 2026-08-05T15:53:17.390826+00:00
 parent: SPARQL-I-0002
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -27,6 +27,8 @@ initiative_id: SPARQL-I-0002
 ## Objective **[REQUIRED]**
 
 Extend the hermetic W3C harness from syntax to evaluation: vendor the SPARQL 1.1 *evaluation* suite directories, build the test-only expected-result readers, and implement result-set comparison. After this task the harness can run an evaluation test end to end (load data → evaluate → compare) — with zero suites enabled, because no evaluator exists yet. Pure infrastructure; no store dependency beyond the loaders.
+
+## Acceptance Criteria
 
 ## Acceptance Criteria
 

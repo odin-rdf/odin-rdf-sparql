@@ -119,7 +119,15 @@ scope, never silently skipped. Each test's base IRI is the upstream
 suite location plus the file name.
 
 Evaluation *enablement* — running a directory's queries and comparing
-their answers — arrives per task through the evaluation initiative. As
-of SPARQL-T-0010 the floor for every vendored evaluation directory is
-that its manifest reads, its 508 expectations parse in all four formats,
-and its 508 queries parse and translate.
+their answers — arrives per task through the evaluation initiative. The
+floor for every vendored evaluation directory, enabled or not, is that
+its manifest reads, its expectations parse (508 across four formats), its
+data loads, and its queries parse and translate.
+
+Enabled for evaluation so far, each fully green against **both** backends
+(memstore and kvstore) at both Term_ID widths:
+
+| Directory | Enabled by | Tests |
+|---|---|---|
+| `sparql10-triple-match/` | SPARQL-T-0011 | 4 |
+| `sparql10-basic/` | SPARQL-T-0011 | 27 |

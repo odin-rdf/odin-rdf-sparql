@@ -1,9 +1,14 @@
 package guards
 
+import "core:fmt"
 import "core:mem"
+import "core:strings"
 import "core:testing"
 
+import memstore "store:store/memstore"
+
 import sparql "../../sparql"
+import sparql_mem "../../sparql/memstore"
 
 // A representative query touching every token family: keywords, vars,
 // IRIs, prefixed names (incl. percent + escape), literals of every
@@ -183,6 +188,154 @@ test_parser_no_leaks_on_error :: proc(t: ^testing.T) {
 		testing.expect(t, !ok)
 		sparql.parser_destroy(&p)
 	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+// Evaluation's memory contract (SPARQL-T-0011).
+//
+// The streaming operators promise to allocate nothing per solution: the
+// row buffer, the per-pattern match iterators, and their bookkeeping are
+// allocated when the query is prepared, and pulling solutions must touch
+// none of it. That promise is what makes a query over a large store cost
+// memory proportional to the query rather than to the answer, so it is
+// asserted directly — the allocation counter must not move across the
+// pull loop.
+//
+// DISTINCT is the deliberate exception and is excluded here: it has to
+// retain what it has seen, and it says so in exec.odin.
+@(test)
+test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d)
+	defer memstore.dictionary_destroy(&d)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds)
+	defer memstore.dataset_destroy(&ds)
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for i in 0 ..< 500 {
+		fmt.sbprintf(&b, "<http://e/s%d> <http://e/p> <http://e/m%d> .\n", i, i %% 50)
+		fmt.sbprintf(&b, "<http://e/m%d> <http://e/q> <http://e/o%d> .\n", i %% 50, i)
+	}
+	_, load_err := memstore.load_triples(&d, &ds, transmute([]byte)strings.to_string(b))
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	p: sparql.Parser
+	sparql.parser_init(&p, transmute([]byte)string(`SELECT * WHERE { ?s <http://e/p> ?m . ?m <http://e/q> ?o }`))
+	defer sparql.parser_destroy(&p)
+	_, parsed := sparql.parse(&p)
+	testing.expect(t, parsed, "the query should parse")
+	algebra, translated := sparql.translate(&p)
+	testing.expect(t, translated, "the query should translate")
+
+	q: sparql_mem.Query
+	prepared := sparql_mem.query_init(&q, algebra, &d, &ds)
+	defer sparql_mem.query_destroy(&q)
+	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
+
+	// Pull one solution before measuring. Preparing a query allocates
+	// nothing store-side, but the *first* match does: memstore merges its
+	// pending inserts into its indexes lazily, on the first read. That is
+	// the store's business and it happens once, not per solution — what
+	// this guard is about is everything after it.
+	_, first := sparql_mem.query_next(&q)
+	testing.expect(t, first, "the query should have solutions")
+
+	before := track.total_allocation_count
+	solutions := 1
+	for {
+		_, more := sparql_mem.query_next(&q)
+		if !more {
+			break
+		}
+		solutions += 1
+	}
+	after := track.total_allocation_count
+
+	testing.expectf(t, solutions == 5000, "expected 5000 solutions, got %d", solutions)
+	testing.expectf(
+		t,
+		after == before,
+		"streaming %d solutions performed %d allocations; the streaming path must allocate none",
+		solutions,
+		after - before,
+	)
+}
+
+// Preparing, running, and destroying a query must release everything —
+// the plan, the slot table, the operator state, and every match iterator
+// the run opened, including the ones abandoned mid-stream.
+@(test)
+test_evaluation_no_leaks :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	allocator := mem.tracking_allocator(&track)
+
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d, allocator)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds, allocator)
+	context.allocator = allocator
+	_, load_err := memstore.load_triples(
+		&d,
+		&ds,
+		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
+<http://e/b> <http://e/p> <http://e/c> .
+<http://e/c> <http://e/p> <http://e/a> .`),
+	)
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	QUERIES :: [?]string {
+		`SELECT * WHERE { ?s <http://e/p> ?o }`,
+		`SELECT DISTINCT ?o WHERE { ?s <http://e/p> ?o }`,
+		`SELECT ?o WHERE { ?s <http://e/p> ?o } LIMIT 1 OFFSET 1`,
+		`SELECT * WHERE { ?a <http://e/p> ?b . ?b <http://e/p> ?c . ?c <http://e/p> ?a }`,
+		// A term the store does not hold: the plan collapses, and the
+		// partially built pattern must still be released.
+		`SELECT * WHERE { <http://e/missing> <http://e/p> ?o }`,
+	}
+	for query in QUERIES {
+		for stop_early in ([?]bool{false, true}) {
+			p: sparql.Parser
+			sparql.parser_init(&p, transmute([]byte)query, "", allocator)
+			_, parsed := sparql.parse(&p)
+			testing.expect(t, parsed)
+			algebra, _ := sparql.translate(&p)
+
+			q: sparql_mem.Query
+			if sparql_mem.query_init(&q, algebra, &d, &ds, allocator) {
+				pulled := 0
+				for {
+					_, more := sparql_mem.query_next(&q)
+					if !more {
+						break
+					}
+					pulled += 1
+					// Abandoning a run mid-stream leaves match iterators
+					// open; destroying the query must still close them.
+					if stop_early && pulled == 1 {
+						break
+					}
+				}
+			}
+			sparql_mem.query_destroy(&q)
+			sparql.parser_destroy(&p)
+		}
+	}
+	// The store is torn down before the assertion, not by a defer: a
+	// deferred destroy runs after the check and would leave the store's
+	// own live allocations looking like the engine's leaks.
+	memstore.dataset_destroy(&ds)
+	memstore.dictionary_destroy(&d)
+
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
