@@ -4,14 +4,14 @@ level: initiative
 title: "SPARQL evaluation engine: algebra to solutions"
 short_code: "SPARQL-I-0002"
 created_at: 2026-08-05T14:51:51.950831+00:00
-updated_at: 2026-08-05T15:31:36.053386+00:00
+updated_at: 2026-08-05T23:00:30.359458+00:00
 parent: SPARQL-V-0001
 blocked_by: []
 archived: false
 
 tags:
   - "#initiative"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -120,7 +120,27 @@ Rough phasing; proper decomposition happens at the decompose phase:
 
 Exit criteria: all in-scope vendored W3C SPARQL 1.1 evaluation suite directories green with pinned counts and zero unexpected failures, against both backends, at both Term_ID widths; 1.2 evaluation directories enabled to the extent published; store-interface needs documented as evidence-backed upstream proposals; public API documented to the family standard.
 
+**Re-scoped 2026-08-06, at the exit verification (SPARQL-T-0019), with human review.** "All in-scope" excludes five vendored entries, each characterized rather than skipped and each recorded in `tests/w3c/README.md` with the item it waits on: `graph-optional` and `graph-minus` (GRAPH scoping for an operator that sees more than one solution at a time — SPARQL-T-0020, the only one of the three causes that is this engine's), `dawg-lang-3` and `normalization-2` (term identity — language-tag case and IRI normalization, which is the family's data-model question and has to hold for the RDF parser, both store dictionaries, and the SPARQL parser at once — SPARQL-T-0021), and `sq11` (an RDF/XML data document, which odin-rdf-parser does not implement). Their five directories stay disabled under the "enabled means fully green" discipline; the criterion is met by the other 35, which is 483 of the corpus's 488 entries.
+
 ## Status Updates
+
+- **2026-08-06 — COMPLETED.** Ten tasks (SPARQL-T-0010 … T-0019) done in sequence, one commit each. The deliverable is the back half of the engine: algebra in, solution sequences out, over the store's match interface alone.
+
+  **Exit criteria, all four met** (the verification run is the entry below; `make test` green at both Term_ID widths, `make check` clean):
+
+  1. *W3C SPARQL 1.1 evaluation suites green, both backends, both widths* — **met, against the re-scoped criterion.** 483 entries across 35 enabled directories, pinned counts, no skip list. The criterion was re-scoped here with human review to exclude five entries in five directories — 483 of 488, 99.0% — because only two of their three causes belong to this engine at all; see the re-scope note in the Implementation Plan and the table in the entry below.
+  2. *1.2 evaluation directories enabled to the extent published* — **met.** All four sparql12 evaluation directories at the pinned rdf-tests commit vendored and fully green (48 entries), completing the SPARQL-T-0008 handover.
+  3. *Store-interface needs documented as evidence-backed upstream proposals* — **met.** Seven backlog items in odin-rdf-store (STORE-T-0015 … T-0021), each naming the operator that wants the capability and what it would buy, plus a Review Log in STORE-A-0002 discharging its first review trigger.
+  4. *Public API documented to the family standard* — **met.** Package doc carrying the memory contract and allocator discipline, every exported symbol documented across the three public packages, and a compiled query-evaluation example in the README under the README-as-contract convention.
+
+  **What the initiative proved beyond its criteria.** The store's procedure-set convention absorbed a whole query engine without an adapter and without an interface revision — every one of the seven upstream items *extends* the procedure set rather than changes it, which is what STORE-A-0002 predicted and had budgeted a revision for. The measured finding from the T-0011 spike stands as its counterweight: procedure-pointer dispatch on the match hot path costs nothing (−2%, noise), so the no-dynamic-dispatch rule is kept because it is free here, not because it was shown to pay.
+
+  **Handovers.**
+  - **SPARQL-T-0020** — `graph-optional` and `graph-minus`: what a GRAPH clause does to an operator inside it that sees more than one solution at a time. The only open item that is this engine's semantics. SPARQL-T-0013 declined to fit the code to the expected result without a spec reading it could defend, and that judgement is carried forward as the task's first acceptance criterion.
+  - **SPARQL-T-0021** — term identity: language-tag case folding and RFC 3987 IRI normalization. The family's question, owned by odin-rdf-parser's data model; this repo holds the evidence (two suite entries) and would consume the answer.
+  - **`sq11`** waits on RDF/XML in odin-rdf-parser. Not filed anywhere — recorded in `tests/w3c/README.md` and here, and belongs in that repo's backlog if it is ever wanted.
+  - **Result serialization** (SPARQL JSON/XML writers, CONSTRUCT/DESCRIBE emission) was a non-goal throughout and is the natural next initiative: the harness has readers only, and `Result_Graph` plus the solution-row API are the shapes a writer would consume.
+  - **The planner seam** is built and deliberately empty — `join_order` in `sparql/plan.odin` returns the identity permutation, and cost-based ordering waits on STORE-T-0018 (estimates) and STORE-T-0015 (ordered iteration, which is what gives a planner a second strategy to choose between).
 
 - **2026-08-05 — Exit criteria verified (SPARQL-T-0019). Three of four met in full; the first needs a scope decision.**
 
@@ -187,6 +207,10 @@ Exit criteria: all in-scope vendored W3C SPARQL 1.1 evaluation suite directories
   engine, the engine is complete and 99% conformant, and the two open
   semantics entries are a well-characterized backlog item rather than an
   unfinished part of the build.
+
+  *Resolved 2026-08-06: re-scoped as recommended and the initiative
+  closed — see the entry above and the re-scope note in the
+  Implementation Plan.*
 
   **Criterion 2 — "1.2 evaluation directories enabled to the extent
   published": met.** All four sparql12 evaluation directories at the
