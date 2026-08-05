@@ -53,4 +53,27 @@ Largest task by operator count, but each operator is small once T-0011/T-0012 ex
 
 ## Status Updates **[REQUIRED]**
 
-*To be added during implementation*
+- **2026-08-05 — Substantially implemented, NOT complete. Left active deliberately.** All the operators are in and everything committed is green (`make test` at both widths, `make check` clean, 53 harness tests), but six directories still have mismatches and EXISTS is not started, so the acceptance criteria are not met. Everything needed to pick this up is below.
+
+  **Done.**
+  - **Driver generalized from a chain to a tree.** The walk carries `(node, child)` pairs and an operator returns which child it wants next, so a two-input operator can be suspended mid-right-side and resume there. This is the shape T-0011's compiler constraint forced (no recursion in a generic proc taking `$`-procedure constants) and it turned out to be exactly what the binary operators need. `node_reset` re-runs a subtree without recursing, using the fact that a subtree is a contiguous index range (children are built before parents).
+  - **OPTIONAL** (`Plan_Left_Join`) — the right side is re-run per left solution with the left's bindings already in the row, so it probes rather than scans. The hoisted conditions are part of the *match*: a right solution failing them is not a match, and the left solution still comes back unextended. Putting them in a Filter above the join instead is the classic way to get this wrong, and it is commented as such.
+  - **UNION**; **MINUS** (right side materialized once — its variables are not in the left's scope — with the shared-variable requirement that distinguishes it from NOT EXISTS); **general Join** (correlated, with a scoped side materialized); **BIND**/Extend; **VALUES**; **GRAPH** (scoped graph position, `GRAPH ?g` binding the variable).
+  - **Suites enabled** (fully green, both backends, both widths): `sparql10-boolean-effective-value` 7, `sparql10-bound` 1, `sparql10-distinct` 11, `sparql10-open-world` 18, `sparql10-optional` 7, `sparql10-reduced` 2 — **127 evaluation tests across twelve directories.**
+
+  **Two findings that are store evidence, for SPARQL-T-0019:**
+  1. **`GRAPH ?g` cannot be expressed as a match pattern.** It ranges over named graphs; the interface's wildcard in the graph position spans the default graph too, and there is no "any named graph" sentinel. The engine over-fetches and excludes `DEFAULT_GRAPH` during unification. Correct, but it is the interface being unable to say what the query means.
+  2. **A computed value has no term ID.** `BIND(?a + ?b AS ?c)` produces a value the store has never seen, and a solution row holds IDs. Interning would make a query a write — the thing the term-binding bridge exists to prevent — so the engine names computed terms itself in the Sentinel ID space (counters from 3 up, which the store reserves and never assigns) and resolves them before asking the store. It works and is safe; that it *had to invent a term space* is the evidence.
+
+  **What remains (measured, not guessed).** Per directory, memstore, from the survey harness:
+  - `sparql10-expr-ops` 13/18 — 5 mismatches, most likely the canonical lexical forms of computed numeric values (`value_to_term`'s xsd:decimal / xsd:double rendering).
+  - `sparql11-bindings` 7/11 and `sparql11-bind` 7/10 — VALUES and BIND edge cases.
+  - `sparql10-graph` 15/17 and `sparql10-algebra` 10/14 — GRAPH and nested-OPTIONAL semantics.
+  - `sparql10-optional-filter` 4/5 — one LeftJoin-condition case.
+  - `sparql11-exists` 0/6 and `sparql11-negation` 1/12 — **EXISTS is not implemented**; `expr_check` refuses it by name.
+  - `sparql10-dataset` 0/12 — FROM / FROM NAMED dataset construction, refused by name in the harness runner.
+  - `sparql11-subquery` — blocked on the 10 RDF/XML data documents recorded in SPARQL-T-0010.
+
+  **How to resume.** Re-add the survey harness first: a ~50-line `@(test)` in `tests/w3c/harness` that runs every entry of every `EVAL_SUITES` directory and logs pass/mismatch/unsupported counts plus the got/want text for mismatches. It was removed before committing (it is a development instrument, not a guard), but it is what made every decision in T-0012 and T-0013 measurable rather than speculative. Work down the list above, enabling each directory as it reaches 100%.
+
+  **Session note.** SPARQL-T-0010, T-0011, and T-0012 are complete and committed; this task stopped short because the session ran out of context, not because of a blocker. SPARQL-T-0014 through T-0019 have not been started.
