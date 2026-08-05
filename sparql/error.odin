@@ -46,6 +46,12 @@ Error_Kind :: enum {
 	Expected_Close_Paren,
 	Wrong_Arity,
 	Expected_As,
+	Expected_Path,
+	Values_Arity,
+	Expected_Data_Value,
+	Variable_In_Scope,
+	Ungrouped_Variable,
+	Expected_Separator,
 }
 
 // Error is a grammar violation with its position. The zero value (kind
@@ -141,6 +147,18 @@ error_message :: proc(kind: Error_Kind) -> string {
 		return "wrong number of arguments for built-in call (BuiltInCall)"
 	case .Expected_As:
 		return "expected AS (SelectClause/Bind)"
+	case .Expected_Path:
+		return "expected a property path element (PathPrimary)"
+	case .Values_Arity:
+		return "data block row does not match the variable list (DataBlock)"
+	case .Expected_Data_Value:
+		return "expected an IRI, literal, or UNDEF in the data block (DataBlockValue)"
+	case .Variable_In_Scope:
+		return "variable assigned here is already in scope (BIND/SelectClause/GroupClause)"
+	case .Ungrouped_Variable:
+		return "variable used outside an aggregate in a grouped query (SelectClause/HavingClause)"
+	case .Expected_Separator:
+		return "expected SEPARATOR '=' string (Aggregate)"
 	}
 	return "unknown error"
 }

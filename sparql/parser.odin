@@ -33,12 +33,14 @@ Parser :: struct {
 	prefixes:    map[string]string, // prefix (borrowed) -> expansion (interned)
 	base:        string, // interned; "" when no base established
 	scratch:     Resolve_Scratch,
-	unesc:       [dynamic]byte, // reusable unescape buffer
-	blank_first: map[string]int, // blank label -> id of the BGP that first used it
-	bgp_id:      int, // current Basic_Pattern's identity for label scoping
-	fresh_n:     int, // generated blank-label counter
-	depth:       int,
-	allocator:   runtime.Allocator,
+	unesc:         [dynamic]byte, // reusable unescape buffer
+	blank_first:   map[string]int, // blank label -> id of the BGP that first used it
+	bgp_id:        int, // current Basic_Pattern's identity for label scoping
+	fresh_n:       int, // generated blank-label counter
+	depth:         int,
+	in_template:   bool, // CONSTRUCT template: no paths, no label scoping
+	scope_scratch: map[string]bool, // reused by the §19.8 scope checks
+	allocator:     runtime.Allocator,
 }
 
 // parser_init prepares p to parse source. base anchors relative IRIs;
@@ -54,6 +56,7 @@ parser_init :: proc(p: ^Parser, source: []byte, base := "", allocator := context
 	rdf.intern_table_init(&p.intern, allocator)
 	p.prefixes = make(map[string]string, allocator)
 	p.blank_first = make(map[string]int, allocator)
+	p.scope_scratch = make(map[string]bool, allocator)
 	p.unesc = make([dynamic]byte, allocator)
 	if base != "" {
 		// A relative initial base can never resolve anything; leave the
@@ -68,6 +71,7 @@ parser_destroy :: proc(p: ^Parser) {
 	destroy_query(p.query, p.allocator)
 	delete(p.prefixes)
 	delete(p.blank_first)
+	delete(p.scope_scratch)
 	delete(p.unesc)
 	resolve_scratch_destroy(&p.scratch)
 	rdf.intern_table_destroy(&p.intern)
@@ -83,23 +87,33 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 		return nil, false
 	}
 
-	q = new(Query, p.allocator)
-	q.limit = -1
-	q.offset = -1
-	q.projection = make([dynamic]Projection, p.allocator)
-	q.datasets = make([dynamic]Dataset_Clause, p.allocator)
-	q.order = make([dynamic]Order_Condition, p.allocator)
+	q = new_query(p)
 	p.query = q
 
 	parse_prologue(p)
 
+	where_required := true
 	switch {
 	case at_keyword(p, .Select):
 		q.form = .Select
 		parse_select_clause(p, q)
+		if p.err.kind == .None {
+			parse_dataset_clauses(p, q)
+		}
 	case at_keyword(p, .Ask):
 		q.form = .Ask
 		advance(p)
+		parse_dataset_clauses(p, q)
+	case at_keyword(p, .Construct):
+		q.form = .Construct
+		advance(p)
+		parse_construct_head(p, q)
+		where_required = false // the shorthand form consumed its pattern
+	case at_keyword(p, .Describe):
+		q.form = .Describe
+		advance(p)
+		parse_describe_head(p, q)
+		where_required = false // DESCRIBE's WHERE clause is optional
 	case:
 		fail_current(p, .Expected_Query_Form)
 		return nil, false
@@ -108,18 +122,33 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 		return nil, false
 	}
 
-	parse_dataset_clauses(p, q)
-
 	// WhereClause: the WHERE keyword is optional before the group.
-	if at_keyword(p, .Where) {
-		advance(p)
+	if q.where_clause == nil && !q.construct_where {
+		if at_keyword(p, .Where) {
+			advance(p)
+			q.where_clause = parse_group(p)
+		} else if where_required || at(p, .L_Brace) {
+			q.where_clause = parse_group(p)
+		}
+		if p.err.kind != .None {
+			return nil, false
+		}
 	}
-	q.where_clause = parse_group(p)
+
+	parse_solution_modifiers(p, q)
 	if p.err.kind != .None {
 		return nil, false
 	}
 
-	parse_solution_modifiers(p, q)
+	// ValuesClause: an optional trailing VALUES block.
+	if at_keyword(p, .Values) {
+		q.values = parse_values(p)
+		if p.err.kind != .None {
+			return nil, false
+		}
+	}
+
+	check_query_scopes(p, q)
 	if p.err.kind != .None {
 		return nil, false
 	}
@@ -129,6 +158,84 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 		return nil, false
 	}
 	return q, p.err.kind == .None
+}
+
+// parse_construct_head parses what follows CONSTRUCT: either a
+// template, datasets, and a WHERE group — or the WHERE-shorthand form,
+// whose braced triples serve as both template and pattern
+// (construct_where marks it for the algebra translation).
+@(private = "file")
+parse_construct_head :: proc(p: ^Parser, q: ^Query) {
+	if at(p, .L_Brace) {
+		q.template = parse_template(p)
+		if p.err.kind != .None {
+			return
+		}
+		parse_dataset_clauses(p, q)
+		if at_keyword(p, .Where) {
+			advance(p)
+		}
+		q.where_clause = parse_group(p)
+		return
+	}
+	parse_dataset_clauses(p, q)
+	if !at_keyword(p, .Where) {
+		fail_current(p, .Expected_Group)
+		return
+	}
+	advance(p)
+	q.template = parse_template(p)
+	q.construct_where = true
+}
+
+// parse_template parses '{' TriplesTemplate? '}' — triple patterns
+// with plain verbs (no property paths) and template-scoped blank
+// labels.
+@(private = "file")
+parse_template :: proc(p: ^Parser) -> ^Basic_Pattern {
+	if !at(p, .L_Brace) {
+		fail_current(p, .Expected_Group)
+		return nil
+	}
+	advance(p)
+	bp := new(Basic_Pattern, p.allocator)
+	bp.pos = token_pos(p.tok)
+	bp.triples = make([dynamic]Triple_Pattern, p.allocator)
+	p.in_template = true
+	if starts_triples(p) {
+		parse_triples_block(p, bp)
+	}
+	p.in_template = false
+	if p.err.kind != .None {
+		return bp
+	}
+	if !at(p, .R_Brace) {
+		fail_current(p, .Unclosed_Group)
+		return bp
+	}
+	advance(p)
+	return bp
+}
+
+// parse_describe_head parses DESCRIBE ('*' | VarOrIri+) DatasetClause*.
+@(private = "file")
+parse_describe_head :: proc(p: ^Parser, q: ^Query) {
+	q.describe = make([dynamic]Pattern_Node, p.allocator)
+	if at(p, .Star) {
+		q.select_star = true
+		advance(p)
+	} else {
+		n := 0
+		for p.err.kind == .None && (at(p, .Var) || at(p, .IRI_Ref) || at(p, .PName)) {
+			append(&q.describe, parse_var_or_iri(p))
+			n += 1
+		}
+		if n == 0 && p.err.kind == .None {
+			fail_current(p, .Expected_Variable)
+			return
+		}
+	}
+	parse_dataset_clauses(p, q)
 }
 
 // --- Token plumbing -------------------------------------------------
@@ -335,7 +442,93 @@ parse_dataset_clauses :: proc(p: ^Parser, q: ^Query) {
 
 @(private = "file")
 parse_solution_modifiers :: proc(p: ^Parser, q: ^Query) {
-	// GROUP BY / HAVING arrive with SPARQL-T-0005.
+	if at_keyword(p, .Group) {
+		advance(p)
+		if !at_keyword(p, .By) {
+			fail_current(p, .Expected_Expression)
+			return
+		}
+		advance(p)
+		n := 0
+		group_loop: for p.err.kind == .None {
+			// GroupCondition ::= BuiltInCall | FunctionCall
+			//                  | '(' Expression (AS Var)? ')' | Var
+			switch {
+			case at(p, .Var):
+				append(&q.group_by, Group_Condition{expr = var_of(p.tok)})
+				advance(p)
+				n += 1
+			case at(p, .L_Paren):
+				advance(p)
+				condition := Group_Condition {
+					expr = parse_expression(p),
+				}
+				if p.err.kind != .None {
+					destroy_expr(condition.expr, p.allocator)
+					return
+				}
+				if at_keyword(p, .As) {
+					advance(p)
+					if !at(p, .Var) {
+						destroy_expr(condition.expr, p.allocator)
+						fail_current(p, .Expected_Variable)
+						return
+					}
+					condition.v = var_of(p.tok)
+					condition.has_var = true
+					advance(p)
+				}
+				if !at(p, .R_Paren) {
+					destroy_expr(condition.expr, p.allocator)
+					fail_current(p, .Expected_Close_Paren)
+					return
+				}
+				advance(p)
+				append(&q.group_by, condition)
+				n += 1
+			case at(p, .IRI_Ref), at(p, .PName),
+			     p.has_tok && p.tok.kind == .Keyword && order_constraint_keyword(p.tok.keyword):
+				condition := Group_Condition {
+					expr = parse_constraint(p),
+				}
+				if p.err.kind != .None {
+					destroy_expr(condition.expr, p.allocator)
+					return
+				}
+				append(&q.group_by, condition)
+				n += 1
+			case:
+				if n == 0 {
+					fail_current(p, .Expected_Expression)
+					return
+				}
+				break group_loop
+			}
+		}
+	}
+	if at_keyword(p, .Having) {
+		advance(p)
+		n := 0
+		having_loop: for p.err.kind == .None {
+			switch {
+			case at(p, .L_Paren), at(p, .IRI_Ref), at(p, .PName),
+			     p.has_tok && p.tok.kind == .Keyword && order_constraint_keyword(p.tok.keyword):
+				condition := parse_constraint(p)
+				if p.err.kind != .None {
+					destroy_expr(condition, p.allocator)
+					return
+				}
+				append(&q.having, condition)
+				n += 1
+			case:
+				if n == 0 {
+					fail_current(p, .Expected_Expression)
+					return
+				}
+				break having_loop
+			}
+		}
+	}
 	if at_keyword(p, .Order) {
 		advance(p)
 		if !at_keyword(p, .By) {
@@ -397,12 +590,12 @@ parse_solution_modifiers :: proc(p: ^Parser, q: ^Query) {
 	}
 }
 
-// order_constraint_keyword reports whether a keyword can start an
-// ORDER BY Constraint (a BuiltInCall form) — as opposed to a clause
-// keyword like LIMIT that ends the order condition list.
+// order_constraint_keyword reports whether a keyword can start a
+// Constraint (a BuiltInCall form, aggregates included) — as opposed to
+// a clause keyword like LIMIT that ends a condition list.
 @(private = "file")
 order_constraint_keyword :: proc(kw: Keyword) -> bool {
-	if kw == .Exists || kw == .Not || kw == .Bound {
+	if kw == .Exists || kw == .Not || kw == .Bound || aggregate_keyword(kw) {
 		return true
 	}
 	_, _, ok := builtin_arity(kw)
@@ -449,6 +642,23 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 	g.elements = make([dynamic]Pattern, p.allocator)
 	advance(p) // '{'
 
+	// SubSelect: the group's whole content is a subquery.
+	if at_keyword(p, .Select) {
+		ss := new(Sub_Select, p.allocator)
+		ss.pos = g.pos
+		append(&g.elements, Pattern(ss))
+		ss.query = parse_sub_select(p)
+		if p.err.kind != .None {
+			return g
+		}
+		if !at(p, .R_Brace) {
+			fail_current(p, .Unclosed_Group)
+			return g
+		}
+		advance(p)
+		return g
+	}
+
 	for p.err.kind == .None {
 		switch {
 		case at(p, .R_Brace):
@@ -492,12 +702,15 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 			b := new(Bind_Pattern, p.allocator)
 			b.pos = token_pos(p.tok)
 			advance(p)
-			append(&g.elements, Pattern(b))
+			// The BIND node joins the group only after the freshness
+			// check below, so the in-scope walk sees its predecessors.
 			if !at(p, .L_Paren) {
+				append(&g.elements, Pattern(b))
 				fail_current(p, .Expected_Expression)
 				return g
 			}
 			advance(p)
+			append(&g.elements, Pattern(b))
 			b.expr = parse_expression(p)
 			if p.err.kind != .None {
 				return g
@@ -512,12 +725,29 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 				return g
 			}
 			b.v = var_of(p.tok)
+			// §19.8: the BIND target must not already be in scope in
+			// this group (the elements before the BIND, which include
+			// the just-ended triples block).
+			if var_in_scope_of_elements(p, g.elements[:len(g.elements) - 1], b.v.name) {
+				fail_at(p, .Variable_In_Scope, p.tok)
+				return g
+			}
 			advance(p)
 			if !at(p, .R_Paren) {
 				fail_current(p, .Expected_Close_Paren)
 				return g
 			}
 			advance(p)
+			accept_dot(p)
+		case at_keyword(p, .Minus):
+			m := new(Minus_Pattern, p.allocator)
+			m.pos = token_pos(p.tok)
+			advance(p)
+			append(&g.elements, Pattern(m))
+			m.group = parse_group(p)
+			accept_dot(p)
+		case at_keyword(p, .Values):
+			append(&g.elements, Pattern(parse_values(p)))
 			accept_dot(p)
 		case !p.has_tok:
 			fail_here(p, .Unclosed_Group)
@@ -528,6 +758,47 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 		}
 	}
 	return g
+}
+
+@(private = "file")
+new_query :: proc(p: ^Parser) -> ^Query {
+	q := new(Query, p.allocator)
+	q.limit = -1
+	q.offset = -1
+	q.projection = make([dynamic]Projection, p.allocator)
+	q.datasets = make([dynamic]Dataset_Clause, p.allocator)
+	q.group_by = make([dynamic]Group_Condition, p.allocator)
+	q.having = make([dynamic]Expr, p.allocator)
+	q.order = make([dynamic]Order_Condition, p.allocator)
+	return q
+}
+
+// parse_sub_select parses SubSelect: SelectClause WhereClause
+// SolutionModifier ValuesClause, with SELECT as the current token.
+@(private = "file")
+parse_sub_select :: proc(p: ^Parser) -> ^Query {
+	sq := new_query(p)
+	sq.form = .Select
+	parse_select_clause(p, sq)
+	if p.err.kind != .None {
+		return sq
+	}
+	if at_keyword(p, .Where) {
+		advance(p)
+	}
+	sq.where_clause = parse_group(p)
+	if p.err.kind != .None {
+		return sq
+	}
+	parse_solution_modifiers(p, sq)
+	if p.err.kind != .None {
+		return sq
+	}
+	if at_keyword(p, .Values) {
+		sq.values = parse_values(p)
+	}
+	check_query_scopes(p, sq)
+	return sq
 }
 
 // parse_group_or_union parses GroupGraphPattern (UNION GroupGraphPattern)*
@@ -558,7 +829,7 @@ accept_dot :: proc(p: ^Parser) {
 	}
 }
 
-@(private = "file")
+@(private)
 starts_triples :: proc(p: ^Parser) -> bool {
 	if !p.has_tok {
 		return false
@@ -571,7 +842,7 @@ starts_triples :: proc(p: ^Parser) -> bool {
 	return false
 }
 
-@(private = "file")
+@(private)
 parse_var_or_iri :: proc(p: ^Parser) -> Pattern_Node {
 	if at(p, .Var) {
 		v := var_of(p.tok)
@@ -640,7 +911,14 @@ parse_triples_same_subject :: proc(p: ^Parser, bp: ^Basic_Pattern) {
 
 @(private = "file")
 starts_verb :: proc(p: ^Parser) -> bool {
-	return at(p, .A) || at(p, .Var) || at(p, .IRI_Ref) || at(p, .PName)
+	if at(p, .A) || at(p, .Var) {
+		return true
+	}
+	if p.in_template {
+		// Templates take plain verbs only — no property paths.
+		return at(p, .IRI_Ref) || at(p, .PName)
+	}
+	return starts_path(p)
 }
 
 // parse_property_list parses PropertyListNotEmpty: Verb ObjectList
@@ -648,7 +926,7 @@ starts_verb :: proc(p: ^Parser) -> bool {
 @(private = "file")
 parse_property_list :: proc(p: ^Parser, bp: ^Basic_Pattern, subject: Pattern_Node, pos: Position) {
 	for p.err.kind == .None {
-		predicate := parse_verb(p)
+		predicate := parse_verb(p) if p.in_template else parse_verb_path(p)
 		if p.err.kind != .None {
 			return
 		}
@@ -681,7 +959,7 @@ parse_property_list :: proc(p: ^Parser, bp: ^Basic_Pattern, subject: Pattern_Nod
 	}
 }
 
-@(private = "file")
+@(private)
 parse_verb :: proc(p: ^Parser) -> Pattern_Node {
 	switch {
 	case at(p, .A):
@@ -737,14 +1015,17 @@ parse_var_or_term :: proc(p: ^Parser) -> Pattern_Node {
 			return nil
 		}
 		// §19.6: a blank node label cannot be used in two different
-		// basic graph patterns of the same query.
-		if first, seen := p.blank_first[label]; seen {
-			if first != p.bgp_id {
-				fail_at(p, .Blank_Label_Reuse, p.tok)
-				return nil
+		// basic graph patterns of the same query. CONSTRUCT templates
+		// are not BGPs; their labels are template-scoped generators.
+		if !p.in_template {
+			if first, seen := p.blank_first[label]; seen {
+				if first != p.bgp_id {
+					fail_at(p, .Blank_Label_Reuse, p.tok)
+					return nil
+				}
+			} else {
+				p.blank_first[label] = p.bgp_id
 			}
-		} else {
-			p.blank_first[label] = p.bgp_id
 		}
 		advance(p)
 		return rdf.Blank_Node(label)
@@ -1013,7 +1294,7 @@ unescape_iri_text :: proc(p: ^Parser, tok: Token) -> string {
 
 // unescape_string_text returns a string literal's lexical form with
 // ECHAR and codepoint escapes decoded.
-@(private = "file")
+@(private)
 unescape_string_text :: proc(p: ^Parser, tok: Token) -> string {
 	if !tok.has_escape {
 		return tok.text

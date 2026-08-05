@@ -81,7 +81,14 @@ WHERE {
 	FILTER NOT EXISTS { ?person foaf:enemy ?e }
 	FILTER foaf:custom(DISTINCT ?name)
 	BIND(IF(BOUND(?m), STR(?m), "none") AS ?mail)
+	?person foaf:knows/foaf:knows?|^foaf:employs ?fof .
+	?person !(foaf:enemy|^foaf:blocks) ?other .
+	MINUS { ?person foaf:status "hidden" }
+	VALUES (?dept ?floor) { ("eng" 3) (UNDEF 1) }
+	{ SELECT ?person (COUNT(*) AS ?edges) { ?person foaf:knows ?anyone } GROUP BY ?person }
 }
+GROUP BY ?name ?person ?mail
+HAVING(COUNT(?fof) >= 0)
 ORDER BY ?name DESC(?person + 1) str(?mail) LIMIT 5 OFFSET 2
 `
 	for _ in 0 ..< 100 {
@@ -118,6 +125,13 @@ test_parser_no_leaks_on_error :: proc(t: ^testing.T) {
 		"ASK { BIND(?x + 1 ?y) }",
 		"SELECT (1 + AS ?x) { ?s ?p ?o }",
 		"ASK { FILTER EXISTS { ?s ?p } }",
+		"SELECT * { ?s !( ?p } ",
+		"SELECT * { ?s ^/:p ?o }",
+		"SELECT * { VALUES (?x) { (1 2) } }",
+		"SELECT (COUNT(*) AS ?n) ?s { ?s ?p ?o }",
+		"SELECT * { { SELECT ?x { ?x ?y ?z ",
+		"SELECT * { ?s ?p ?o } GROUP BY ?s",
+		"CONSTRUCT { ?s ?p/?q ?o } WHERE { ?s ?p ?o }",
 	}
 	for bad in BAD_QUERIES {
 		p: sparql.Parser

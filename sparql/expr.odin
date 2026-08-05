@@ -75,6 +75,19 @@ Exists_Expr :: struct {
 	pos:     Position,
 }
 
+// Aggregate is COUNT/SUM/MIN/MAX/AVG/SAMPLE/GROUP_CONCAT. star marks
+// COUNT(*); separator applies to GROUP_CONCAT only (default " " when
+// has_separator is false).
+Aggregate :: struct {
+	op:            Keyword,
+	is_distinct:   bool,
+	star:          bool, // COUNT(*): expr is nil
+	expr:          Expr,
+	separator:     string,
+	has_separator: bool,
+	pos:           Position,
+}
+
 // Expr is an expression tree node. Terms appear directly: variables,
 // IRIs (an iriOrFunction without arguments), and literals — blank
 // nodes cannot occur in expressions.
@@ -85,6 +98,7 @@ Expr :: union {
 	^Function_Call,
 	^In_Expr,
 	^Exists_Expr,
+	^Aggregate,
 	Var,
 	rdf.IRI,
 	rdf.Literal,
@@ -121,6 +135,9 @@ destroy_expr :: proc(e: Expr, allocator := context.allocator) {
 		free(v, allocator)
 	case ^Exists_Expr:
 		destroy_group(v.group, allocator)
+		free(v, allocator)
+	case ^Aggregate:
+		destroy_expr(v.expr, allocator)
 		free(v, allocator)
 	case Var, rdf.IRI, rdf.Literal:
 	// Terms own nothing at this layer.

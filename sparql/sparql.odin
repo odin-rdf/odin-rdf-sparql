@@ -5,11 +5,11 @@
 // the data model and format parsers, `store:` for the match interface
 // -- and is consumed the same way (see Makefile and ols.json).
 //
-// The package is under construction (SPARQL-I-0001). The tokenizer
-// (scanner.odin, token.odin, error.odin) landed with SPARQL-T-0002; the
-// AST and parser core (ast.odin, parser.odin, resolve.odin) with
-// SPARQL-T-0003; expressions, FILTER/BIND, and expression projections
-// (expr.odin, expr_parse.odin) with SPARQL-T-0004. Property paths,
-// aggregates, subqueries, VALUES, and CONSTRUCT/DESCRIBE arrive with
-// SPARQL-T-0005.
+// The package is under construction (SPARQL-I-0001). The parser is
+// complete for SPARQL 1.1 Query: tokenizer (SPARQL-T-0002), AST and
+// parser core (SPARQL-T-0003), expressions and FILTER/BIND
+// (SPARQL-T-0004), and the full grammar — property paths, aggregates
+// with GROUP BY/HAVING, subqueries, VALUES, CONSTRUCT/DESCRIBE, MINUS
+// — with the W3C SPARQL 1.1 syntax suites green (SPARQL-T-0005).
+// Algebra translation follows (SPARQL-T-0006/0007).
 package sparql

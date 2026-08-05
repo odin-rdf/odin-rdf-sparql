@@ -336,6 +336,9 @@ parse_arg_list :: proc(p: ^Parser, out: ^[dynamic]Expr, allow_distinct: bool) ->
 parse_builtin_expr :: proc(p: ^Parser) -> Expr {
 	kw_tok := p.tok
 	pos := token_pos(kw_tok)
+	if aggregate_keyword(kw_tok.keyword) {
+		return parse_aggregate(p)
+	}
 	#partial switch kw_tok.keyword {
 	case .Exists:
 		advance(p)

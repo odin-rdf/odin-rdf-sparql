@@ -31,8 +31,10 @@ protocol and service directories, and the purely-evaluation suites
 The harness lives in `harness/` and runs under `odin test`. Manifests
 are parsed with the family's own Turtle parser through the `rdf:`
 collection. Each suite test asserts a pinned entry count — the guard
-against a manifest-reader regression silently dropping tests — and that
-every referenced file is present on disk. Query pass/fail execution
-wires up per suite directory as the grammar lands (SPARQL-T-0005);
-once a directory is enabled it must be fully green — no skip lists,
-no expected-failure files.
+against a manifest-reader regression silently dropping tests. All four
+directories are enabled (SPARQL-T-0005) and must stay fully green — no
+skip lists, no expected-failure files. Positive syntax tests and the
+query side of evaluation tests must parse; negative syntax tests must
+be rejected; evaluation itself belongs to the evaluation initiative.
+Each test's base IRI is the upstream suite location plus the query
+file name.

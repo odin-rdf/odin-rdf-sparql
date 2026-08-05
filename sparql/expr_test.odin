@@ -391,13 +391,13 @@ test_expr_error_positions :: proc(t: ^testing.T) {
 		testing.expect(t, !ok)
 		testing.expect_value(t, p.err.kind, Error_Kind.Expected_As)
 	}
-	// An aggregate keyword is not yet an expression (SPARQL-T-0005).
+	// Aggregates parse wherever BuiltInCall does (SPARQL-T-0005); the
+	// clause-placement restriction is the evaluation layer's concern.
 	{
 		p: Parser
 		parser_init(&p, transmute([]byte)string("ASK { FILTER(COUNT(?x) > 0) }"))
 		defer parser_destroy(&p)
 		_, ok := parse(&p)
-		testing.expect(t, !ok)
-		testing.expect_value(t, p.err.kind, Error_Kind.Expected_Expression)
+		testing.expect(t, ok)
 	}
 }
