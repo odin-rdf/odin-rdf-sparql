@@ -122,6 +122,111 @@ Exit criteria: all in-scope vendored W3C SPARQL 1.1 evaluation suite directories
 
 ## Status Updates
 
+- **2026-08-05 — Exit criteria verified (SPARQL-T-0019). Three of four met in full; the first needs a scope decision.**
+
+  **The verification run.** `make test` — the whole matrix, both Term_ID
+  widths — and `make check`, both green:
+
+  | Package | Tests |
+  |---|---|
+  | `sparql` | 102 |
+  | `sparql/memstore` | 64 |
+  | `sparql/kvstore` | 2 |
+  | `tests/guards` | 10 |
+  | `tests/w3c/harness` | 100 |
+  | `tests/readme` | 2 |
+
+  **Criterion 1 — "all in-scope vendored W3C SPARQL 1.1 evaluation suite
+  directories green with pinned counts and zero unexpected failures,
+  against both backends, at both Term_ID widths": met for 35 of the 40
+  vendored directories, and this is the one thing needing a human
+  decision.**
+
+  483 evaluation entries pass across 35 enabled directories, each run
+  against memstore *and* kvstore at 64- and 32-bit Term_IDs, with pinned
+  entry counts and no skip list. The remaining five directories each fail
+  exactly **one** entry — five in a vendored corpus of 488, 99.0% — and
+  each is characterized rather than skipped (recorded in
+  `tests/w3c/README.md`):
+
+  | Directory | | Entry | What it is |
+  |---|---|---|---|
+  | `sparql10-graph/` | 16/17 | `graph-optional` | this engine's semantics |
+  | `sparql11-negation/` | 11/12 | `graph-minus` | this engine's semantics |
+  | `sparql10-expr-builtin/` | 24/25 | `dawg-lang-3` | term identity (family) |
+  | `sparql10-i18n/` | 4/5 | `normalization-2` | term identity (family) |
+  | `sparql11-subquery/` | 4/5 | `sq11` | RDF/XML, odin-rdf-parser |
+
+  Only **two** are the evaluation engine's own semantics, and they are one
+  question: what a GRAPH clause does to an operator inside it that sees
+  more than one solution at a time. SPARQL-T-0015 fixed that shape for the
+  blocking operators; the fix transfers to neither of these. SPARQL-T-0013
+  recorded that the §18 reading producing the DAWG's `graph-optional`
+  answer could not be established from the spec text with confidence and
+  declined to fit the code to the expected result — that judgement still
+  stands and is why the entry is open rather than passing.
+
+  Two more are **term identity**, not evaluation: `"string"@EN` against
+  `"string"@en` (BCP 47 tags are case-insensitive; nothing in the family
+  folds the case, so they intern as two keys) and an IRI against its RFC
+  3987 syntax-normalized form. The engine compares Term_IDs; the decision
+  is made upstream of it, and whatever the answer is it has to hold for
+  the RDF parser, both store dictionaries, and the SPARQL parser at once.
+  The fifth waits on a format odin-rdf-parser does not implement.
+
+  Filed so the leftovers are actionable rather than remembered:
+  **SPARQL-T-0020** (the two GRAPH-scoping entries) and **SPARQL-T-0021**
+  (the two term-identity entries) in this repo's backlog.
+
+  **The decision for review:** either re-scope this criterion — the five
+  entries above declared out of the initiative's scope with the reasons
+  recorded, three of them belonging to other repos — and close the
+  initiative; or hold it open for SPARQL-T-0020, which is the only one of
+  the three causes that is this engine's to fix. The recommendation is to
+  re-scope and close: the initiative's deliverable was the evaluation
+  engine, the engine is complete and 99% conformant, and the two open
+  semantics entries are a well-characterized backlog item rather than an
+  unfinished part of the build.
+
+  **Criterion 2 — "1.2 evaluation directories enabled to the extent
+  published": met.** All four sparql12 evaluation directories at the
+  pinned commit are vendored and fully green (SPARQL-T-0018): 38 + 5 + 2 +
+  3 = 48 entries. The three `mf:UpdateEvaluationTest` entries in
+  `eval-triple-terms/` are counted and acknowledged as out of engine scope
+  by the vision, never silently skipped.
+
+  **Criterion 3 — "store-interface needs documented as evidence-backed
+  upstream proposals": met.** The evidence log accumulated across T-0011
+  … T-0018 is consolidated into seven backlog items in odin-rdf-store's
+  Metis, each naming the operator that wants the capability and what it
+  would buy, in the STORE-T-0014 pattern. STORE-A-0002's first review
+  trigger — "odin-rdf-sparql's basic graph pattern evaluation lands and
+  demonstrates needs the convention cannot absorb" — is discharged in the
+  ADR's new Review Log: the convention absorbed a whole query engine
+  without an adapter or a revision, and all seven items *extend* the
+  procedure set rather than change the convention.
+
+  | Item | Capability | Asked for by |
+  |---|---|---|
+  | STORE-T-0015 (P1) | Ordered match iteration, and range reads | MIN/MAX, ORDER BY, top-N, merge joins, streaming DISTINCT |
+  | STORE-T-0016 (P1) | The named-graph list, and a graph's terms | `Plan_Graph_Scan`, `path_collect_nodes` |
+  | STORE-T-0017 (P2) | A named-graph wildcard in the graph position | every `GRAPH ?g { … }` |
+  | STORE-T-0018 (P2) | Cardinality estimates for a pattern | `join_order`, the planner seam |
+  | STORE-T-0019 (P2) | Snapshot reads: one query, one dataset | all five of a query's read paths |
+  | STORE-T-0020 (P3) | `triple_parts`: a triple term's component IDs | SPARQL 1.2 triple-term patterns |
+  | STORE-T-0021 (P2) | Reserving the Sentinel counters above UNBOUND | the engine's query-local term names |
+
+  **Criterion 4 — "public API documented to the family standard": met.**
+  `sparql`'s package doc now carries the evaluation memory contract (query
+  text, algebra, solution rows, materialized terms, result graphs — who
+  owns what until when) and the allocator discipline, including the
+  per-solution zero-allocation promise and its three stated exceptions.
+  Every exported symbol in `sparql`, `sparql/memstore`, and
+  `sparql/kvstore` is documented. The README gained a compiled
+  query-evaluation example — parse → evaluate against memstore → iterate
+  solutions — asserted by `tests/readme` under the SPARQL-T-0009
+  README-as-contract convention.
+
 - **2026-08-05 — External dependency resolved: STORE-T-0014 implemented** in odin-rdf-store (commit a5b1d25). `find_term`/`find_graph_label` in both backends, `store.UNBOUND` reserved. Consequences applied: SPARQL-T-0011 no longer has an interim memstore-only path — dual-backend discipline holds from the first green suite; the engine uses `store.UNBOUND` rather than defining its own; over-long-language-tag terms are not-found by design; pattern-level binding composes `find_term` per position (no upstream `find_quad`, intentionally). Nothing now blocks transition to active.
 - **2026-08-05 — Decomposed into 10 tasks** (SPARQL-T-0010 … SPARQL-T-0019): eval harness+readers → core runtime/spike/BGP → expression core+FILTER → algebra operators → §17 function library → aggregation+ORDER BY → property paths → result forms → 1.2 eval suites → store evidence+API docs. T-0010 and T-0011 can run in parallel; T-0013/T-0014 parallel after T-0012; T-0016/T-0017 need only T-0011 for their cores but gate suite enablement on the expression tasks; T-0018/T-0019 close out. External dependency: odin-rdf-store STORE-T-0014 (`find_term` + UNBOUND reservation) gates kvstore suite runs — filed in the store's backlog, to be executed in a separate session. Awaiting human review before transition to active.
 - **2026-08-05 — Design decisions resolved with human review.** Store-interface audit corrected the draft (ID 0 is a valid term ID) and surfaced the term→ID lookup gap. Decided: distinct UNBOUND sentinel at Sentinel counter 2 (store asked to reserve); `find_term` + UNBOUND-reservation proposals go upstream to odin-rdf-store **now**, before evaluation starts (kvstore queries must not write); backend-binding mechanism picked via phase-1 spike against the real BGP join. Defaults accepted: in-repo test-only SRX/SRJ readers, Jena-compatible ORDER BY total order, BFS reachability for paths, snapshot needs tracked via the evidence log. Next: draft the upstream store proposal, then decompose.
