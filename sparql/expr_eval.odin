@@ -23,6 +23,9 @@ package sparql
 
 import "base:runtime"
 
+import "core:strings"
+import "core:time"
+
 import rdf "rdf:rdf"
 import store "store:store"
 
@@ -40,6 +43,29 @@ Term_Loader :: #type proc(
 // Exists_Runner evaluates the index-th EXISTS sub-plan against the
 // solution currently in the row, and reports whether it has one.
 Exists_Runner :: #type proc(data: rawptr, index: int) -> bool
+
+// Bnode_Binding is one BNODE(str) memo entry: the string the query
+// passed and the label it produced. The list is short — a query names a
+// handful of blank nodes, not thousands — so a linear scan beats a map
+// that would have to be rebuilt every solution.
+Bnode_Binding :: struct {
+	key:   string,
+	label: string,
+}
+
+// Regex_Cache_Entry is one compiled pattern. REGEX's pattern is a
+// constant in essentially every query, and compiling it per solution
+// would cost more than matching does.
+//
+// The compiled program is held behind a pointer rather than inline: the
+// cache is a dynamic array, and a caller holding a ^Regex across an
+// append would otherwise be left pointing into the old backing store.
+Regex_Cache_Entry :: struct {
+	pattern: string,
+	flags:   Regex_Flags,
+	rx:      ^Regex,
+	ok:      bool,
+}
 
 // Expr_Context is everything an expression needs beyond its own tree.
 // row is repointed at each solution; scratch collects the terms the
@@ -61,6 +87,25 @@ Expr_Context :: struct {
 	exists:       Exists_Runner,
 	exists_data:  rawptr,
 	exists_nodes: []^Exists_Expr,
+
+	// Strings the §17 functions built. They are released with the rest of
+	// one evaluation's scratch, which is after the value has been
+	// rendered into a binding — see conditions_hold and the Extend case
+	// in exec.odin.
+	texts:     [dynamic]string,
+
+	// The query-scoped state the impure functions need (see
+	// functions.odin's header). base anchors IRI(); now is the one
+	// instant NOW() answers with for the whole query; seed drives RAND
+	// and UUID; bnodes is BNODE(str)'s per-solution memo and blanks
+	// counts the labels handed out.
+	base:      string,
+	now:       Value,
+	seed:      u64,
+	bnodes:    [dynamic]Bnode_Binding,
+	blanks:    int,
+	regexes:   [dynamic]Regex_Cache_Entry,
+
 	allocator: runtime.Allocator,
 }
 
@@ -106,22 +151,236 @@ expr_context_init :: proc(
 	ctx.computed = computed
 	ctx.allocator = allocator
 	ctx.scratch = make([dynamic]rdf.Term, allocator)
+	ctx.texts = make([dynamic]string, allocator)
+	ctx.bnodes = make([dynamic]Bnode_Binding, allocator)
+	ctx.regexes = make([dynamic]Regex_Cache_Entry, allocator)
+	expr_context_start_query(ctx)
+}
+
+// expr_context_start_query fixes the values that are constant for one
+// query execution: NOW's instant (§17.4.5.1 — "all calls return the
+// same value ... within one query") and the seed RAND and UUID draw
+// from. Reading the clock once here is the whole of it; there is no
+// other place a query is allowed to notice time passing.
+@(private = "file")
+expr_context_start_query :: proc(ctx: ^Expr_Context) {
+	stamp := time.now()
+	ctx.seed = u64(time.to_unix_nanoseconds(stamp)) | 1
+	ctx.now = expr_instant_value(ctx, stamp)
+}
+
+// expr_context_set_base gives the context the query's base IRI, which
+// IRI() resolves relative references against. The string is copied: the
+// parser that owns the original need not outlive the execution.
+expr_context_set_base :: proc(ctx: ^Expr_Context, base: string) {
+	if base == "" {
+		return
+	}
+	ctx.base = strings.clone(base, ctx.allocator)
 }
 
 expr_context_destroy :: proc(ctx: ^Expr_Context) {
 	expr_context_release(ctx)
+	expr_context_new_solution(ctx)
 	delete(ctx.scratch)
+	delete(ctx.texts)
+	delete(ctx.bnodes)
+	for entry in ctx.regexes {
+		delete(entry.pattern, ctx.allocator)
+		regex_destroy(entry.rx)
+		free(entry.rx, ctx.allocator)
+	}
+	delete(ctx.regexes)
+	// NOW's lexical form outlives every evaluation — it is the query's
+	// instant — so it is not in the per-evaluation list and is released
+	// here instead.
+	delete(ctx.base, ctx.allocator)
+	delete(ctx.now.text, ctx.allocator)
 	ctx^ = {}
 }
 
-// expr_context_release frees the terms materialized during one
-// evaluation. Called after each condition, so a filter over a million
-// solutions holds one solution's worth of terms at a time.
+// expr_context_release frees the terms and strings materialized during
+// one evaluation. Called after each condition, so a filter over a
+// million solutions holds one solution's worth at a time.
 expr_context_release :: proc(ctx: ^Expr_Context) {
 	for term in ctx.scratch {
 		rdf.destroy_term(term, ctx.allocator)
 	}
 	clear(&ctx.scratch)
+	for text in ctx.texts {
+		delete(text, ctx.allocator)
+	}
+	clear(&ctx.texts)
+}
+
+// expr_context_new_solution ends BNODE(str)'s memo scope. §17.4.2.2
+// scopes it to one solution mapping: the same string twice in one
+// solution is one blank node, and the same string in the next solution
+// is a different one.
+//
+// The executor calls this as each solution reaches an operator that
+// evaluates expressions, which is a slightly coarser scope than the
+// spec's — a BNODE in a FILTER and a BNODE in a BIND over the same
+// solution get different nodes. Nothing in SPARQL can observe the
+// difference, because a FILTER cannot export a value.
+expr_context_new_solution :: proc(ctx: ^Expr_Context) {
+	for entry in ctx.bnodes {
+		delete(entry.key, ctx.allocator)
+		delete(entry.label, ctx.allocator)
+	}
+	clear(&ctx.bnodes)
+}
+
+// expr_own_text copies a string into the evaluation scratch and returns
+// the copy, which lives until the current evaluation is released.
+expr_own_text :: proc(ctx: ^Expr_Context, text: string) -> string {
+	owned := strings.clone(text, ctx.allocator)
+	append(&ctx.texts, owned)
+	return owned
+}
+
+// expr_adopt_text takes over a string already allocated in the
+// context's allocator — what a strings.Builder result is.
+expr_adopt_text :: proc(ctx: ^Expr_Context, text: string) -> string {
+	append(&ctx.texts, text)
+	return text
+}
+
+// expr_literal builds a value from an RDF literal the query computed,
+// interpreting it exactly as though it had been read from the store —
+// so STRDT's result knows whether it is a number, and an unparseable
+// lexical form becomes an ill-typed literal rather than an error.
+expr_literal :: proc(ctx: ^Expr_Context, lexical: string, datatype: rdf.IRI, language: string) -> Value {
+	literal := rdf.Literal {
+		lexical  = expr_own_text(ctx, lexical),
+		datatype = rdf.IRI(expr_own_text(ctx, string(datatype))),
+		language = expr_own_text(ctx, language),
+	}
+	return value_of(literal)
+}
+
+// expr_random draws the next value for RAND: a double in [0, 1). The
+// generator is splitmix64, seeded once per query — small, allocation
+// free, and good enough for a function whose only stated contract is
+// the range it lands in.
+expr_random :: proc(ctx: ^Expr_Context) -> f64 {
+	// 53 bits is exactly what an f64 mantissa holds, so every value in
+	// the range is reachable and none is reachable twice.
+	return f64(expr_next_u64(ctx) >> 11) / f64(u64(1) << 53)
+}
+
+@(private = "file")
+expr_next_u64 :: proc(ctx: ^Expr_Context) -> u64 {
+	ctx.seed += 0x9E3779B97F4A7C15
+	z := ctx.seed
+	z = (z ~ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ~ (z >> 27)) * 0x94D049BB133111EB
+	return z ~ (z >> 31)
+}
+
+@(private = "file")
+UUID_HEX := "0123456789abcdef"
+
+// expr_uuid_string writes a version-4 UUID from the query's generator,
+// in the lowercase hyphenated form urn:uuid: expects.
+expr_uuid_string :: proc(ctx: ^Expr_Context) -> string {
+	octets: [16]byte
+	high, low := expr_next_u64(ctx), expr_next_u64(ctx)
+	for i in 0 ..< 8 {
+		octets[i] = byte(high >> uint(8 * (7 - i)))
+		octets[8 + i] = byte(low >> uint(8 * (7 - i)))
+	}
+	octets[6] = (octets[6] & 0x0F) | 0x40 // version 4
+	octets[8] = (octets[8] & 0x3F) | 0x80 // variant 1
+	buf := make([]byte, 36, ctx.allocator)
+	at := 0
+	for octet, i in octets {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			buf[at] = '-'
+			at += 1
+		}
+		buf[at] = UUID_HEX[octet >> 4]
+		buf[at + 1] = UUID_HEX[octet & 0xF]
+		at += 2
+	}
+	return expr_adopt_text(ctx, string(buf))
+}
+
+// expr_fresh_blank names a blank node BNODE created. The label is one
+// a query cannot write and a store cannot hold: the '.' is not legal in
+// a BLANK_NODE_LABEL's first position, so the node is distinct from
+// every node in the dataset, which is what §17.4.2.2 requires.
+//
+// The caller owns the returned label and decides how long it lives —
+// one evaluation for BNODE(), one solution for BNODE(str).
+expr_fresh_blank :: proc(ctx: ^Expr_Context) -> string {
+	ctx.blanks += 1
+	b := strings.builder_make(ctx.allocator)
+	strings.write_string(&b, ".bn")
+	strings.write_int(&b, ctx.blanks)
+	return strings.to_string(b)
+}
+
+// expr_instant_value turns a wall-clock reading into the xsd:dateTime
+// NOW() answers with, in UTC.
+@(private = "file")
+expr_instant_value :: proc(ctx: ^Expr_Context, stamp: time.Time) -> Value {
+	year, month, day := time.date(stamp)
+	hour, minute, second := time.clock_from_time(stamp)
+	b := strings.builder_make(ctx.allocator)
+	strings.write_int(&b, year)
+	for part in ([?]int{int(month), day}) {
+		strings.write_byte(&b, '-')
+		if part < 10 {
+			strings.write_byte(&b, '0')
+		}
+		strings.write_int(&b, part)
+	}
+	strings.write_byte(&b, 'T')
+	for part, i in ([?]int{hour, minute, second}) {
+		if i > 0 {
+			strings.write_byte(&b, ':')
+		}
+		if part < 10 {
+			strings.write_byte(&b, '0')
+		}
+		strings.write_int(&b, part)
+	}
+	strings.write_byte(&b, 'Z')
+	lexical := strings.to_string(b)
+	// The literal borrows the lexical form and the constant datatype,
+	// and the Value carries the literal as its term — so value_to_term
+	// renders NOW as itself. The lexical form is freed with the context.
+	return value_of(rdf.Literal{lexical = lexical, datatype = XSD_DATE_TIME})
+}
+
+// expr_regex compiles a pattern, or hands back the compilation from a
+// previous solution. ok is false for a pattern the flavour rejects,
+// which REGEX and REPLACE turn into a type error — and the failure is
+// cached too, so an invalid pattern is diagnosed once.
+expr_regex :: proc(ctx: ^Expr_Context, pattern: string, flags: string) -> (rx: ^Regex, ok: bool) {
+	parsed, flags_ok := regex_parse_flags(flags)
+	if !flags_ok {
+		return nil, false
+	}
+	for entry in ctx.regexes {
+		if entry.pattern == pattern && entry.flags == parsed {
+			return entry.rx, entry.ok
+		}
+	}
+	compiled := new(Regex, ctx.allocator)
+	compiled_ok: bool
+	compiled^, compiled_ok = regex_compile(pattern, parsed, ctx.allocator)
+	append(
+		&ctx.regexes,
+		Regex_Cache_Entry {
+			pattern = strings.clone(pattern, ctx.allocator),
+			flags = parsed,
+			rx = compiled,
+			ok = compiled_ok,
+		},
+	)
+	return compiled, compiled_ok
 }
 
 // expr_eval evaluates an expression against the context's current row.
@@ -153,7 +412,14 @@ expr_eval :: proc(ctx: ^Expr_Context, e: Expr) -> Value {
 		}
 		found := ctx.exists(ctx.exists_data, index)
 		return value_boolean(found != v.negated)
-	case ^Function_Call, ^Aggregate, ^Triple_Term:
+	case ^Function_Call:
+		// The only function calls that reach here are the §17.5 casts;
+		// anything else was refused at plan time.
+		if len(v.args) != 1 || !cast_iri(v.iri) {
+			return ERROR_VALUE
+		}
+		return eval_cast(ctx, v.iri, expr_eval(ctx, v.args[0]))
+	case ^Aggregate, ^Triple_Term:
 	// Refused at plan time (expr_check); reaching here would be a bug
 	// in that check rather than a query the engine should answer.
 	}
@@ -314,95 +580,6 @@ eval_in :: proc(ctx: ^Expr_Context, e: ^In_Expr) -> Value {
 	return value_boolean(e.negated)
 }
 
-@(private = "file")
-eval_builtin :: proc(ctx: ^Expr_Context, e: ^Builtin_Call) -> Value {
-	#partial switch e.builtin {
-	case .Bound:
-		// BOUND asks about the binding, not the value, so its argument
-		// is not evaluated in the ordinary way — an unbound variable
-		// must reach it as "unbound" rather than as an error.
-		if len(e.args) != 1 {
-			return ERROR_VALUE
-		}
-		variable, is_var := e.args[0].(Var)
-		if !is_var {
-			return ERROR_VALUE
-		}
-		slot, found := var_slot_lookup(ctx.slots, variable.name)
-		if !found || slot >= len(ctx.row) {
-			return value_boolean(false)
-		}
-		return value_boolean(ctx.row[slot] != store.UNBOUND)
-	}
-
-	if len(e.args) == 0 {
-		return ERROR_VALUE
-	}
-	first := expr_eval(ctx, e.args[0])
-	if first.kind == .Error {
-		return ERROR_VALUE
-	}
-
-	#partial switch e.builtin {
-	case .Datatype:
-		return value_datatype(first)
-	case .Str:
-		return value_str(first)
-	case .Lang:
-		return value_lang(first)
-	case .Is_Iri, .Is_Uri:
-		return kind_test(first, .IRI)
-	case .Is_Blank:
-		return kind_test(first, .Blank_Node)
-	case .Is_Literal:
-		if first.kind == .Unbound {
-			return ERROR_VALUE
-		}
-		switch first.kind {
-		case .Simple_String, .Lang_String, .Boolean, .Numeric, .Date_Time, .Date, .Unknown_Literal:
-			return value_boolean(true)
-		case .Error, .Unbound, .IRI, .Blank_Node, .Triple:
-			return value_boolean(false)
-		}
-		return value_boolean(false)
-	case .Is_Numeric:
-		if first.kind == .Unbound {
-			return ERROR_VALUE
-		}
-		return value_boolean(first.kind == .Numeric)
-	case .Same_Term:
-		if len(e.args) != 2 {
-			return ERROR_VALUE
-		}
-		second := expr_eval(ctx, e.args[1])
-		if second.kind == .Error || first.kind == .Unbound || second.kind == .Unbound {
-			return ERROR_VALUE
-		}
-		return value_boolean(value_same_term(first, second))
-	case .Langmatches:
-		if len(e.args) != 2 {
-			return ERROR_VALUE
-		}
-		second := expr_eval(ctx, e.args[1])
-		if second.kind == .Error {
-			return ERROR_VALUE
-		}
-		if first.kind != .Simple_String || second.kind != .Simple_String {
-			return ERROR_VALUE
-		}
-		return value_boolean(langmatches(first.text, second.text))
-	}
-	return ERROR_VALUE
-}
-
-@(private = "file")
-kind_test :: proc(v: Value, kind: Value_Kind) -> Value {
-	if v.kind == .Unbound || v.kind == .Error {
-		return ERROR_VALUE
-	}
-	return value_boolean(v.kind == kind)
-}
-
 // expr_check walks an expression at plan time and names the first
 // construct this engine cannot evaluate. Refusing here rather than
 // returning a type error at runtime is the difference between "the
@@ -426,29 +603,25 @@ expr_check :: proc(b: ^Plan_Builder, e: Expr) -> bool {
 		}
 		return true
 	case ^Builtin_Call:
-		#partial switch v.builtin {
-		case .Bound,
-		     .Datatype,
-		     .Str,
-		     .Lang,
-		     .Langmatches,
-		     .Same_Term,
-		     .Is_Iri,
-		     .Is_Uri,
-		     .Is_Blank,
-		     .Is_Literal,
-		     .Is_Numeric:
-			for arg in v.args {
-				if !expr_check(b, arg) {
-					return false
-				}
-			}
-			return true
+		if !builtin_implemented(v.builtin) {
+			b.unsupported = "built-in function"
+			return false
 		}
-		b.unsupported = "built-in function"
-		return false
+		for arg in v.args {
+			if !expr_check(b, arg) {
+				return false
+			}
+		}
+		return true
 	case ^Function_Call:
-		b.unsupported = "extension function"
+		// A function call on an XSD IRI is a §17.5 cast, not an
+		// extension function. Anything else is one, and this engine has
+		// none.
+		if !cast_iri(v.iri) || len(v.args) != 1 {
+			b.unsupported = "extension function"
+			return false
+		}
+		return expr_check(b, v.args[0])
 	case ^Exists_Expr:
 		if v.algebra == nil {
 			b.unsupported = "EXISTS without a translated pattern"
@@ -507,7 +680,16 @@ expr_within :: proc(slots: ^Var_Slots, e: Expr, bindable: []bool) -> bool {
 		// against the enclosing solution. So a filter containing one is
 		// never safe to move under a correlated join.
 		return false
-	case ^Function_Call, ^Aggregate, ^Triple_Term:
+	case ^Function_Call:
+		// Only a §17.5 cast gets this far, and a cast is a pure function
+		// of its argument.
+		for arg in v.args {
+			if !expr_within(slots, arg, bindable) {
+				return false
+			}
+		}
+		return true
+	case ^Aggregate, ^Triple_Term:
 		return false
 	case nil:
 		return false

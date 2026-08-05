@@ -148,9 +148,21 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-dataset/` | SPARQL-T-0013 | 12 |
 | `sparql11-exists/` | SPARQL-T-0013 | 6 |
 | `sparql11-bindings/` | SPARQL-T-0013 | 11 |
+| `sparql11-functions/` | SPARQL-T-0014 | 75 |
+| `sparql10-regex/` | SPARQL-T-0014 | 21 |
+| `sparql10-cast/` | SPARQL-T-0014 | 7 |
+| `sparql11-cast/` | SPARQL-T-0014 | 6 |
 
-That is **203 evaluation tests across nineteen directories**, each run against
-both backends at both Term_ID widths.
+That is **312 evaluation tests across twenty-three directories**, each run
+against both backends at both Term_ID widths.
+
+`sparql10-expr-builtin/` is the near miss worth recording: 24 of its 25
+entries pass, and `dawg-lang-3` — `?x :p "string"@EN` against
+`"string"@en` — fails because neither the RDF parser nor the SPARQL
+parser normalizes the case of a language tag, so the query's term and
+the stored term are different dictionary keys. That is a data-model
+question for the family rather than an engine one, and the directory
+stays disabled until it is answered.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs
 pass/mismatch/unsupported counts without asserting anything. It is a

@@ -102,6 +102,18 @@ parser_destroy :: proc(p: ^Parser) {
 	p^ = {}
 }
 
+// parser_base is the base IRI in force at the end of the prologue —
+// the one parser_init was given, or whatever a BASE declaration
+// replaced it with. It is "" when none was established.
+//
+// Evaluation needs it for IRI() (§17.4.2.8), which resolves a relative
+// reference the query computes at runtime rather than one the parser
+// saw. The string is owned by the parser's intern table, so it is valid
+// until parser_destroy.
+parser_base :: proc(p: ^Parser) -> string {
+	return p.base
+}
+
 // parse consumes the whole query. ok is false on error, with p.err
 // positioned at the violation; the partial tree is owned by the parser
 // either way. Calling parse twice is not supported.

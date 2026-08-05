@@ -120,7 +120,7 @@ evaluate_entry :: proc(
 		append(&declared, Dataset_Document{name = strings.clone(name), named = clause.named})
 	}
 
-	rs, status, detail = evaluate_algebra(suite, e, algebra, declared[:], backend)
+	rs, status, detail = evaluate_algebra(suite, e, algebra, sparql.parser_base(&p), declared[:], backend)
 	if status != .Ok || p.query.form != .Ask {
 		return rs, status, detail
 	}
@@ -142,6 +142,7 @@ evaluate_algebra :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	base: string,
 	declared: []Dataset_Document,
 	backend: Backend,
 ) -> (
@@ -151,9 +152,9 @@ evaluate_algebra :: proc(
 ) {
 	switch backend {
 	case .Memstore:
-		return evaluate_memstore(suite, e, algebra, declared)
+		return evaluate_memstore(suite, e, algebra, base, declared)
 	case .Kvstore:
-		return evaluate_kvstore(suite, e, algebra, declared)
+		return evaluate_kvstore(suite, e, algebra, base, declared)
 	}
 	return {}, .Failed, "unknown backend"
 }
@@ -188,6 +189,7 @@ evaluate_memstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	base: string,
 	declared: []Dataset_Document,
 ) -> (
 	rs: Result_Set,
@@ -216,7 +218,7 @@ evaluate_memstore :: proc(
 
 	q: sparql_mem.Query
 	defer sparql_mem.query_destroy(&q)
-	if !sparql_mem.query_init(&q, algebra, &td.dictionary, &td.dataset) {
+	if !sparql_mem.query_init(&q, algebra, &td.dictionary, &td.dataset, base) {
 		return {}, .Unsupported, q.unsupported
 	}
 
@@ -244,6 +246,7 @@ evaluate_kvstore :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
+	base: string,
 	declared: []Dataset_Document,
 ) -> (
 	rs: Result_Set,
@@ -281,7 +284,7 @@ evaluate_kvstore :: proc(
 
 	q: sparql_kv.Query
 	defer sparql_kv.query_destroy(&q)
-	if !sparql_kv.query_init(&q, algebra, s) {
+	if !sparql_kv.query_init(&q, algebra, s, base) {
 		if q.unsupported != "" {
 			return {}, .Unsupported, q.unsupported
 		}

@@ -219,6 +219,14 @@ exec_init :: proc(
 	e.expr.exists_nodes = exists_nodes
 }
 
+// exec_set_base gives the execution the query's base IRI. IRI() is the
+// only function that needs it, and it needs it at evaluation time
+// rather than at translation — the reference it resolves is a value the
+// query computed, not one the parser saw.
+exec_set_base :: proc(e: ^Exec($D, $It), base: string) {
+	expr_context_set_base(&e.expr, base)
+}
+
 exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 	for &node in e.nodes {
 		for open, i in node.iter_open {
@@ -750,6 +758,7 @@ consume :: proc(
 			return nil, false, -1
 		}
 		e.expr.row = row
+		expr_context_new_solution(&e.expr)
 		for slot, i in node.bind_slots {
 			// Release the previous solution's value first: the slot
 			// belongs to this operator, so nothing below it will.
@@ -908,6 +917,7 @@ conditions_hold :: proc(e: ^Exec($D, $It), conditions: []Expr, row: []store.Term
 		return true
 	}
 	e.expr.row = row
+	expr_context_new_solution(&e.expr)
 	for condition in conditions {
 		value := expr_eval(&e.expr, condition)
 		keep, defined := effective_boolean_value(value)
@@ -935,6 +945,14 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 	term, rendered := value_to_term(value, e.allocator)
 	if !rendered {
 		return store.UNBOUND, false
+	}
+	// A blank node the query made is by definition not one the store
+	// holds (§17.4.2.2), so it must not be looked up: a label collision
+	// with a node in the data would bind BNODE's result to that node.
+	// Only BNODE produces a blank-node value without a source.
+	if value.kind == .Blank_Node {
+		append(&e.computed, term)
+		return synthetic_id(len(e.computed) - 1), true
 	}
 	// A computed term the store already holds gets the store's own ID, so
 	// a later pattern can match on it — `BIND(?o+1 AS ?z) . ?s ?p ?z` is

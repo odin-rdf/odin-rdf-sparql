@@ -298,6 +298,20 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 		`SELECT DISTINCT ?o WHERE { ?s <http://e/p> ?o }`,
 		`SELECT ?o WHERE { ?s <http://e/p> ?o } LIMIT 1 OFFSET 1`,
 		`SELECT * WHERE { ?a <http://e/p> ?b . ?b <http://e/p> ?c . ?c <http://e/p> ?a }`,
+		// The §17 library allocates where the rest of the engine does not:
+		// every string it builds, the compiled regexes it caches for the
+		// life of the query, BNODE's per-solution labels, and NOW's lexical
+		// form. Each has a different lifetime, so each is a different way
+		// to leak (SPARQL-T-0014).
+		`SELECT (CONCAT(STR(?s), UCASE("x"), SUBSTR("hello", 2)) AS ?c) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT ?s WHERE { ?s <http://e/p> ?o FILTER(REGEX(STR(?o), "^http", "i")) }`,
+		`SELECT (REPLACE(STR(?o), "([a-z])", "[$1]") AS ?r) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT (BNODE(STR(?s)) AS ?b1) (BNODE(STR(?s)) AS ?b2) (BNODE() AS ?b3) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT (NOW() AS ?n) (UUID() AS ?u) (STRUUID() AS ?su) (RAND() AS ?r) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT (SHA256(STR(?s)) AS ?h) (<http://www.w3.org/2001/XMLSchema#string>(?s) AS ?c) WHERE { ?s <http://e/p> ?o }`,
+		// An invalid pattern is cached as a failure; the compilation's
+		// partial allocations must still be released.
+		`SELECT ?s WHERE { ?s <http://e/p> ?o FILTER(REGEX(STR(?o), "(unclosed")) }`,
 		// A term the store does not hold: the plan collapses, and the
 		// partially built pattern must still be released.
 		`SELECT * WHERE { <http://e/missing> <http://e/p> ?o }`,
@@ -311,7 +325,7 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 			algebra, _ := sparql.translate(&p)
 
 			q: sparql_mem.Query
-			if sparql_mem.query_init(&q, algebra, &d, &ds, allocator) {
+			if sparql_mem.query_init(&q, algebra, &d, &ds, sparql.parser_base(&p), allocator) {
 				pulled := 0
 				for {
 					_, more := sparql_mem.query_next(&q)

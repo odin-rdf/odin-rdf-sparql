@@ -129,6 +129,17 @@ iri_resolve :: proc(
 	ref: string,
 	scratch: ^Resolve_Scratch,
 ) -> (result: string, ok: bool) {
+	resolved := iri_resolve_build(base, ref, scratch) or_return
+	return rdf.intern(table, resolved), true
+}
+
+// iri_resolve_build is iri_resolve without the interning: the target
+// IRI is left in the scratch buffer and returned as a borrow of it,
+// valid until the next call. Evaluation needs this — IRI() resolves a
+// reference the query computed, and interning it would put a runtime
+// value into the parser's table.
+@(private)
+iri_resolve_build :: proc(base: string, ref: string, scratch: ^Resolve_Scratch) -> (result: string, ok: bool) {
 	r := iri_parse(ref)
 	b := iri_parse(base)
 
@@ -203,7 +214,7 @@ iri_resolve :: proc(
 		append(out, '#')
 		append(out, target.fragment)
 	}
-	return rdf.intern(table, string(out[:])), true
+	return string(out[:]), true
 }
 
 // remove_dot_segments appends input to out with '.' and '..' segments

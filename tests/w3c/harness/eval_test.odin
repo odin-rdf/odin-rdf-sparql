@@ -19,7 +19,18 @@ import "core:testing"
 // promotion, ASK, blank-node coreference. SPARQL-T-0013 adds the six the
 // algebra operators unlock: OPTIONAL, DISTINCT and REDUCED over real
 // solution sequences, BOUND, EBV in context, and open-world semantics
-// end to end. The rest arrive as their operators do.
+// end to end. SPARQL-T-0014 adds the four the §17 function library
+// unlocks: the 75-entry functions directory, the two cast directories,
+// and regex. The rest arrive as their operators do.
+//
+// sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
+// of its 25 entries pass, and the one that does not — dawg-lang-3,
+// `?x :p "string"@EN` against `"string"@en` — fails for a reason that
+// has nothing to do with §17. Neither the RDF parser nor the SPARQL
+// parser normalizes the case of a language tag, so the query's term and
+// the stored term are different keys in the dictionary and find_term
+// misses. Fixing it means normalizing on both sides of the family, which
+// is a data-model change rather than a function-library one.
 
 @(test)
 test_eval_sparql10_triple_match_memstore :: proc(t: ^testing.T) {
@@ -212,6 +223,46 @@ test_eval_bindings_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_bindings_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-bindings", .Kvstore)
+}
+
+@(test)
+test_eval_functions_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-functions", .Memstore)
+}
+
+@(test)
+test_eval_functions_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-functions", .Kvstore)
+}
+
+@(test)
+test_eval_regex_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-regex", .Memstore)
+}
+
+@(test)
+test_eval_regex_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-regex", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_cast_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-cast", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_cast_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-cast", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_cast_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-cast", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_cast_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-cast", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,

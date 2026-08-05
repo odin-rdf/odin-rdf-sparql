@@ -23,6 +23,7 @@ package w3c
 
 import "core:slice"
 import "core:strings"
+import "core:unicode"
 
 import rdf "rdf:rdf"
 
@@ -600,7 +601,13 @@ write_term_key :: proc(b: ^strings.Builder, term: rdf.Term) {
 		strings.write_string(b, "\"^^")
 		strings.write_string(b, string(v.datatype))
 		strings.write_byte(b, '@')
-		strings.write_string(b, v.language)
+		// Language tags are compared case-insensitively (literals_equivalent
+		// uses equal_fold), so the key has to fold them too — otherwise
+		// STRLANG(?s, "en-US") and an expectation written "en-us" would be
+		// pruned apart before they were ever compared.
+		for r in v.language {
+			strings.write_rune(b, unicode.to_lower(r))
+		}
 		strings.write_byte(b, '#')
 		strings.write_string(b, direction_tag(v.direction))
 	case ^rdf.Triple:

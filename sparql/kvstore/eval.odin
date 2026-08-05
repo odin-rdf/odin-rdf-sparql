@@ -125,10 +125,15 @@ Query :: struct {
 // ok is false when the algebra uses an operator this engine does not
 // implement yet (q.unsupported names it) or when the store failed while
 // the query's terms were being resolved (query_error reports it).
+//
+// base is the query's base IRI, which IRI() resolves relative
+// references against (§17.4.2.8); pass sparql.parser_base of the parser
+// the algebra came from. A query with no IRI() call never reads it.
 query_init :: proc(
 	q: ^Query,
 	algebra: sparql.Algebra,
 	s: ^kvstore.Store,
+	base := "",
 	allocator := context.allocator,
 ) -> (
 	ok: bool,
@@ -155,6 +160,7 @@ query_init :: proc(
 		return false
 	}
 	sparql.exec_init(&q.exec, plan, &q.slots, &q.session, load_adapter, &q.session, find_adapter, &q.session, q.exists_plans, q.exists_nodes, exists_adapter, allocator)
+	sparql.exec_set_base(&q.exec, base)
 	return true
 }
 

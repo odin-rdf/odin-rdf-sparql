@@ -410,6 +410,12 @@ test_unsupported_expression_is_reported :: proc(t: ^testing.T) {
 	// preparation, not answered with a type error at runtime — a filter
 	// that silently matched nothing would look exactly like a correct
 	// query with no results.
+	//
+	// LANGDIR is the stand-in: the SPARQL 1.2 grammar parses it and
+	// SPARQL-T-0018 evaluates it, so today it is a built-in the engine
+	// knows of and cannot run. (REGEX played this part until
+	// SPARQL-T-0014 implemented it, which is the point — the list this
+	// checks against is meant to shrink.)
 	f: Fixture
 	fixture_init(&f, t)
 	defer fixture_destroy(&f)
@@ -417,7 +423,7 @@ test_unsupported_expression_is_reported :: proc(t: ^testing.T) {
 	p: sparql.Parser
 	sparql.parser_init(
 		&p,
-		transmute([]byte)string(`SELECT * WHERE { ?s ?p ?o FILTER(REGEX(?o, "x")) }`),
+		transmute([]byte)string(`SELECT * WHERE { ?s ?p ?o FILTER(LANGDIR(?o) = "ltr") }`),
 		"http://example/",
 	)
 	defer sparql.parser_destroy(&p)

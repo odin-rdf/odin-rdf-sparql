@@ -139,6 +139,22 @@ value_double :: proc(x: f64) -> Value {
 	return Value{kind = .Numeric, numeric = .Double, number = x, datatype = XSD_DOUBLE}
 }
 
+// value_simple_string, value_lang_string, and value_blank_node build
+// the results the §17 function library returns. text is borrowed: a
+// computed one lives in the evaluation context's scratch until the
+// value has been rendered into a binding (see expr_own_text).
+value_simple_string :: proc(text: string) -> Value {
+	return Value{kind = .Simple_String, text = text, datatype = XSD_STRING}
+}
+
+value_lang_string :: proc(text: string, language: string) -> Value {
+	return Value{kind = .Lang_String, text = text, language = language, datatype = rdf.RDF_LANG_STRING}
+}
+
+value_blank_node :: proc(label: string) -> Value {
+	return Value{kind = .Blank_Node, text = label}
+}
+
 value_is_error :: proc(v: Value) -> bool {
 	return v.kind == .Error
 }
@@ -489,7 +505,7 @@ value_compare :: proc(a, b: Value) -> (order: int, ok: bool) {
 		if a.kind == .Lang_String && !strings.equal_fold(a.language, b.language) {
 			return 0, false
 		}
-		return strings.compare(a.text, b.text), true
+		return text_compare(a.text, b.text), true
 	}
 	if a.kind == .Boolean && b.kind == .Boolean {
 		if a.boolean == b.boolean {
@@ -548,6 +564,34 @@ compare_instants :: proc(a, b: Date_Time) -> (order: int, ok: bool) {
 @(private = "file")
 is_string_kind :: proc(v: Value) -> bool {
 	return v.kind == .Simple_String || v.kind == .Lang_String
+}
+
+// text_compare orders two strings by codepoint, which is what SPARQL's
+// default collation asks for — UTF-8's byte order and codepoint order
+// agree, so a byte comparison is a codepoint comparison.
+//
+// It exists instead of strings.compare because that one is wrong for a
+// pair of empty strings. It reaches runtime.memory_compare, which
+// answers from the pointers before it looks at the length:
+//
+//	case x == y:   return 0
+//	case x == nil: return -1
+//
+// Two zero-length strings whose data pointers differ — one a slice of
+// the query text, one a compile-time constant — therefore compare as
+// *unequal*, and `FILTER(lang(?v) = "")` silently matched nothing.
+// core:bytes.compare guards the case; runtime.string_cmp does not.
+text_compare :: proc(a, b: string) -> int {
+	shared := min(len(a), len(b))
+	for i in 0 ..< shared {
+		if a[i] != b[i] {
+			return -1 if a[i] < b[i] else +1
+		}
+	}
+	if len(a) == len(b) {
+		return 0
+	}
+	return -1 if len(a) < len(b) else +1
 }
 
 // value_equal implements `=` (§17.4.1.7 RDFterm-equal, extended by the
@@ -813,14 +857,51 @@ value_datatype :: proc(v: Value) -> Value {
 
 // value_str is the STR function: the lexical form of a literal or the
 // string of an IRI, as a simple literal.
-value_str :: proc(v: Value) -> Value {
+//
+// A value read from the store answers with the lexical form its term
+// carries — STR("01"^^xsd:integer) is "01", not "1". A value the query
+// *computed* has no term and so no lexical form yet, and gets one from
+// number_text; see the note there on why that is not the same rendering
+// value_to_term uses.
+value_str :: proc(v: Value, allocator := context.allocator) -> (result: Value, owned: string) {
 	#partial switch v.kind {
-	case .IRI:
-		return Value{kind = .Simple_String, text = v.text, datatype = XSD_STRING}
 	case .Error, .Unbound, .Blank_Node, .Triple:
-		return ERROR_VALUE
+		return ERROR_VALUE, ""
+	case .IRI:
+		return value_simple_string(v.text), ""
+	case .Numeric:
+		if v.term == nil {
+			text := number_text(v, allocator)
+			return value_simple_string(text), text
+		}
+	case .Boolean:
+		if v.term == nil {
+			return value_simple_string(v.boolean ? "true" : "false"), ""
+		}
 	}
-	return Value{kind = .Simple_String, text = v.text, datatype = XSD_STRING}
+	return value_simple_string(v.text), ""
+}
+
+// number_text writes a number the way a *string* should show it, which
+// is not the way a *literal* should spell it — the two differ, and the
+// suites pin both.
+//
+// value_to_term needs a canonical lexical form for the datatype it is
+// about to write ("0.0"^^xsd:decimal, "1.0E0"^^xsd:double), because the
+// result has to be a well-formed literal of that type. STR and the
+// xsd:string cast are producing text, and the DAWG's cast-string
+// expectations pin that text as the plain shortest form: xsd:string of
+// the decimal 0.0 is "0", of the double 0E1 is "0", of the float 1.25
+// is "1.25". Exponent notation returns only for magnitudes where the
+// plain form would be hundreds of digits long.
+//
+// The caller owns the returned string.
+number_text :: proc(v: Value, allocator := context.allocator) -> string {
+	buf: [64]byte
+	if v.numeric == .Integer {
+		return strings.clone(strconv.write_int(buf[:], v.integer, 10), allocator)
+	}
+	return strings.clone(strip_plus(strconv.write_float(buf[:], v.number, 'g', -1, 64)), allocator)
 }
 
 // value_lang is the LANG function: a literal's language tag, or the
@@ -855,9 +936,18 @@ langmatches :: proc(tag, range: string) -> bool {
 //
 // The caller owns the returned term.
 value_to_term :: proc(v: Value, allocator := context.allocator) -> (term: rdf.Term, ok: bool) {
-	#partial switch v.kind {
-	case .Error, .Unbound:
+	if v.kind == .Error || v.kind == .Unbound {
 		return nil, false
+	}
+	// A value that already stands for a term is rendered as *that* term.
+	// Canonicalizing it instead would answer with a different term than
+	// the one the query named: STRDT("1", xsd:byte) must not come back as
+	// "1"^^xsd:integer, and a date or an uninterpreted datatype has no
+	// canonical form this engine could write.
+	if v.term != nil {
+		return rdf.clone_term(v.term, allocator), true
+	}
+	#partial switch v.kind {
 	case .IRI:
 		return rdf.IRI(strings.clone(v.text, allocator)), true
 	case .Blank_Node:
@@ -873,12 +963,9 @@ value_to_term :: proc(v: Value, allocator := context.allocator) -> (term: rdf.Te
 		defer delete(lexical, allocator)
 		return owned_literal(lexical, numeric_datatype(v.numeric), "", allocator), true
 	}
-	// A value that came from the store keeps whatever term it had —
-	// dates, dateTimes, and the datatypes the engine does not interpret
-	// are never *computed*, only carried.
-	if v.term != nil {
-		return rdf.clone_term(v.term, allocator), true
-	}
+	// A kind with neither a term nor a canonical form — a date or an
+	// uninterpreted datatype that was somehow computed rather than read.
+	// There is nothing to write, so the binding does not happen.
 	return nil, false
 }
 
@@ -899,7 +986,6 @@ owned_literal :: proc(lexical: string, datatype: rdf.IRI, language: string, allo
 // numeric_lexical writes a number in its datatype's canonical form.
 // xsd:double and xsd:float use exponent notation, which is what the
 // expected results of the operator suites are written in.
-@(private = "file")
 numeric_lexical :: proc(v: Value, allocator: runtime.Allocator) -> string {
 	buf: [64]byte
 	switch v.numeric {

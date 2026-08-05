@@ -98,11 +98,16 @@ Query :: struct {
 // ok is false when the algebra uses an operator this engine does not
 // implement yet, in which case q.unsupported names it — an unimplemented
 // operator is reported, never mistaken for a query with no answers.
+//
+// base is the query's base IRI, which IRI() resolves relative
+// references against (§17.4.2.8); pass sparql.parser_base of the parser
+// the algebra came from. A query with no IRI() call never reads it.
 query_init :: proc(
 	q: ^Query,
 	algebra: sparql.Algebra,
 	dictionary: ^memstore.Dictionary,
 	dataset: ^memstore.Dataset,
+	base := "",
 	allocator := context.allocator,
 ) -> (
 	ok: bool,
@@ -121,6 +126,7 @@ query_init :: proc(
 	q.exists_plans = q.builder.exists_plans[:]
 	q.exists_nodes = q.builder.exists_nodes[:]
 	sparql.exec_init(&q.exec, plan, &q.slots, dataset, load_adapter, dictionary, find_adapter, dictionary, q.exists_plans, q.exists_nodes, exists_adapter, allocator)
+	sparql.exec_set_base(&q.exec, base)
 	return true
 }
 
