@@ -76,4 +76,32 @@ Largest task by operator count, but each operator is small once T-0011/T-0012 ex
 
   **How to resume.** Re-add the survey harness first: a ~50-line `@(test)` in `tests/w3c/harness` that runs every entry of every `EVAL_SUITES` directory and logs pass/mismatch/unsupported counts plus the got/want text for mismatches. It was removed before committing (it is a development instrument, not a guard), but it is what made every decision in T-0012 and T-0013 measurable rather than speculative. Work down the list above, enabling each directory as it reaches 100%.
 
-  **Session note.** SPARQL-T-0010, T-0011, and T-0012 are complete and committed; this task stopped short because the session ran out of context, not because of a blocker. SPARQL-T-0014 through T-0019 have not been started.
+  **Session note.** SPARQL-T-0010, T-0011, and T-0012 are complete and committed. SPARQL-T-0014 through T-0019 have not been started.
+
+- **2026-08-05 (later) — Operators finished. Two acceptance criteria remain open; see the end.** Four more directories green — `sparql10-algebra` 14, `sparql10-expr-ops` 18, `sparql10-optional-filter` 5, `sparql11-bind` 10 — for **174 evaluation tests across sixteen directories**, both backends, both widths. `make check` clean.
+
+  **The substantial fix: when a join's right side may be correlated.** Running the right side with the left's bindings already in the row is what makes a join an index probe, and it is wrong in general — SPARQL evaluates a join's operands independently and merges compatible solutions. Pre-binding changes what the right side computes unless it is a pure pattern, where restricting the search and filtering the results coincide. Two failures made this concrete:
+  - `{ :x :p ?v } { FILTER(?v = 1) }` has no solutions: inside the second group ?v is not in scope, so the filter errors. Correlated, it sees ?v bound and succeeds.
+  - `?X :name "paul" { ?Y :name "george" OPTIONAL { ?X :email ?Z } }` has none either: evaluated independently the OPTIONAL binds ?X to whoever has an email and the join fails on the mismatch. Correlated, the OPTIONAL is restricted to paul's email, finds none, and emits the left row.
+
+  `probe_safe` in plan.odin now decides this: a right side is correlated only when it is built from patterns (BGPs, unions and joins of them, inline tables) plus filters whose every variable the subtree itself binds. Everything else is materialized and merged. This turned `sparql10-algebra` from 10/14 to 14/14 in one change.
+
+  **Four smaller fixes, each found by a disagreeing test rather than by inspection:**
+  1. **Result comparison is by value within a datatype.** The DAWG writes the sum of two xsd:floats as `"6"`; XSD canonical form is `"6.0E0"`; elsewhere it writes `"1.0E0"`. No implementation matches both by string, and both denote the same value. Comparing within a datatype keeps the distinctions the tests are about — `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` stay different answers. (This is a harness change, `results.odin`.)
+  2. **Unary minus carried the source term ID of the value it negated**, so `BIND(-?v AS ?x)` bound the *un-negated* term. A computed value must not inherit the identity of its input.
+  3. **A computed value the store already holds now gets the store's own ID**, so `BIND(?o+1 AS ?z) . ?s ?p ?z` matches — with a synthetic ID it matched nothing. Only a term the data does not contain needs an engine-invented name.
+  4. **UNDEF in a VALUES row was conflated with a term the store does not hold.** The first is a solution that leaves the variable unbound; the second makes the row unmatchable. `Plan_Table_Cell` now distinguishes them.
+
+  **A translation bug (SPARQL-I-0001 code).** §18.2.2.6 was hoisting a *nested* group's FILTER onto the enclosing LeftJoin as though it were the OPTIONAL's own. Only a filter that is an element of the OPTIONAL's own group moves. The DAWG ships both expectations for the same query (`optional-filter-005` "simplified" and "not-simplified"), which is exactly how the difference is meant to be caught.
+
+  **Two memory bugs the guards caught**, both on paths the enabled suites do not reach: `value_to_term` produced literals borrowing constant datatype IRIs, which `rdf.destroy_term` then freed (it owns all three strings, so a computed term must own all three); and a binary plan node leaked its already-built left side when its right side turned out to be unsupported.
+
+  **The survey harness is now committed** as `tests/w3c/harness/zz_survey_test.odin`. It asserts nothing and cannot fail; it runs every vendored directory and logs pass/mismatch/unsupported counts, with a `DETAIL` list that prints a directory's got/want. Every enablement decision in T-0012 and T-0013 came out of it, and T-0014 onward will want it.
+
+  **Still open, and why this task is not marked complete:**
+  - **EXISTS / NOT EXISTS is not implemented** — an explicit acceptance criterion. `expr_check` refuses it by name. `sparql11-exists` 0/6, `sparql11-negation` 1/12.
+  - **FROM / FROM NAMED dataset construction is not implemented** — also an acceptance criterion (`sparql10-dataset` 0/12); the harness runner refuses it by name.
+  - `sparql10-graph` 15/17. `graph-empty` needs `GRAPH ?g {}` to enumerate the named graphs, which the match interface cannot express directly — a third store-evidence item for T-0019. `graph-optional` is a separate GRAPH/OPTIONAL scoping case, not yet diagnosed.
+  - `sparql11-bindings` 10/11 — the remaining entry is VALUES inside GRAPH binding the same variable as the graph name.
+  - `sparql11-subquery` still blocked on the 10 RDF/XML data documents (SPARQL-T-0010).
+  - Out of this task's scope but visible in the survey: `sparql10-expr-builtin` 22/25 and `sparql10-i18n` 4/5 (Unicode normalization of IRIs — a parser/store question).
