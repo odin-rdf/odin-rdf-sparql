@@ -21,7 +21,11 @@ import "core:testing"
 // solution sequences, BOUND, EBV in context, and open-world semantics
 // end to end. SPARQL-T-0014 adds the four the §17 function library
 // unlocks: the 75-entry functions directory, the two cast directories,
-// and regex. The rest arrive as their operators do.
+// and regex. SPARQL-T-0015 adds the five the blocking operators unlock:
+// the 42-entry aggregates directory, grouping, the two sorting
+// directories (sort, and solution-seq for the slice-after-sort layering),
+// and project-expression, whose seventh entry was the one ORDER BY held
+// back. The rest arrive as their operators do.
 //
 // sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
 // of its 25 entries pass, and the one that does not — dawg-lang-3,
@@ -263,6 +267,56 @@ test_eval_sparql11_cast_memstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql11_cast_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-cast", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_aggregates_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-aggregates", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_aggregates_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-aggregates", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_grouping_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-grouping", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_grouping_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-grouping", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_sort_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-sort", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_sort_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-sort", .Kvstore)
+}
+
+@(test)
+test_eval_sparql10_solution_seq_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-solution-seq", .Memstore)
+}
+
+@(test)
+test_eval_sparql10_solution_seq_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-solution-seq", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_project_expression_memstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-project-expression", .Memstore)
+}
+
+@(test)
+test_eval_sparql11_project_expression_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-project-expression", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,

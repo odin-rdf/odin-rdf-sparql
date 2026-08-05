@@ -152,8 +152,13 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql10-regex/` | SPARQL-T-0014 | 21 |
 | `sparql10-cast/` | SPARQL-T-0014 | 7 |
 | `sparql11-cast/` | SPARQL-T-0014 | 6 |
+| `sparql11-aggregates/` | SPARQL-T-0015 | 42 |
+| `sparql11-grouping/` | SPARQL-T-0015 | 4 |
+| `sparql10-sort/` | SPARQL-T-0015 | 14 |
+| `sparql10-solution-seq/` | SPARQL-T-0015 | 13 |
+| `sparql11-project-expression/` | SPARQL-T-0015 | 7 |
 
-That is **312 evaluation tests across twenty-three directories**, each run
+That is **392 evaluation tests across twenty-eight directories**, each run
 against both backends at both Term_ID widths.
 
 `sparql10-expr-builtin/` is the near miss worth recording: 24 of its 25
@@ -163,6 +168,14 @@ parser normalizes the case of a language tag, so the query's term and
 the stored term are different dictionary keys. That is a data-model
 question for the family rather than an engine one, and the directory
 stays disabled until it is answered.
+
+`sparql11-negation/` is the other one: 11 of 12, with `graph-minus`
+("outer GRAPH operator does not affect MINUS disjointness") failing
+because a MINUS inside a GRAPH clause is evaluated against the merge of
+the named graphs rather than against each in turn. That is the same
+shape as the aggregation-inside-GRAPH case SPARQL-T-0015 fixed for the
+blocking operators, and fixing it for MINUS belongs with the rest of the
+GRAPH work rather than with sorting.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs
 pass/mismatch/unsupported counts without asserting anything. It is a

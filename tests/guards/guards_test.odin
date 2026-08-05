@@ -269,6 +269,91 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 	)
 }
 
+// Aggregation's memory contract (SPARQL-T-0015).
+//
+// A GROUP BY is a blocking operator, but it must not be a *buffering*
+// one: it keeps one accumulator per aggregate per group and folds each
+// solution in as it arrives, so its memory is the number of groups and
+// not the size of its input. That is what makes `SELECT ?p (COUNT(?o) AS
+// ?n) … GROUP BY ?p` runnable over a store that does not fit in memory,
+// and it is the sort of property that decays silently — hence a
+// measurement rather than a comment.
+//
+// Ten times the solutions, the same two groups: the query's own peak
+// must not follow the input. The store is deliberately outside the
+// tracked allocator, because its memory *does* scale with the data.
+@(test)
+test_grouping_is_bounded_by_its_groups :: proc(t: ^testing.T) {
+	small := grouped_query_peak(t, 100)
+	large := grouped_query_peak(t, 1000)
+	// A slack of a few kilobytes covers the dynamic arrays' growth
+	// doubling; what it does not cover is a per-solution retention, which
+	// would be nine hundred rows of difference.
+	testing.expectf(
+		t,
+		large <= small + 8192,
+		"grouping 10x the solutions into the same two groups took %d bytes at peak against %d — the group state is following the input",
+		large,
+		small,
+	)
+}
+
+@(private = "file")
+grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
+	d: memstore.Dictionary
+	memstore.dictionary_init(&d)
+	defer memstore.dictionary_destroy(&d)
+	ds: memstore.Dataset
+	memstore.dataset_init(&ds)
+	defer memstore.dataset_destroy(&ds)
+
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for i in 0 ..< solutions {
+		fmt.sbprintf(&b, "<http://e/s%d> <http://e/p%d> <http://e/o%d> .\n", i, i %% 2, i)
+	}
+	_, load_err := memstore.load_triples(&d, &ds, transmute([]byte)strings.to_string(b))
+	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+
+	p: sparql.Parser
+	// Every aggregate here answers from O(1) state per group. GROUP_CONCAT
+	// and COUNT(DISTINCT …) are deliberately absent: their answers are
+	// linear in the input by definition, and this guard is about the ones
+	// whose answers are not.
+	sparql.parser_init(
+		&p,
+		transmute([]byte)string(`SELECT ?p (COUNT(?o) AS ?n) (MIN(STR(?o)) AS ?lo) (MAX(STR(?o)) AS ?hi)
+		                          WHERE { ?s ?p ?o } GROUP BY ?p`),
+	)
+	defer sparql.parser_destroy(&p)
+	_, parsed := sparql.parse(&p)
+	testing.expect(t, parsed, "the query should parse")
+	algebra, translated := sparql.translate(&p)
+	testing.expect(t, translated, "the query should translate")
+
+	// Only the query's allocations are tracked; the store's memory does
+	// scale with the data, and that is its business.
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+
+	q: sparql_mem.Query
+	prepared := sparql_mem.query_init(&q, algebra, &d, &ds, "", mem.tracking_allocator(&track))
+	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
+	groups := 0
+	for {
+		_, more := sparql_mem.query_next(&q)
+		if !more {
+			break
+		}
+		groups += 1
+	}
+	testing.expectf(t, groups == 2, "expected 2 groups, got %d", groups)
+	peak := track.peak_memory_allocated
+	sparql_mem.query_destroy(&q)
+	return int(peak)
+}
+
 // Preparing, running, and destroying a query must release everything —
 // the plan, the slot table, the operator state, and every match iterator
 // the run opened, including the ones abandoned mid-stream.
@@ -315,6 +400,23 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 		// A term the store does not hold: the plan collapses, and the
 		// partially built pattern must still be released.
 		`SELECT * WHERE { <http://e/missing> <http://e/p> ?o }`,
+		// The blocking operators own more than the streaming ones do: a
+		// group table keyed on owned strings, accumulators holding copies
+		// of terms, an exact decimal's lexical form, and every solution
+		// plus its materialized sort keys (SPARQL-T-0015). Each is a
+		// different lifetime and so a different way to leak, and the
+		// abandoned-mid-stream half of this loop catches the ones that are
+		// only released on the way out.
+		`SELECT (COUNT(*) AS ?n) (COUNT(DISTINCT ?o) AS ?d) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT ?s (SUM(?o) AS ?t) (MIN(?o) AS ?lo) (MAX(?o) AS ?hi) (SAMPLE(?o) AS ?any)
+		 WHERE { ?s <http://e/p> ?o } GROUP BY ?s`,
+		`SELECT (SUM(?v) AS ?t) (AVG(?v) AS ?m) WHERE { VALUES ?v { 1.0 2.2 3.5 } }`,
+		`SELECT (GROUP_CONCAT(?o ; SEPARATOR = ", ") AS ?g) WHERE { ?s <http://e/p> ?o }`,
+		`SELECT ?kind (COUNT(*) AS ?n) WHERE { ?s <http://e/p> ?o } GROUP BY (DATATYPE(?o) AS ?kind)
+		 HAVING (COUNT(*) > 0)`,
+		`SELECT ?s ?o WHERE { ?s <http://e/p> ?o } ORDER BY DESC(?o) STR(?s)`,
+		`SELECT ?s WHERE { ?s <http://e/p> ?o } ORDER BY (?o + 1) LIMIT 2 OFFSET 1`,
+		`SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { SELECT (COUNT(*) AS ?c) { ?s ?p ?o } } } GROUP BY ?g`,
 	}
 	for query in QUERIES {
 		for stop_early in ([?]bool{false, true}) {

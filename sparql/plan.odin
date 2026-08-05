@@ -266,12 +266,81 @@ Plan_Graph_Scan :: struct {
 	slot: int,
 }
 
+// Plan_Group_Key is one GROUP BY condition: the expression that
+// computes the key, and the slot its value binds in the group's output
+// solution.
+//
+// slot is -1 for a condition that binds nothing — `GROUP BY (?x + 1)`
+// without an AS, which partitions the solutions and then has no name to
+// hand the key back under. A bare `GROUP BY ?x` binds ?x, and
+// `GROUP BY (expr AS ?y)` binds ?y.
+//
+// source is the slot to read the key straight out of the solution row,
+// for the common case where the condition *is* a variable. Then the key
+// is a Term_ID and grouping is integer comparison — a term is never
+// materialized, which is the whole reason the engine evaluates over IDs.
+// It is -1 when the condition is an expression, whose value has to be
+// computed and compared as the term it would bind.
+Plan_Group_Key :: struct {
+	slot:   int,
+	source: int,
+	expr:   Expr,
+}
+
+// Plan_Aggregate is one set function and the slot it binds. The slot
+// carries the ".N" variable the translation invented (§18.2.4.1's
+// aggregate substitution), which the SELECT expressions, HAVING, and
+// ORDER BY were rewritten to read.
+Plan_Aggregate :: struct {
+	slot: int,
+	agg:  ^Aggregate,
+}
+
+// Plan_Group is GROUP BY and the aggregates over it (§18.5.1).
+//
+// It is a blocking operator: no group's answer exists until the last
+// solution has been seen. What it does *not* do is buffer the
+// solutions — one accumulator per aggregate per group, fed one solution
+// at a time, so the memory is the number of groups and not the size of
+// the input (see aggregate.odin).
+//
+// An empty key list is the implicit grouping of §18.2.4.1: an aggregate
+// used without GROUP BY puts every solution in one group, and that group
+// exists even when there are no solutions at all. `SELECT (COUNT(*) AS
+// ?c) WHERE { … }` over data that matches nothing answers 0, not
+// nothing.
+Plan_Group :: struct {
+	keys:       [dynamic]Plan_Group_Key,
+	aggregates: [dynamic]Plan_Aggregate,
+	input:      Plan,
+}
+
+// Plan_Order is ORDER BY (§15.1). Also blocking, and unavoidably so:
+// unlike a group it has to hold every solution, because the last one may
+// sort first.
+//
+// The slice above it is a separate operator, exactly as §18.2.5 layers
+// them. A LIMIT does not shorten the sort — correctness first; the
+// evidence log records that an ordered store iterator would let a
+// top-N query stream (SPARQL-T-0019).
+Plan_Order :: struct {
+	conditions: [dynamic]Order_Condition,
+	input:      Plan,
+}
+
 // Plan_Materialized is a sub-plan whose solutions are collected once,
 // before the query runs, because its consumer needs them independently
 // of the enclosing bindings: MINUS's right side, and a subquery, whose
 // variables are scoped to itself.
+// correlated inverts the "once" for the one case that needs it: a
+// blocking operator under GRAPH ?g, which has to be evaluated afresh for
+// each graph. Then the sub-plan is still collected — its solutions are
+// still merged into the enclosing row rather than replacing it, which is
+// what keeps ?g bound through a subquery's projection — but the
+// collection happens per enclosing solution instead of once.
 Plan_Materialized :: struct {
-	input: Plan,
+	input:      Plan,
+	correlated: bool,
 }
 
 Plan :: union {
@@ -290,6 +359,8 @@ Plan :: union {
 	^Plan_Table,
 	^Plan_Materialized,
 	^Plan_Graph_Scan,
+	^Plan_Group,
+	^Plan_Order,
 }
 
 // Term_Finder resolves a ground term to its store ID without interning
@@ -512,6 +583,34 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 			node.right = scoped(b, inner)
 			return node, true
 		}
+		if plan_ref_is_var(ref) && plan_blocks(inner) {
+			// A blocking operator under GRAPH ?g has to run once per
+			// graph, and putting ?g in the triple patterns' graph position
+			// does not achieve that: the pattern would match every graph
+			// and the group or the sort would collapse them into one
+			// answer. So the graphs are enumerated and the body is run
+			// against each — correlated on ?g, which is the one binding it
+			// is meant to see.
+			//
+			// It is materialized *correlated*: collected once per graph
+			// rather than once per query. Collecting is what makes the
+			// body's solutions merge into the enclosing row instead of
+			// replacing it — a subquery projects its own variables and
+			// nothing else, so its rows would otherwise arrive with ?g
+			// masked back out. The trade is deliberate and narrow: the
+			// body's own variables are correlated too, which a subquery's
+			// scoping says they should not be, and the alternative is a
+			// wrong answer for every query of this shape.
+			scan := new(Plan_Graph_Scan, b.allocator)
+			scan.slot = ref.slot
+			collected := new(Plan_Materialized, b.allocator)
+			collected.input = inner
+			collected.correlated = true
+			node := new(Plan_Join, b.allocator)
+			node.left = scan
+			node.right = collected
+			return node, true
+		}
 		return inner, true
 	case ^Alg_Extend:
 		for binding in v.bindings {
@@ -530,13 +629,112 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		node.input = input
 		return node, true
 	case ^Alg_Group:
-		b.unsupported = "GROUP BY"
+		return build_group(b, v)
 	case ^Alg_Order:
-		b.unsupported = "ORDER BY"
+		for condition in v.conditions {
+			if !expr_check(b, condition.expr) {
+				return nil, false
+			}
+		}
+		input := plan_build(b, v.input) or_return
+		node := new(Plan_Order, b.allocator)
+		node.conditions = make([dynamic]Order_Condition, b.allocator)
+		for condition in v.conditions {
+			append(&node.conditions, condition)
+		}
+		node.input = input
+		return node, true
 	case nil:
 		b.unsupported = "empty algebra"
 	}
 	return nil, false
+}
+
+// build_group turns the algebra's Group into a plan, resolving each
+// grouping condition's output variable and each aggregate's ".N" slot.
+//
+// A condition's output slot follows §18.2.4.1's rewriting: `(expr AS
+// ?y)` names ?y, a bare variable names itself, and a bare expression
+// names nothing — the grammar refuses to let such a group's key be
+// projected, so there is nothing to bind it to.
+@(private = "file")
+build_group :: proc(b: ^Plan_Builder, g: ^Alg_Group) -> (p: Plan, ok: bool) {
+	for condition in g.by {
+		if !expr_check(b, condition.expr) {
+			return nil, false
+		}
+	}
+	for binding in g.aggregates {
+		aggregate, is_aggregate := binding.expr.(^Aggregate)
+		if !is_aggregate {
+			b.unsupported = "aggregate binding"
+			return nil, false
+		}
+		if aggregate.expr != nil && !expr_check(b, aggregate.expr) {
+			return nil, false
+		}
+	}
+	input := plan_build(b, g.input) or_return
+	node := new(Plan_Group, b.allocator)
+	node.keys = make([dynamic]Plan_Group_Key, b.allocator)
+	node.aggregates = make([dynamic]Plan_Aggregate, b.allocator)
+	for condition in g.by {
+		key := Plan_Group_Key {
+			slot   = -1,
+			source = -1,
+			expr   = condition.expr,
+		}
+		if variable, is_var := condition.expr.(Var); is_var {
+			key.source = var_slot(b.slots, variable.name)
+			key.slot = key.source
+		}
+		if condition.has_var {
+			key.slot = var_slot(b.slots, condition.v.name)
+		}
+		append(&node.keys, key)
+	}
+	for binding in g.aggregates {
+		append(
+			&node.aggregates,
+			Plan_Aggregate{slot = var_slot(b.slots, binding.v.name), agg = binding.expr.(^Aggregate)},
+		)
+	}
+	node.input = input
+	return node, true
+}
+
+// plan_blocks reports whether a sub-plan holds an operator whose answer
+// depends on having seen all of its input — which is what makes it wrong
+// to run once across several graphs. See the GRAPH case in plan_build.
+@(private = "file")
+plan_blocks :: proc(p: Plan) -> bool {
+	switch v in p {
+	case ^Plan_Group, ^Plan_Order:
+		return true
+	case ^Plan_BGP, ^Plan_Nothing, ^Plan_Unit, ^Plan_Table, ^Plan_Graph_Scan:
+		return false
+	case ^Plan_Filter:
+		return plan_blocks(v.input)
+	case ^Plan_Project:
+		return plan_blocks(v.input)
+	case ^Plan_Distinct:
+		return plan_blocks(v.input)
+	case ^Plan_Slice:
+		return plan_blocks(v.input)
+	case ^Plan_Extend:
+		return plan_blocks(v.input)
+	case ^Plan_Materialized:
+		return plan_blocks(v.input)
+	case ^Plan_Union:
+		return plan_blocks(v.left) || plan_blocks(v.right)
+	case ^Plan_Join:
+		return plan_blocks(v.left) || plan_blocks(v.right)
+	case ^Plan_Left_Join:
+		return plan_blocks(v.left) || plan_blocks(v.right)
+	case ^Plan_Minus:
+		return plan_blocks(v.left)
+	}
+	return false
 }
 
 // join_plans is the one plan simplification this task makes: the join
@@ -657,7 +855,15 @@ probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
 			}
 		}
 		return probe_safe_under(b, v.input, bindable)
-	case ^Plan_Project, ^Plan_Distinct, ^Plan_Slice, ^Plan_Extend, ^Plan_Left_Join, ^Plan_Minus, ^Plan_Materialized:
+	case ^Plan_Project,
+	     ^Plan_Distinct,
+	     ^Plan_Slice,
+	     ^Plan_Extend,
+	     ^Plan_Left_Join,
+	     ^Plan_Minus,
+	     ^Plan_Materialized,
+	     ^Plan_Group,
+	     ^Plan_Order:
 		return false
 	case ^Plan_Union:
 		return probe_safe_under(b, v.left, bindable) && probe_safe_under(b, v.right, bindable)
@@ -688,6 +894,10 @@ plan_matches_triples :: proc(p: Plan) -> bool {
 	case ^Plan_Extend:
 		return plan_matches_triples(v.input)
 	case ^Plan_Materialized:
+		return plan_matches_triples(v.input)
+	case ^Plan_Group:
+		return plan_matches_triples(v.input)
+	case ^Plan_Order:
 		return plan_matches_triples(v.input)
 	case ^Plan_Union:
 		return plan_matches_triples(v.left) || plan_matches_triples(v.right)
@@ -732,6 +942,21 @@ plan_bindable :: proc(p: Plan, out: []bool) {
 		plan_bindable(v.input, out)
 	case ^Plan_Materialized:
 		plan_bindable(v.input, out)
+	case ^Plan_Order:
+		plan_bindable(v.input, out)
+	case ^Plan_Group:
+		// A group's solution is its keys and its aggregates, and nothing
+		// its input bound — aggregation collapses the solutions it saw.
+		for key in v.keys {
+			if key.slot >= 0 && key.slot < len(out) {
+				out[key.slot] = true
+			}
+		}
+		for aggregate in v.aggregates {
+			if aggregate.slot >= 0 && aggregate.slot < len(out) {
+				out[aggregate.slot] = true
+			}
+		}
 	case ^Plan_Project:
 		for slot in v.slots {
 			if slot >= 0 && slot < len(out) {
@@ -970,6 +1195,15 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	case ^Plan_Graph_Scan:
+		free(v, allocator)
+	case ^Plan_Group:
+		delete(v.keys)
+		delete(v.aggregates)
+		plan_destroy(v.input, allocator)
+		free(v, allocator)
+	case ^Plan_Order:
+		delete(v.conditions)
+		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	}
 }

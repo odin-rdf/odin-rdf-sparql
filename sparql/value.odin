@@ -452,7 +452,7 @@ days_from_civil :: proc(y, m, d: int) -> int {
 
 // promote returns the rung two numeric operands meet on. The tower is
 // integer < decimal < float < double (§17.3), so promotion is a max.
-@(private = "file")
+@(private)
 promote :: proc(a, b: Numeric_Kind) -> Numeric_Kind {
 	return a if a > b else b
 }

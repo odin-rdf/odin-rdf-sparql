@@ -69,6 +69,8 @@ Exec_Kind :: enum {
 	Table,
 	Materialized,
 	Graph_Scan,
+	Group,
+	Order,
 }
 
 // Exec_Node is one operator, instantiated for a backend's iterator type.
@@ -133,6 +135,10 @@ Exec_Node :: struct($It: typeid) {
 	row_at:     int,
 	set_slots:  [dynamic]int,
 	collected:  bool,
+	// A Materialized node that collects per enclosing solution rather
+	// than once, for a blocking operator under GRAPH ?g. See
+	// Plan_Materialized.correlated.
+	recollect:  bool,
 
 	// Extend (BIND)
 	bind_slots: []int,
@@ -141,6 +147,24 @@ Exec_Node :: struct($It: typeid) {
 	// Graph_Scan
 	graph_slot: int,
 	graph_seen: map[store.Term_ID]bool,
+
+	// Group and Order, the blocking operators. Both fill `rows` with the
+	// answers they will hand out and then replay them, so they share the
+	// stored-sequence machinery with Materialized — but they *replace*
+	// the working row rather than merging into it, because their output
+	// is a solution in its own right and not a row to be joined.
+	group:       ^Plan_Group,
+	groups:      [dynamic]Group_State,
+	group_index: map[string]int,
+	// Scratch reused per solution: the group key being built, and the
+	// key expressions' values, which are needed twice — once to identify
+	// the group and once, for a new group, to bind it.
+	key_builder: strings.Builder,
+	key_values:  []Value,
+	key_direct:  []store.Term_ID,
+
+	order:     ^Plan_Order,
+	sort_keys: [dynamic][]Sort_Key,
 }
 
 // Exec is a plan ready to run against one dataset. work is the solution
@@ -163,7 +187,16 @@ Exec :: struct($D: typeid, $It: typeid) {
 	expr:      Expr_Context,
 	// Terms the query computed, named by synthetic IDs. Owned here and
 	// freed with the execution.
-	computed:  [dynamic]rdf.Term,
+	//
+	// computed_index is what keeps a synthetic ID a *name* rather than a
+	// serial number: two solutions that compute the same term get the
+	// same ID. Without it, `SELECT DISTINCT ?x { VALUES ?x { 1 1 } }`
+	// over a store that has never seen 1 would answer twice, because
+	// deduplication compares the row's IDs and the two 1s would not be
+	// the same one.
+	computed:       [dynamic]rdf.Term,
+	computed_index: map[string]int,
+	computed_key:   strings.Builder,
 	// The store's non-interning lookup, used when a computed term turns
 	// out to be one the store already holds.
 	find:      Term_Finder,
@@ -199,6 +232,8 @@ exec_init :: proc(
 	width := var_slots_count(slots)
 	e.width = width
 	e.computed = make([dynamic]rdf.Term, allocator)
+	e.computed_index = make(map[string]int, allocator)
+	e.computed_key = strings.builder_make(allocator)
 	expr_context_init(&e.expr, slots, load, load_data, &e.computed, allocator)
 	e.work = make([]store.Term_ID, width, allocator)
 	for &slot in e.work {
@@ -228,6 +263,20 @@ exec_set_base :: proc(e: ^Exec($D, $It), base: string) {
 }
 
 exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
+	// The blocking operators own group tables and sort keys, which the
+	// shared loop below cannot free without knowing which node kind they
+	// belong to.
+	for i in 0 ..< len(e.nodes) {
+		blocking_reset(e, i)
+	}
+	for &node in e.nodes {
+		delete(node.groups)
+		delete(node.group_index)
+		delete(node.sort_keys)
+		delete(node.key_values, e.allocator)
+		delete(node.key_direct, e.allocator)
+		strings.builder_destroy(&node.key_builder)
+	}
 	for &node in e.nodes {
 		for open, i in node.iter_open {
 			if open {
@@ -261,6 +310,11 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 		rdf.destroy_term(term, e.allocator)
 	}
 	delete(e.computed)
+	for key in e.computed_index {
+		delete(key, e.allocator)
+	}
+	delete(e.computed_index)
+	strings.builder_destroy(&e.computed_key)
 	e^ = {}
 }
 
@@ -347,8 +401,7 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 				if !cell.absent || cell.term == nil {
 					continue
 				}
-				append(&e.computed, rdf.clone_term(cell.term, e.allocator))
-				cell.id = synthetic_id(len(e.computed) - 1)
+				cell.id = computed_id(e, rdf.clone_term(cell.term, e.allocator))
 				cell.bound = true
 				cell.absent = false
 			}
@@ -356,8 +409,31 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 	case ^Plan_Materialized:
 		node.kind = .Materialized
 		node.input = build_node(e, v.input)
+		node.recollect = v.correlated
 		node.rows = make([dynamic][]store.Term_ID, e.allocator)
 		node.set_slots = make([dynamic]int, e.allocator)
+	case ^Plan_Group:
+		node.kind = .Group
+		node.group = v
+		node.input = build_node(e, v.input)
+		node.groups = make([dynamic]Group_State, e.allocator)
+		node.group_index = make(map[string]int, e.allocator)
+		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.key_builder = strings.builder_make(e.allocator)
+		node.key_values = make([]Value, len(v.keys), e.allocator)
+		node.key_direct = make([]store.Term_ID, len(v.keys), e.allocator)
+		// The bindings in force when the group starts collecting. A
+		// group's own solution is its keys and its aggregates; everything
+		// else in the answer is whatever was already bound around it, and
+		// snapshotting is how that survives an input that binds and
+		// unbinds its way through a million solutions.
+		node.saved = make([]store.Term_ID, e.width, e.allocator)
+	case ^Plan_Order:
+		node.kind = .Order
+		node.order = v
+		node.input = build_node(e, v.input)
+		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.sort_keys = make([dynamic][]Sort_Key, e.allocator)
 	case ^Plan_Graph_Scan:
 		node.kind = .Graph_Scan
 		node.graph_slot = v.slot
@@ -406,7 +482,7 @@ collect_all :: proc(
 	$DESTROY: proc(it: ^It),
 ) {
 	for i in 0 ..< len(e.nodes) {
-		if e.nodes[i].kind != .Materialized || e.nodes[i].collected {
+		if e.nodes[i].kind != .Materialized || e.nodes[i].collected || e.nodes[i].recollect {
 			continue
 		}
 		e.nodes[i].collected = true
@@ -505,7 +581,28 @@ start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 		// what to run. During the query it is a source: descending into
 		// it would evaluate the sub-plan again, correlated — the exact
 		// thing materializing it was meant to prevent.
-		return -1
+		//
+		// The correlated one is the exception, and collects here instead:
+		// its whole point is to be re-evaluated inside the enclosing
+		// solution, which is only knowable once there is one.
+		if !node.recollect || node.collected {
+			return -1
+		}
+	case .Group, .Order:
+		// A blocking operator is an input-driven node until its input runs
+		// out and a source afterwards. Collecting lazily, here, rather
+		// than up front in collect_all is what lets one be re-run: a GROUP
+		// BY under GRAPH ?g has to answer once per graph, and a node whose
+		// answers were computed before the query started could not.
+		if node.collected {
+			return -1
+		}
+		if !node.started {
+			node.started = true
+			if node.kind == .Group {
+				copy(node.saved, e.work)
+			}
+		}
 	}
 	return node.input
 }
@@ -542,8 +639,25 @@ source_next :: proc(
 		return stored_next(e, at)
 	case .Graph_Scan:
 		return graph_scan_next(e, at, MATCH, NEXT, DESTROY)
+	case .Group, .Order:
+		return replay_next(e, at)
 	}
 	return nil, false
+}
+
+// replay_next hands out one of a blocking operator's collected answers.
+// Unlike stored_next it *replaces* the working row rather than merging
+// into it: a group's or a sorted sequence's solution is complete in
+// itself, and the row it was built from is gone.
+@(private = "file")
+replay_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bool) {
+	node := &e.nodes[at]
+	if node.row_at >= len(node.rows) {
+		return nil, false
+	}
+	copy(e.work, node.rows[node.row_at])
+	node.row_at += 1
+	return e.work, true
 }
 
 // graph_scan_next yields each named graph once. It reads every quad to
@@ -790,6 +904,37 @@ consume :: proc(
 	case .Join:
 		return join_step(e, at, from, row, have, DESTROY)
 
+	case .Materialized:
+		// Only the correlated one reaches here; the ordinary one is a
+		// source and never pulls from its input during the query.
+		if have {
+			append(&node.rows, slice_clone(row, e.allocator))
+			return nil, false, node.input
+		}
+		node.collected = true
+		out, ok = stored_next(e, at)
+		return out, ok, -1
+
+	case .Group:
+		if have {
+			group_accumulate(e, at, row)
+			return nil, false, node.input
+		}
+		group_finish(e, at)
+		node.collected = true
+		out, ok = replay_next(e, at)
+		return out, ok, -1
+
+	case .Order:
+		if have {
+			order_collect(e, at, row)
+			return nil, false, node.input
+		}
+		order_finish(e, at)
+		node.collected = true
+		out, ok = replay_next(e, at)
+		return out, ok, -1
+
 	case .Minus:
 		if !have {
 			return nil, false, -1
@@ -800,6 +945,217 @@ consume :: proc(
 		return row, true, -1
 	}
 	return row, have, -1
+}
+
+// group_accumulate folds one solution into its group, creating the group
+// on first sight (§18.5.1's Group and Aggregation, run as one pass).
+//
+// The key is the concatenation of the grouping expressions' values,
+// written as the RDF terms they would bind — see value_key for why term
+// identity and not value equality decides the partition.
+@(private = "file")
+group_accumulate :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
+	node := &e.nodes[at]
+	plan := node.group
+	e.expr.row = row
+	expr_context_new_solution(&e.expr)
+
+	strings.builder_reset(&node.key_builder)
+	for key, i in plan.keys {
+		if key.source >= 0 {
+			// A bare variable never leaves the ID space.
+			node.key_direct[i] = row[key.source]
+			id_key(&node.key_builder, node.key_direct[i])
+			continue
+		}
+		node.key_values[i] = expr_eval(&e.expr, key.expr)
+		value_key(&node.key_builder, node.key_values[i])
+	}
+	index, found := node.group_index[strings.to_string(node.key_builder)]
+	if !found {
+		index = len(node.groups)
+		state := Group_State {
+			key_ids = make([]store.Term_ID, len(plan.keys), e.allocator),
+			accums  = make([]Agg_Accum, len(plan.aggregates), e.allocator),
+		}
+		for key, i in plan.keys {
+			state.key_ids[i] = store.UNBOUND
+			if key.source >= 0 {
+				state.key_ids[i] = node.key_direct[i]
+			} else if id, bindable := bindable_id(e, node.key_values[i]); bindable {
+				state.key_ids[i] = id
+			}
+		}
+		for aggregate, i in plan.aggregates {
+			agg_accum_init(&state.accums[i], aggregate.agg, e.allocator)
+		}
+		append(&node.groups, state)
+		node.group_index[strings.clone(strings.to_string(node.key_builder), e.allocator)] = index
+	}
+
+	state := &node.groups[index]
+	for aggregate, i in plan.aggregates {
+		if aggregate.agg.star {
+			agg_accum_row(&state.accums[i], row)
+			continue
+		}
+		agg_accum_value(&state.accums[i], expr_eval(&e.expr, aggregate.agg.expr))
+	}
+	expr_context_release(&e.expr)
+}
+
+// group_finish turns the accumulators into the solutions the operator
+// will hand out, and then releases them.
+@(private = "file")
+group_finish :: proc(e: ^Exec($D, $It), at: int) {
+	node := &e.nodes[at]
+	plan := node.group
+	if len(plan.keys) == 0 && len(node.groups) == 0 {
+		// §18.2.4.1's implicit grouping: an aggregate with no GROUP BY
+		// puts every solution in one group, and that group is there even
+		// when no solution was. COUNT over a pattern that matches nothing
+		// is 0, not no answer at all.
+		state := Group_State {
+			key_ids = make([]store.Term_ID, 0, e.allocator),
+			accums  = make([]Agg_Accum, len(plan.aggregates), e.allocator),
+		}
+		for aggregate, i in plan.aggregates {
+			agg_accum_init(&state.accums[i], aggregate.agg, e.allocator)
+		}
+		append(&node.groups, state)
+	}
+	for &state in node.groups {
+		out := slice_clone(node.saved, e.allocator)
+		for key, i in plan.keys {
+			if key.slot >= 0 {
+				out[key.slot] = state.key_ids[i]
+			}
+		}
+		for aggregate, i in plan.aggregates {
+			value, owned := agg_accum_value_of(&state.accums[i], e.allocator)
+			if id, bindable := bindable_id(e, value); bindable {
+				out[aggregate.slot] = id
+			}
+			if owned != "" {
+				delete(owned, e.allocator)
+			}
+		}
+		append(&node.rows, out)
+	}
+	group_release(e, at)
+}
+
+// group_release frees the accumulators and the group table. The answers
+// have already been rendered into rows, and an accumulator holds copies
+// of terms that nothing needs once they have.
+@(private = "file")
+group_release :: proc(e: ^Exec($D, $It), at: int) {
+	node := &e.nodes[at]
+	for &state in node.groups {
+		for &accum in state.accums {
+			agg_accum_destroy(&accum)
+		}
+		delete(state.key_ids, e.allocator)
+		delete(state.accums, e.allocator)
+	}
+	clear(&node.groups)
+	for key in node.group_index {
+		delete(key, e.allocator)
+	}
+	clear(&node.group_index)
+}
+
+// order_collect keeps one solution and the sort keys it will be ordered
+// by. The keys are materialized here, once per solution, rather than in
+// the comparator — a sort asks about a row O(log n) times, and an
+// expression evaluated that often would be the cost of the operator.
+@(private = "file")
+order_collect :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
+	node := &e.nodes[at]
+	plan := node.order
+	append(&node.rows, slice_clone(row, e.allocator))
+	keys := make([]Sort_Key, len(plan.conditions), e.allocator)
+	e.expr.row = row
+	expr_context_new_solution(&e.expr)
+	for condition, i in plan.conditions {
+		keys[i] = sort_key_of(e, expr_eval(&e.expr, condition.expr))
+	}
+	expr_context_release(&e.expr)
+	append(&node.sort_keys, keys)
+}
+
+// sort_key_of copies what a key needs to outlive the solution it came
+// from: a backend's materialized term may only be valid until the next
+// one, and the sort holds every row's keys at once. An expression that
+// errored sorts with the unbound (see order.odin).
+@(private = "file")
+sort_key_of :: proc(e: ^Exec($D, $It), value: Value) -> Sort_Key {
+	if value.kind == .Error || value.kind == .Unbound {
+		return Sort_Key{value = UNBOUND_VALUE}
+	}
+	term, rendered := value_to_term(value, e.allocator)
+	if !rendered {
+		return Sort_Key{value = UNBOUND_VALUE}
+	}
+	return Sort_Key{value = value_of(term), term = term}
+}
+
+@(private = "file")
+order_finish :: proc(e: ^Exec($D, $It), at: int) {
+	node := &e.nodes[at]
+	count := len(node.rows)
+	if count > 1 {
+		perm := make([]int, count, e.allocator)
+		scratch := make([]int, count, e.allocator)
+		sorted := make([][]store.Term_ID, count, e.allocator)
+		defer delete(perm, e.allocator)
+		defer delete(scratch, e.allocator)
+		defer delete(sorted, e.allocator)
+		for i in 0 ..< count {
+			perm[i] = i
+		}
+		order_sort(perm, scratch, node.sort_keys[:], node.order.conditions[:])
+		for index, i in perm {
+			sorted[i] = node.rows[index]
+		}
+		for i in 0 ..< count {
+			node.rows[i] = sorted[i]
+		}
+	}
+	order_release_keys(e, at)
+}
+
+@(private = "file")
+order_release_keys :: proc(e: ^Exec($D, $It), at: int) {
+	node := &e.nodes[at]
+	for keys in node.sort_keys {
+		for key in keys {
+			if key.term != nil {
+				rdf.destroy_term(key.term, e.allocator)
+			}
+		}
+		delete(keys, e.allocator)
+	}
+	clear(&node.sort_keys)
+}
+
+// blocking_reset returns a Group or an Order to the state it was in
+// before it collected anything, so a correlated re-run recomputes rather
+// than replaying. It is the one thing node_reset does that Materialized
+// and Distinct deliberately do not get.
+@(private = "file")
+blocking_reset :: proc(e: ^Exec($D, $It), at: int) {
+	node := &e.nodes[at]
+	if node.kind != .Group && node.kind != .Order && !(node.kind == .Materialized && node.recollect) {
+		return
+	}
+	group_release(e, at)
+	order_release_keys(e, at)
+	for stored in node.rows {
+		delete(stored, e.allocator)
+	}
+	clear(&node.rows)
+	node.collected = false
 }
 
 // left_join_step is OPTIONAL. For each left solution the right side is
@@ -951,8 +1307,7 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 	// with a node in the data would bind BNODE's result to that node.
 	// Only BNODE produces a blank-node value without a source.
 	if value.kind == .Blank_Node {
-		append(&e.computed, term)
-		return synthetic_id(len(e.computed) - 1), true
+		return computed_id(e, term), true
 	}
 	// A computed term the store already holds gets the store's own ID, so
 	// a later pattern can match on it — `BIND(?o+1 AS ?z) . ?s ?p ?z` is
@@ -962,8 +1317,24 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 		rdf.destroy_term(term, e.allocator)
 		return stored, true
 	}
+	return computed_id(e, term), true
+}
+
+// computed_id names a term the store does not hold, taking ownership of
+// it. The same term always gets the same name — see Exec.computed_index
+// for why that is load-bearing rather than tidy.
+@(private = "file")
+computed_id :: proc(e: ^Exec($D, $It), term: rdf.Term) -> store.Term_ID {
+	strings.builder_reset(&e.computed_key)
+	term_key(&e.computed_key, term)
+	if index, found := e.computed_index[strings.to_string(e.computed_key)]; found {
+		rdf.destroy_term(term, e.allocator)
+		return synthetic_id(index)
+	}
+	index := len(e.computed)
 	append(&e.computed, term)
-	return synthetic_id(len(e.computed) - 1), true
+	e.computed_index[strings.clone(strings.to_string(e.computed_key), e.allocator)] = index
+	return synthetic_id(index)
 }
 
 // exec_exists answers an EXISTS: does the index-th sub-plan have a
@@ -1026,6 +1397,7 @@ node_reset :: proc(e: ^Exec($D, $It), at: int, $DESTROY: proc(it: ^It)) {
 			node.bound_count[d] = 0
 		}
 		release_set_slots(e, node)
+		blocking_reset(e, i)
 		node.started = false
 		node.produced_unit = false
 		node.depth = 0
@@ -1193,7 +1565,7 @@ unbind_depth :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) {
 // retain something, so it is the one place it allocates — and the key is
 // the row's bytes rather than a rendering of its terms, because that is
 // what evaluating over IDs buys.
-@(private = "file")
+@(private)
 row_key :: proc(row: []store.Term_ID, allocator: runtime.Allocator) -> string {
 	bytes := transmute([]u8)runtime.Raw_Slice{data = raw_data(row), len = len(row) * size_of(store.Term_ID)}
 	return strings.clone(string(bytes), allocator)
