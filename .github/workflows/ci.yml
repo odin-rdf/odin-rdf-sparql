@@ -17,8 +17,13 @@ concurrency:
 jobs:
   test:
     # sparql/kvstore compiles the store's LMDB backend into its own
-    # binaries, so this repo inherits the store's darwin_arm64 constraint.
-    runs-on: macos-latest
+    # binaries, so this repo runs wherever the store has a vendored LMDB
+    # archive -- which, since the archives were built out, is everywhere.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v5
