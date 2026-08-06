@@ -76,7 +76,11 @@ zz_survey :: proc(t: ^testing.T) {
 			log.infof("MISMATCH %s/%s (%s)\n got:\n%s want:\n%s", suite.dir, e.id, e.name, at, et)
 		}
 		log.infof(
-			"SURVEY %-34s pass %-3d mismatch %-3d unsupported %-3d failed %-3d %s",
+			// Right-aligned, not left: %-3d fills on the right with '0', so 1
+			// and 10 both render as "100" and a directory's ten RDF/XML
+			// failures read as one. That misreading reached the initiative's
+			// exit table and tests/w3c/README.md before it was caught.
+			"SURVEY %-34s pass %3d mismatch %3d unsupported %3d failed %3d %s",
 			suite.dir,
 			pass,
 			fail,

@@ -212,9 +212,10 @@ the specification promises nothing.
 ## The five that are not enabled
 
 Forty evaluation directories are vendored and thirty-five are enabled.
-The other five each fail exactly one entry — five in a corpus of 488 —
-and each is recorded here rather than skipped, with what it is waiting
-for. Measured at SPARQL-I-0002's exit verification (SPARQL-T-0019).
+Four of the other five fail exactly one entry; the fifth fails ten, all
+for one reason. Across the corpus of 556 evaluable entries, 542 pass —
+97.5%. Each failure is recorded here rather than skipped, with what it
+is waiting for. Re-measured 2026-08-06 (see the correction below).
 
 | Directory | | Entry | Waiting on |
 |---|---|---|---|
@@ -222,7 +223,12 @@ for. Measured at SPARQL-I-0002's exit verification (SPARQL-T-0019).
 | `sparql11-negation/` | 11/12 | `graph-minus` | SPARQL-T-0020 |
 | `sparql10-expr-builtin/` | 24/25 | `dawg-lang-3` | SPARQL-T-0021 |
 | `sparql10-i18n/` | 4/5 | `normalization-2` | SPARQL-T-0021 |
-| `sparql11-subquery/` | 4/5 | `sq11` | RDF/XML in odin-rdf-parser |
+| `sparql11-subquery/` | 4/14 | `subquery01`–`subquery10` | RDF/XML in odin-rdf-parser |
+
+Those five directories hold **59 passing entries** that no test asserts,
+because enablement is per-directory: a directory with one known failure
+is dark in its entirety. Enabling all five with pinned counts would take
+asserted coverage from 483 to 542 without fixing anything.
 
 **The two that are this engine's semantics** are `graph-optional` ("the
 variable bound by the GRAPH operator is not used when evaluating a
@@ -246,8 +252,26 @@ sees them the decision has been made upstream, and the answer has to
 hold for the RDF parser, both store dictionaries, and the SPARQL parser
 at once.
 
-**One waits on a format, not on an operator.** `sq11`'s data document is
-RDF/XML, which odin-rdf-parser does not implement.
+**Ten wait on a format, not on an operator.** `subquery01` through
+`subquery10` carry RDF/XML data documents, which odin-rdf-parser does
+not implement and — per its own vision, which puts RDF/XML and JSON-LD
+out of scope — is not planned to. Those ten are a permanent ceiling
+rather than a pending task, so `sparql11-subquery` tops out at 4/14.
+What is lost with them is this directory's coverage of subqueries
+interacting with `GRAPH` and `FROM NAMED`, since those are the entries
+whose datasets are RDF/XML; subqueries themselves are exercised
+throughout the enabled directories. All eleven RDF/XML references in the
+vendored corpus are in this one directory, so the cost is bounded here
+and nowhere else.
+
+**Correction (2026-08-06).** This section previously recorded
+`sparql11-subquery` as 4/5 failing the single entry `sq11`. It is 4/14
+failing ten, and `sq11` is one of the four that *pass* — its data
+document is Turtle. `zz_survey_test.odin` formatted its counters with
+`%-3d`, which fills on the right with `0`, so `1` and `10` both printed
+as `100` and ten failures read as one. `dataset.odin`'s comment had the
+number right all along; only these summaries were wrong. The format
+string now right-aligns, and the four other rows are re-verified.
 
 `harness/zz_survey_test.odin` runs *every* vendored directory and logs
 pass/mismatch/unsupported counts without asserting anything. It is a

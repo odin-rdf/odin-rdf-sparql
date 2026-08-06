@@ -164,10 +164,11 @@ Exit criteria: all in-scope vendored W3C SPARQL 1.1 evaluation suite directories
 
   483 evaluation entries pass across 35 enabled directories, each run
   against memstore *and* kvstore at 64- and 32-bit Term_IDs, with pinned
-  entry counts and no skip list. The remaining five directories each fail
-  exactly **one** entry — five in a vendored corpus of 488, 99.0% — and
-  each is characterized rather than skipped (recorded in
-  `tests/w3c/README.md`):
+  entry counts and no skip list. Four of the remaining five directories
+  fail exactly **one** entry; the fifth fails ten, all for the same
+  reason. Across the vendored corpus of 556 evaluable entries, 542 pass
+  (97.5%), and each failure is characterized rather than skipped
+  (recorded in `tests/w3c/README.md`):
 
   | Directory | | Entry | What it is |
   |---|---|---|---|
@@ -175,7 +176,17 @@ Exit criteria: all in-scope vendored W3C SPARQL 1.1 evaluation suite directories
   | `sparql11-negation/` | 11/12 | `graph-minus` | this engine's semantics |
   | `sparql10-expr-builtin/` | 24/25 | `dawg-lang-3` | term identity (family) |
   | `sparql10-i18n/` | 4/5 | `normalization-2` | term identity (family) |
-  | `sparql11-subquery/` | 4/5 | `sq11` | RDF/XML, odin-rdf-parser |
+  | `sparql11-subquery/` | 4/14 | `subquery01`–`subquery10` | RDF/XML, odin-rdf-parser |
+
+  **Correction (2026-08-06).** This table previously recorded
+  `sparql11-subquery` as 4/5 failing the single entry `sq11`. It is 4/14
+  failing ten entries, and `sq11` is one of the four that *pass* — its
+  data document is Turtle. The survey instrument formatted its counters
+  with `%-3d`, which fills on the right with `0`, so its "failed 10"
+  printed as `100` and was read as one. `dataset.odin`'s own comment had
+  it right ("the ten sparql11-subquery entries whose data is RDF/XML");
+  only these summaries were wrong. The format string is fixed and the
+  four other rows are re-verified as correct.
 
   Only **two** are the evaluation engine's own semantics, and they are one
   question: what a GRAPH clause does to an operator inside it that sees
