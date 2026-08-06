@@ -105,4 +105,22 @@ design task and not a patch.
 
 ## Status Updates **[REQUIRED]**
 
+- **2026-08-06 — Deferred until odin-rdf-shacl forces it, and the two halves separated.** Read against RDF 1.1 Concepts, these are not one question:
+
+  **IRIs (`normalization-2`) is settled: do nothing, permanently.** §3.2 says "Two IRIs are equal if and only if they are equivalent under Simple String Comparison according to section 5.1 of [RFC3987]. **Further normalization MUST NOT be performed** when comparing IRIs for equality." Normalizing to make this entry pass would take the family *out* of RDF 1.1 conformance to satisfy a SPARQL test. `sparql10-i18n` stays 4/5 by decision, like the RDF/XML ceiling in `sparql11-subquery`. The parser's documented "IRIs stored as given, no normalization" contract is now positively required rather than merely convenient.
+
+  **Language tags (`dawg-lang-3`) is permitted, not required — and is deferred.** §3.3 compares language tags "character by character", so folding is not mandated by a MUST; but it also says "Lexical representations of language tags MAY be converted to lower case. **The value space of language tags is always in lower case.**" An implementation that keeps `EN` distinct from `en` therefore holds a value outside the stated value space. Fixing it is sanctioned and correct; it is not forced.
+
+  **Where it must land, when it lands: odin-rdf-parser, at literal construction.** This was traced rather than assumed:
+
+  - Changing `rdf.equal`/`rdf.hash` alone is **ineffective**. memstore interns with `map[rdf.Literal]store.Term_ID` — Odin's built-in struct hashing — and never calls them. Two IDs would still be assigned.
+  - Folding in the store dictionaries alone leaves `rdf.equal` reporting `@EN` != `@en`, so every consumer comparing `rdf.Term`s outside the store (this engine's expression evaluation; SHACL's `sh:hasValue`/`sh:in`/`sh:languageIn`) disagrees with storage — two notions of identity in one family. It also rewrites kvstore's `literal_canonical`, which appends `v.language` verbatim into the persistent `term2id` key, so existing databases holding `EN` would stop matching: a STORE-A-0003 format-version bump.
+  - Folding in `literal_lang`/`literal_dir_lang` fixes all of it at once, because memstore's struct key, kvstore's canonical bytes, and direct `rdf.Term` comparison all inherit it.
+
+  Cost of doing it there: the language slice is borrowed from the source buffer, so a non-lowercase tag needs an allocation — the same copy-on-write shape the parser already uses for escape unescaping, and one more clause on its documented allocation contract. It is a behaviour change to a tagged library (`@EN` in, `en` out, emitters round-tripping `@en`), so v0.2.0 rather than v0.1.1, verified by re-running the 1045 W3C tests to see whether any vendored expectation preserves an uppercase tag.
+
+  **Deferred because** the parser meets every success criterion and is tagged, the spec says MAY rather than MUST, and the only current forcing case is one W3C entry. odin-rdf-shacl is where the need becomes concrete rather than theoretical — SHACL Core is term comparison end to end — so the decision is better made with that evidence than without it. Recorded in SHACL-V-0001's current state.
+
+  Note that `results.odin`'s `literals_equivalent` already compares language tags with `strings.equal_fold`, so the harness works around this at comparison time; that workaround is what the fix would make unnecessary.
+
 - **2026-08-05 — Created at SPARQL-I-0002's exit verification (SPARQL-T-0019)**, which characterized these two as term-identity rather than evaluation failures.

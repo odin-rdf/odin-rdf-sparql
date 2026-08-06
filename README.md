@@ -16,15 +16,16 @@ every one of them run against **both** storage backends at **both**
 This is the third layer of the family stack —
 [odin-rdf-parser](../odin-rdf-parser) (formats and data model) →
 [odin-rdf-store](../odin-rdf-store) (storage, match interface) → this
-engine. Result **serialization** (SPARQL JSON/XML writers), SPARQL
-Update, the HTTP protocols, and federation (SERVICE) are out of scope
-per the project vision.
+engine. SPARQL Update, the HTTP and Graph Store protocols, federation
+(SERVICE), and full-text search are out of scope per the project vision.
 
 ## Packages
 
 | Package           | Description                                                             |
 | ----------------- | ----------------------------------------------------------------------- |
 | `sparql`          | Tokenizer, recursive-descent parser (query text → AST), §18.2/§18.4 translation (AST → algebra), the SSE algebra printer, and the backend-independent evaluation engine |
+| `sparql/srj`      | Writes the SPARQL Query Results **JSON** Format (SELECT and ASK)        |
+| `sparql/srx`      | Writes the SPARQL Query Results **XML** Format (SELECT and ASK)         |
 | `sparql/memstore` | The engine instantiated against the in-memory backend                   |
 | `sparql/kvstore`  | The engine instantiated against the persistent (LMDB) backend           |
 
@@ -32,6 +33,25 @@ per the project vision.
 only wants an in-memory store never links LMDB. The sibling checkouts
 are reached through collections — `rdf:` for the data model, `store:`
 for the match interface — as declared in the Makefile and `ols.json`.
+
+The two result writers follow odin-rdf-parser's emitter shape —
+`emitter_init` / `emit` / `emitter_finish` for the streaming SELECT
+form, and a stateless `emit_boolean` for ASK. They allocate nothing:
+solutions are written one at a time straight to an `io.Writer`, so
+nothing materializes the result set. CONSTRUCT and DESCRIBE answer with
+a graph rather than a result set and are emitted through
+odin-rdf-parser's format emitters instead.
+
+```odin
+import srj "sparql/srj"
+
+e: srj.Emitter
+srj.emitter_init(&e, w, []string{"s", "o"}) // w: io.Writer
+for row in solutions {
+    srj.emit(&e, row) // []rdf.Term aligned to the variables; nil is unbound
+}
+srj.emitter_finish(&e)
+```
 
 ## Quick start
 

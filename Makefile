@@ -22,7 +22,7 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 # tests/w3c/harness runs the vendored W3C suites; tests/guards holds the
 # allocation-guard tests; tests/readme compiles and asserts the README's
 # example (SPARQL-T-0009).
-PKGS     := sparql sparql/memstore sparql/kvstore tests/guards tests/w3c/harness tests/readme
+PKGS     := sparql sparql/srj sparql/srx sparql/memstore sparql/kvstore tests/guards tests/w3c/harness tests/readme
 SRC_DIRS := $(PKGS)
 
 # STORE-A-0001 makes the store's Term_ID width a build-time choice, and this
