@@ -4,7 +4,7 @@ level: vision
 title: "odin-rdf-sparql"
 short_code: "SPARQL-V-0001"
 created_at: 2026-08-04T16:47:41.164958+00:00
-updated_at: 2026-08-04T16:48:59.044903+00:00
+updated_at: 2026-08-06T12:00:00.000000+00:00
 archived: false
 
 tags:
@@ -35,9 +35,17 @@ The library is deliberately engine-only: protocol/HTTP layers, federation (SERVI
 
 ## Current State
 
-No query code exists yet, but both foundations are now complete. odin-rdf-parser is done (100% W3C conformance across the four core formats, RDF 1.2/RDF-star included). odin-rdf-store has shipped its match contract (STORE-A-0002, `store/interface.odin`) with two conforming backends — memstore (in-memory) and kvstore (persistent over LMDB, format pinned in STORE-A-0003) — verified by one shared conformance suite passing verbatim against both, at both Term_ID widths.
+**The engine is built; three of five success criteria are met outright, one partially, and one is an open decision (2026-08-06).** Both initiatives are complete: SPARQL-I-0001 delivered the parser and §18.2/§18.4 algebra translation, SPARQL-I-0002 the evaluation engine. 352 syntax tests pass (154 SPARQL 1.1, 198 SPARQL 1.2). Across the vendored evaluation corpus of 556 entries, **542 pass (97.5%)**, every one run against *both* storage backends at *both* `Term_ID` widths. CI runs on Linux, macOS, and Windows. Tagged **v0.1.0**.
 
-The store facts this engine builds on: quads are `[4]Term_ID` with kind-tagged dense IDs (STORE-A-0001), so joins and dedup are integer comparisons and a term's kind (IRI/blank/literal/triple term) is readable from the ID without a dictionary lookup; `match` streams encoded quads with no ordering guarantee in v1, that revision explicitly deferred to this engine's evidence (both backends already iterate in identical numeric-ID order, so ordered iteration is nearly free when asked for); kvstore's read paths are transaction-parametric so the snapshot API arrives as an additive layer, not a refactor. Query parsing (grammar → algebra) has no store dependency; evaluation can begin against real backends immediately.
+Met without qualification: evaluation reaches storage through odin-rdf-store's public match contract alone, with no private hooks into either backend; the interface capabilities discovered along the way were fed upstream as seven evidence-backed backlog items rather than worked around, with `find_term` (STORE-T-0014) landing in both backends before the engine needed it; and the public API carries contract-level documentation to the family's standard.
+
+**Criterion 1 is partially met and is the open decision.** 483 entries are *asserted* across 35 enabled directories; five further directories are vendored but not enabled, because enablement is per-directory and a directory with one known failure goes dark in its entirety. Those five hold 59 additional passing entries that nothing asserts. Fourteen entries fail in total: two are this engine's own semantics (`graph-optional`, `graph-minus` — what a GRAPH clause does to an operator inside it that sees more than one solution at a time; SPARQL-T-0013 declined to fit the code to a DAWG answer it could not derive from §18, and that judgement stands), two are the family's **term-identity** question (language-tag case, IRI normalization — the answer must hold for the RDF parser, both store dictionaries, and the SPARQL parser at once), and ten are `sparql11-subquery` entries whose data documents are RDF/XML. RDF/XML is out of scope in odin-rdf-parser by decision, so those ten are a permanent ceiling rather than a pending task; all eleven RDF/XML references in the corpus sit in that one directory, so the cost is bounded there.
+
+**Criterion 4 is partially met.** CONSTRUCT and DESCRIBE are implemented and their results are compared against expected graphs under blank-node isomorphism. But the criterion as written asks for results *emitted through odin-rdf-parser* and re-parsed, and no such emit-then-re-parse path is exercised — the parser's emitters are never run over query results.
+
+`exit_criteria_met` stays false deliberately: it records that criteria 1 and 4 are open, not that the engine is unfinished.
+
+The store facts this engine builds on: quads are `[4]Term_ID` with kind-tagged dense IDs (STORE-A-0001), so joins and dedup are integer comparisons and a term's kind (IRI/blank/literal/triple term) is readable from the ID without a dictionary lookup; `match` streams encoded quads with no ordering guarantee in v1, that revision explicitly deferred to this engine's evidence (both backends already iterate in identical numeric-ID order, so ordered iteration is nearly free when asked for); kvstore's read paths are transaction-parametric so the snapshot API arrives as an additive layer, not a refactor. All of these held in practice: joins compare integer IDs throughout, and the snapshot API remains an additive proposal (STORE backlog) rather than a refactor the engine had to force.
 
 ## Future State
 
