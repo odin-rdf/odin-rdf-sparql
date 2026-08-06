@@ -1,0 +1,10 @@
+# The vendored W3C suites are conformance fixtures whose exact bytes are the
+# test: query text, RDF data, and expected result serializations compared
+# literally. Some hold literals containing raw line feeds, whose value would
+# change if a checkout translated them to CRLF -- the failure odin-rdf-parser
+# hit on Windows, latent here only because this repo's CI is macOS-only.
+tests/w3c/** -text
+
+# Odin sources are ordinary text wherever they sit, including the suite
+# harness inside the directory above. Last matching pattern wins.
+*.odin text=auto
