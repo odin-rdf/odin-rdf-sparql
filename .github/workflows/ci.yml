@@ -1,0 +1,54 @@
+# Same shape as the store's workflow, with one more sibling checkout: this
+# project reaches both the parser and the store through collections, and a
+# collection resolves in the importing compilation, so the store's own
+# `rdf:` imports need the parser present here too.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # sparql/kvstore compiles the store's LMDB backend into its own
+    # binaries, so this repo inherits the store's darwin_arm64 constraint.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: odin-rdf-sparql
+
+      - uses: actions/checkout@v5
+        with:
+          repository: odin-rdf/odin-rdf-parser
+          path: odin-rdf-parser
+
+      - uses: actions/checkout@v5
+        with:
+          repository: odin-rdf/odin-rdf-store
+          path: odin-rdf-store
+
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: latest
+
+      - name: Odin version
+        run: odin version
+
+      - name: Vet every package
+        working-directory: odin-rdf-sparql
+        run: make check
+
+      # The W3C suites dominate this one: 352 syntax and 483 evaluation
+      # tests, against both backends at both Term_ID widths.
+      - name: Test at both Term_ID widths
+        working-directory: odin-rdf-sparql
+        run: make test
