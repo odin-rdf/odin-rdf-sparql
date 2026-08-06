@@ -448,16 +448,23 @@ load_kv_document :: proc(
 // store carries state between opens by design, and a test that inherited
 // the previous test's quads would pass or fail for reasons that have
 // nothing to do with it.
+// Windows names the temp directory TEMP or TMP and has no /tmp to fall
+// back to, so consulting TMPDIR alone leaves the path at a directory that
+// cannot be created there.
 @(private = "file")
 kv_scratch_path :: proc(suite: Suite, e: Entry) -> string {
 	tmp := os.get_env("TMPDIR", context.temp_allocator)
 	if tmp == "" {
-		tmp = "/tmp/"
+		tmp = os.get_env("TEMP", context.temp_allocator)
 	}
-	if !strings.has_suffix(tmp, "/") {
-		tmp = strings.concatenate({tmp, "/"}, context.temp_allocator)
+	if tmp == "" {
+		tmp = os.get_env("TMP", context.temp_allocator)
 	}
-	return fmt.aprintf("%sodin-sparql-eval-%d-%s-%s", tmp, os.get_pid(), suite.dir, e.id)
+	if tmp == "" {
+		tmp = "/tmp"
+	}
+	tmp = strings.trim_right(tmp, `/\`)
+	return fmt.aprintf("%s/odin-sparql-eval-%d-%s-%s", tmp, os.get_pid(), suite.dir, e.id)
 }
 
 @(private = "file")
