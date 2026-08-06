@@ -1,5 +1,7 @@
 # odin-rdf-sparql
 
+[![CI](https://github.com/odin-rdf/odin-rdf-sparql/actions/workflows/ci.yml/badge.svg)](https://github.com/odin-rdf/odin-rdf-sparql/actions/workflows/ci.yml)
+
 A SPARQL query engine for the Odin RDF family: a complete SPARQL 1.1
 Query parser with the SPARQL 1.2 surface (triple terms, reified
 triples, annotations, VERSION), translating queries to the W3C SPARQL
