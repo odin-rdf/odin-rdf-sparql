@@ -10,7 +10,7 @@ against any odin-rdf-store backend through the match interface alone.
 Written in Odin with no external dependencies, and validated by the
 vendored official W3C suites: **352 syntax tests** (154 SPARQL 1.1, 198
 SPARQL 1.2) and **483 evaluation tests across 35 suite directories**,
-every one of them run against **both** storage backends at **both**
+every one of them run against the LMDB-backed store at **both**
 `Term_ID` widths.
 
 This is the third layer of the family stack —
