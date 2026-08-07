@@ -47,14 +47,14 @@ Met without qualification: evaluation reaches storage through odin-rdf-store's p
 
 `exit_criteria_met` stays false deliberately: it records that criteria 1 and 4 are open, not that the engine is unfinished.
 
-The store facts this engine builds on: quads are `[4]Term_ID` with kind-tagged dense IDs (STORE-A-0001), so joins and dedup are integer comparisons and a term's kind (IRI/blank/literal/triple term) is readable from the ID without a dictionary lookup; `match` streams encoded quads with no ordering guarantee in v1, that revision explicitly deferred to this engine's evidence (both backends already iterate in identical numeric-ID order, so ordered iteration is nearly free when asked for); kvstore's read paths are transaction-parametric so the snapshot API arrives as an additive layer, not a refactor. All of these held in practice: joins compare integer IDs throughout, and the snapshot API remains an additive proposal (STORE backlog) rather than a refactor the engine had to force.
+The store facts this engine builds on: quads are `[4]Term_ID` with kind-tagged dense IDs (STORE-A-0001), so joins and dedup are integer comparisons and a term's kind (IRI/blank/literal/triple term) is readable from the ID without a dictionary lookup; `match` streams encoded quads with no ordering guarantee in v1, that revision explicitly deferred to this engine's evidence (both backends iterated in identical numeric-ID order, so ordered iteration is nearly free when asked for — and after STORE-A-0006 retired the in-memory backend, kvstore's order stands on its own, falling out of STORE-A-0001's big-endian key rule rather than out of agreement between two implementations, so this conclusion is unaffected); kvstore's read paths are transaction-parametric so the snapshot API arrives as an additive layer, not a refactor. All of these held in practice: joins compare integer IDs throughout, and the snapshot API remains an additive proposal (STORE backlog) rather than a refactor the engine had to force.
 
 ## Future State
 
 A complete, well-tested Odin library where:
 
 - SPARQL 1.1 Query (with the RDF 1.2/SPARQL 1.2 additions as their specs stabilize) parses and evaluates correctly, measured against the W3C SPARQL test suites.
-- Evaluation runs against any odin-rdf-store backend through the match interface alone — in-memory and LMDB behave identically apart from performance.
+- Evaluation runs against any odin-rdf-store backend through the match interface alone. *(Amended 2026-08-07, SPARQL-T-0023: this criterion read "— in-memory and LMDB behave identically apart from performance", and it was met — the engine ran verbatim against both backends at both `Term_ID` widths, which is what proved it reached storage through the contract alone. odin-rdf-store has since retired its in-memory backend (STORE-A-0006), so the identical-behaviour half is no longer verifiable and is retracted rather than left standing. The criterion itself survives: the engine still names no backend, and `sparql/kvstore` is one instantiation of a split that a second backend would reuse.)*
 - The store's planner-support surface (snapshot API, ordered iteration, cardinality estimates) has been shaped by this engine's demonstrated needs, not speculation.
 - Downstream tooling (odin-rdf-shacl's SHACL-SPARQL phase, applications) can embed the engine as a library.
 

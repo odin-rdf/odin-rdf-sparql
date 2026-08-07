@@ -6,7 +6,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql "../../../sparql"
 
@@ -237,7 +237,9 @@ test_entry_datasets_load :: proc(t: ^testing.T) {
 				continue
 			}
 			loaded += 1
-			quads += memstore.count(&td.dataset)
+			n, count_err := kvstore.count(td.store)
+			testing.expectf(t, count_err == nil, "count failed: %v", count_err)
+			quads += n
 		}
 	}
 	testing.expectf(

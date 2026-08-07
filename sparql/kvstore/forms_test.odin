@@ -1,4 +1,4 @@
-package sparql_memstore
+package sparql_kvstore
 
 // The graph-answering result forms (SPARQL-T-0017): CONSTRUCT's template
 // instantiation and DESCRIBE.
@@ -21,7 +21,7 @@ import "core:testing"
 
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql ".."
 
@@ -148,17 +148,24 @@ test_construct_drops_triples_rdf_does_not_admit :: proc(t: ^testing.T) {
 
 // The ownership contract, asserted rather than described: a constructed
 // graph owns every term in it, so it stays readable after the query and
-// the store it came from are gone. memstore's materialized terms borrow
-// the dictionary, so a graph that had not copied them would be reading
-// freed memory here.
+// the store it came from are gone. kvstore materializes terms by copying
+// them out of mapped pages, and closing the store unmaps those pages, so a
+// graph that had not copied them would be reading unmapped memory here --
+// a harder failure than the in-memory backend's dangling borrow, and the
+// reason this test is worth more against kvstore than it was before.
 @(test)
 test_construct_graph_outlives_its_store :: proc(t: ^testing.T) {
-	d: memstore.Dictionary
-	memstore.dictionary_init(&d)
-	ds: memstore.Dataset
-	memstore.dataset_init(&ds)
-	_, load_err := memstore.load_turtle(&d, &ds, transmute([]byte)string(DATA), "http://example/")
-	if !testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message) {
+	path := scratch_path("forms-lifetime")
+	defer remove_scratch(path)
+	s, open_err := kvstore.open(path)
+	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
+		return
+	}
+	// Deliberately not deferred: the store must close before the graph is
+	// read, which is the whole assertion.
+	_, parse_err, load_err := kvstore.load_turtle(s, transmute([]byte)string(DATA), "http://example/")
+	if !testing.expectf(t, parse_err.message == "" && load_err == nil, "fixture did not load: %s %v", parse_err.message, load_err) {
+		kvstore.close(s)
 		return
 	}
 
@@ -170,7 +177,7 @@ test_construct_graph_outlives_its_store :: proc(t: ^testing.T) {
 	algebra, _ := sparql.translate(&p)
 
 	q: Query
-	prepared := query_init(&q, algebra, &d, &ds)
+	prepared := query_init(&q, algebra, s)
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 	template: sparql.Template
 	testing.expect(t, sparql.template_build(&template, p.query.template, query_slots(&q)), "the template should compile")
@@ -180,8 +187,7 @@ test_construct_graph_outlives_its_store :: proc(t: ^testing.T) {
 	sparql.template_destroy(&template)
 	query_destroy(&q)
 	sparql.parser_destroy(&p)
-	memstore.dataset_destroy(&ds)
-	memstore.dictionary_destroy(&d)
+	kvstore.close(s)
 
 	lines := graph_lines(&graph)
 	sparql.result_graph_destroy(&graph)
@@ -370,14 +376,15 @@ run_form :: proc(
 	blanks: int,
 	ok: bool,
 ) {
-	d: memstore.Dictionary
-	memstore.dictionary_init(&d)
-	defer memstore.dictionary_destroy(&d)
-	ds: memstore.Dataset
-	memstore.dataset_init(&ds)
-	defer memstore.dataset_destroy(&ds)
-	_, load_err := memstore.load_turtle(&d, &ds, transmute([]byte)source, "http://example/")
-	if !testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message, loc = loc) {
+	path := scratch_path("forms")
+	defer remove_scratch(path)
+	s, open_err := kvstore.open(path)
+	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
+		return nil, 0, false
+	}
+	defer kvstore.close(s)
+	_, parse_err, load_err := kvstore.load_turtle(s, transmute([]byte)source, "http://example/")
+	if !testing.expectf(t, parse_err.message == "" && load_err == nil, "fixture did not load: %s %v", parse_err.message, load_err, loc = loc) {
 		return nil, 0, false
 	}
 
@@ -393,7 +400,7 @@ run_form :: proc(
 	}
 
 	q: Query
-	if !query_init(&q, algebra, &d, &ds, sparql.parser_base(&p)) {
+	if !query_init(&q, algebra, s, sparql.parser_base(&p)) {
 		testing.expectf(t, false, "query not supported: %s", q.unsupported, loc = loc)
 		query_destroy(&q)
 		return nil, 0, false

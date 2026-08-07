@@ -70,27 +70,27 @@ the sibling checkout, so the deletion breaks this build the instant it lands.
 
 ## Acceptance Criteria **[REQUIRED]**
 
-- [ ] Every assertion currently running against memstore runs against kvstore afterwards.
+- [x] Every assertion currently running against memstore runs against kvstore afterwards.
       Test counts recorded before and after, at **both `Term_ID` widths**; any reduction is
       named and justified rather than absorbed.
-- [ ] `sparql/memstore/` deleted — `eval.odin` (299 lines) plus `blocking_test.odin`,
+- [x] `sparql/memstore/` deleted — `eval.odin` (299 lines) plus `blocking_test.odin`,
       `eval_test.odin`, `forms_test.odin`, `path_test.odin`, `triple_terms_test.odin`
       (2,415 lines total).
-- [ ] Nothing in this repo imports `store:store/memstore`.
-- [ ] **The vision's falsified success criterion is retracted.** `.metis/vision.md` states
+- [x] Nothing in this repo imports `store:store/memstore`.
+- [x] **The vision's falsified success criterion is retracted.** `.metis/vision.md` states
       "Evaluation runs against any odin-rdf-store backend through the match interface alone
       — in-memory and LMDB behave identically apart from performance." That becomes
       unverifiable, and a port that leaves it standing in a published vision is incomplete.
       Recommend a dated amendment rather than a rewrite: what it recorded *was* true and is
       why the interface is trusted.
-- [ ] Also checked in `.metis/vision.md`: the note that "both backends already iterate in
+- [x] Also checked in `.metis/vision.md`: the note that "both backends already iterate in
       identical numeric-ID order, so ordered iteration is nearly free when asked for"
       (STORE-T-0015 groundwork). Upstream annotated STORE-A-0001 point 7 as historical and
       confirmed **kvstore's numeric-ID order stands on its own** — it falls out of the
       big-endian key rule — so the conclusion survives; only the cross-backend agreement
       that reassured it is moot.
-- [ ] `README.md` and any package docs describing two backends are corrected.
-- [ ] The full suite is green at both widths on all three CI platforms.
+- [x] `README.md` and any package docs describing two backends are corrected.
+- [x] The full suite is green at both widths on all three CI platforms.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
 
@@ -139,3 +139,65 @@ ports to decide whether to build it.
 - **2026-08-07 — Filed from odin-rdf-store STORE-T-0026**, the sibling-proposal task of
   STORE-I-0003. Sequencing and shape are this repo's call; the blocking relationship with
   STORE-T-0030 is the one part that is not.
+- **2026-08-07 — Done. Green at both `Term_ID` widths, `make check` clean.**
+
+  **Counts, per width.** Before: sparql 102, srj 6, srx 7, sparql/memstore 64,
+  sparql/kvstore 2, guards 10, w3c/harness 104, readme 2 = **297**. After: sparql 102,
+  srj 6, srx 7, sparql/kvstore 66, guards 9, w3c/harness 69, readme 2 = **261**. The −36
+  is two things and neither is a silent drop: −35 is the harness's memstore arm (35 suites
+  that ran twice now run once — the same suites, one backend), and −1 is a guard that
+  provably cannot hold on kvstore, below. The 64 evaluation tests moved intact
+  (memstore 64 + kvstore 2 → kvstore 66), no assertion rewritten.
+
+  **The port was smaller than the line count suggested.** Each test file carried its own
+  file-private harness and the test bodies touched only it, so the memstore surface was
+  7–10 lines per file. `sparql/memstore/eval_test.odin` became
+  `sparql/kvstore/evaluation_test.odin` to avoid colliding with the existing one.
+
+  **Three things the mechanical pass got wrong, caught before they shipped:**
+  - `test_construct_graph_outlives_its_store` would have had `defer kvstore.close(s)` run
+    *after* the graph was read — the exact inverse of what it asserts. The close is now
+    explicit and undeferred, and its comment records that kvstore makes the test stronger
+    than memstore did: closing unmaps the pages, so a graph that had not copied its terms
+    reads unmapped memory rather than a stale borrow.
+  - Two helpers had wrong return arity for their procedure after substitution.
+  - `path_test`'s GRAPH-variable case is a test body, not a helper: no `loc`, no return
+    values.
+
+  **The harness had a full parallel memstore evaluation path**, larger than this item
+  estimated: a `Backend` enum, `evaluate_memstore`, `find_memstore`, 35 `_memstore` test
+  wrappers, and `Test_Dataset` in `dataset.odin`. The enum is kept with one arm rather than
+  collapsed — it is the seam a second backend would use, the same reason odin-rdf-store
+  retained its conformance `Backend` adapter. `Test_Dataset` was ported rather than deleted
+  because `readers_test.odin` uses it to prove every suite's data documents load; it still
+  reports **517 entry datasets, 5016 quads, 10 blocked on RDF/XML** — unchanged.
+
+  **One guard retired, measured rather than assumed.**
+  `test_triple_term_matching_streams_without_allocating` asserted that taking a stored
+  triple term apart allocates nothing. Its own comment already recorded the limit — "a
+  backend that has to materialize instead — kvstore does — will not satisfy this". Run
+  against kvstore it reported **1996 allocations for 500 solutions**, about four per
+  solution, exactly the term materialization predicted. It is deleted with that measurement
+  in place of the test, and nothing replaces it: triple-term decomposition being
+  allocation-free is no longer asserted anywhere, because on the only backend that exists
+  it is not true. `test_evaluation_streams_without_allocating` — the general streaming
+  promise — **passes on kvstore**, so the operator-level guarantee is intact.
+
+  **This is the third instance of one pattern** (after odin-rdf-store's live-bytes
+  benchmark metric and, expected, odin-rdf-shacl's `bench/consumers.odin`): a measurement
+  whose premise was memstore borrowing rather than copying. Worth naming as a category in
+  STORE-A-0006's consequences if it recurs a fourth time.
+
+  **Scratch-database boilerplate**: `sparql/kvstore/scratch_test.odin` is one shared
+  helper, and the harness's temp-dir logic was promoted to `kv_temp_dir` rather than
+  copied. Two further copies were still needed (`tests/guards`, `tests/readme`), which is
+  the evidence STORE-I-0003's `open_ephemeral` question was waiting on — **reporting it
+  upstream: the count across the family is now five.** Also note the helper needed an
+  atomic counter, not just a pid: the runner uses ~10 threads and two tests sharing a
+  scratch path fail as a store error that reproduces only under load.
+
+  README example, `tests/readme`, the package table, the Makefile's package list and its
+  rationale comments, and the vision are all updated. The vision's identical-behaviour
+  criterion is retracted with a dated amendment; the ordered-iteration note is annotated
+  rather than removed, since kvstore's numeric-ID order stands on STORE-A-0001's
+  big-endian key rule alone.

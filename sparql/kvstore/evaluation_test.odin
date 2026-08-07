@@ -1,10 +1,10 @@
-package sparql_memstore
+package sparql_kvstore
 
 import "core:testing"
 
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql ".."
 
@@ -20,22 +20,28 @@ DATA :: `@prefix : <http://example/> .
 
 @(private = "file")
 Fixture :: struct {
-	dictionary: memstore.Dictionary,
-	dataset:    memstore.Dataset,
+	store: ^kvstore.Store,
+	path:  string,
 }
 
 @(private = "file")
 fixture_init :: proc(f: ^Fixture, t: ^testing.T, source := DATA) {
-	memstore.dictionary_init(&f.dictionary)
-	memstore.dataset_init(&f.dataset)
-	_, err := memstore.load_turtle(&f.dictionary, &f.dataset, transmute([]byte)source, "http://example/")
-	testing.expectf(t, err.message == "", "fixture did not load: %s", err.message)
+	f.path = scratch_path("eval")
+	open_err: kvstore.Error
+	f.store, open_err = kvstore.open(f.path)
+	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
+		return
+	}
+	_, parse_err, load_err := kvstore.load_turtle(f.store, transmute([]byte)source, "http://example/")
+	testing.expectf(t, parse_err.message == "" && load_err == nil, "fixture did not load: %s %v", parse_err.message, load_err)
 }
 
 @(private = "file")
 fixture_destroy :: proc(f: ^Fixture) {
-	memstore.dataset_destroy(&f.dataset)
-	memstore.dictionary_destroy(&f.dictionary)
+	if f.store != nil {
+		kvstore.close(f.store)
+	}
+	remove_scratch(f.path)
 }
 
 // solve parses, translates, and evaluates a query, returning each
@@ -56,7 +62,7 @@ solve :: proc(t: ^testing.T, f: ^Fixture, query: string) -> (rows: [dynamic]stri
 	}
 
 	q: Query
-	if !query_init(&q, algebra, &f.dictionary, &f.dataset) {
+	if !query_init(&q, algebra, f.store) {
 		testing.expectf(t, false, "query not supported: %s", q.unsupported)
 		query_destroy(&q)
 		return nil, false
@@ -211,7 +217,8 @@ test_absent_ground_term_short_circuits :: proc(t: ^testing.T) {
 	defer fixture_destroy(&f)
 
 	absent := rdf.IRI("http://example/nobody")
-	_, found_before := memstore.find_term(&f.dictionary, absent)
+	_, found_before, find_err_before := kvstore.find_term(f.store, absent)
+	testing.expectf(t, find_err_before == nil, "find_term failed: %v", find_err_before)
 	testing.expect(t, !found_before, "the fixture should not contain :nobody")
 
 	rows, ok := solve(t, &f, `PREFIX : <http://example/> SELECT * WHERE { :nobody :knows ?who }`)
@@ -221,7 +228,8 @@ test_absent_ground_term_short_circuits :: proc(t: ^testing.T) {
 	defer destroy_rows(&rows)
 	testing.expectf(t, len(rows) == 0, "an absent subject cannot match, got %v", rows)
 
-	_, found_after := memstore.find_term(&f.dictionary, absent)
+	_, found_after, find_err_after := kvstore.find_term(f.store, absent)
+	testing.expectf(t, find_err_after == nil, "find_term failed: %v", find_err_after)
 	testing.expect(t, !found_after, "preparing the query interned a term it only looked up")
 }
 
@@ -432,7 +440,7 @@ test_unsupported_expression_is_reported :: proc(t: ^testing.T) {
 	algebra, _ := sparql.translate(&p)
 
 	q: Query
-	ok := query_init(&q, algebra, &f.dictionary, &f.dataset)
+	ok := query_init(&q, algebra, f.store)
 	defer query_destroy(&q)
 	testing.expect(t, !ok, "REGEX is not implemented yet, so preparation must fail")
 	testing.expectf(t, q.unsupported == "built-in function", "expected the built-in to be named, got %q", q.unsupported)

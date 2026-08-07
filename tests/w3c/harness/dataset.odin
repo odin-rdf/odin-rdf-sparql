@@ -10,38 +10,59 @@
 //
 // Documents load through the store's own bulk loaders, not through a
 // second ingestion path: the harness parses only manifests and expected
-// results itself. This is the memstore instantiation; the kvstore side
-// arrives with the backend-binding decision in SPARQL-T-0011, and the
-// dual-backend discipline is applied there.
+// results itself.
+//
+// This was the in-memory instantiation until odin-rdf-store retired that
+// backend (STORE-A-0006); the evaluation runner has always had its own
+// kvstore loading path, so what survives here is the loader that
+// readers_test.odin uses to prove every suite's data documents are
+// readable. It now needs a database directory, which test_dataset_init
+// creates and test_dataset_destroy removes.
 package w3c
 
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
+import "core:fmt"
+import "core:sync"
+
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 // SUITE_ROOT is tests/w3c/, the directory the vendored suites sit in.
 SUITE_ROOT :: #directory + ".."
 
-// Test_Dataset is a loaded dataset with the dictionary its IDs come
-// from. The two are inseparable — an ID means nothing without the
-// dictionary that assigned it — so they are handed around together.
+// Test_Dataset is a loaded dataset. It carries its own scratch database:
+// the store holds the dictionary its IDs come from, and the two are
+// inseparable — an ID means nothing without the dictionary that assigned
+// it.
+//
+// The path is unique per instance rather than per process. Suites run on
+// several threads at once, so a pid alone would let two datasets collide,
+// which fails as a store error and reproduces only under load.
 Test_Dataset :: struct {
-	dictionary: memstore.Dictionary,
-	dataset:    memstore.Dataset,
+	store: ^kvstore.Store,
+	path:  string,
+	err:   kvstore.Error,
 }
 
+@(private = "file")
+dataset_counter: u64
+
 test_dataset_init :: proc(td: ^Test_Dataset) {
-	memstore.dictionary_init(&td.dictionary)
-	memstore.dataset_init(&td.dataset)
+	n := sync.atomic_add(&dataset_counter, 1)
+	td.path = fmt.aprintf("%s/odin-sparql-w3c-ds-%d-%d", kv_temp_dir(), os.get_pid(), n)
+	td.store, td.err = kvstore.open(td.path)
 }
 
 test_dataset_destroy :: proc(td: ^Test_Dataset) {
-	memstore.dataset_destroy(&td.dataset)
-	memstore.dictionary_destroy(&td.dictionary)
+	if td.store != nil {
+		kvstore.close(td.store)
+	}
+	remove_store(td.path)
+	delete(td.path)
 }
 
 // load_entry_dataset loads an entry's documents into td. reason
@@ -96,21 +117,26 @@ load_document :: proc(td: ^Test_Dataset, suite: Suite, name: string, graph: rdf.
 	base := strings.concatenate({suite.base, name})
 	defer delete(base)
 
+	if td.store == nil {
+		return false, "scratch store did not open"
+	}
+
 	load_err: store.Load_Error
+	db_err: kvstore.Error
 	switch {
 	case strings.has_suffix(name, ".ttl"):
-		_, load_err = memstore.load_turtle(&td.dictionary, &td.dataset, content, base, graph)
+		_, load_err, db_err = kvstore.load_turtle(td.store, content, base, graph)
 	case strings.has_suffix(name, ".nt"):
-		_, load_err = memstore.load_triples(&td.dictionary, &td.dataset, content, graph)
+		_, load_err, db_err = kvstore.load_triples(td.store, content, graph)
 	case strings.has_suffix(name, ".trig"):
 		// A quad-bearing document names its own graphs, so the target
 		// graph is the document's rather than the caller's. The suites
 		// only ever name one as qt:data, which is what "load it as it
 		// stands" means for a document that already says where each
 		// statement lives.
-		_, load_err = memstore.load_trig(&td.dictionary, &td.dataset, content, base)
+		_, load_err, db_err = kvstore.load_trig(td.store, content, base)
 	case strings.has_suffix(name, ".nq"):
-		_, load_err = memstore.load_quads(&td.dictionary, &td.dataset, content)
+		_, load_err, db_err = kvstore.load_quads(td.store, content)
 	case strings.has_suffix(name, ".rdf"):
 		// RDF/XML. odin-rdf-parser implements N-Triples, N-Quads,
 		// Turtle, and TriG — not RDF/XML — so the ten sparql11-subquery
@@ -120,6 +146,9 @@ load_document :: proc(td: ^Test_Dataset, suite: Suite, name: string, graph: rdf.
 		return false, "data document is RDF/XML, which the family's parser does not implement"
 	case:
 		return false, "data document is in an unrecognized format"
+	}
+	if db_err != nil {
+		return false, "the store rejected the document"
 	}
 	if load_err.message != "" {
 		return false, load_err.message

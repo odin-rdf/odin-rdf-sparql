@@ -6,8 +6,8 @@ OUT   := build/$(NAME)
 # rather than vendored copies, so they are reached through collections instead
 # of relative paths -- `import "rdf:rdf"` for the data model and `rdf:rdf/turtle`
 # and friends for the four format packages, `import "store:store"` for the match
-# interface with `store:store/memstore` and `store:store/kvstore` for the two
-# backends. Both collections are required even where this project only names the
+# interface and `store:store/kvstore` for the backend. Both collections are
+# required even where this project only names the
 # store: the store's own sources import `rdf:`, and a collection is resolved in
 # the importing compilation, not the imported checkout. ols.json declares the
 # same pair so the language server resolves what the compiler does.
@@ -16,13 +16,15 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 # Every package with Odin sources, pinned explicitly the way odin-rdf-store
 # does -- discovery cannot express intent about what belongs (SPARQL-T-0001).
 # sparql is the public engine package: parser, algebra, and the
-# backend-independent evaluator. sparql/memstore and sparql/kvstore are its
-# per-backend instantiations -- separate packages so that a consumer that
-# only wants an in-memory store does not link LMDB (SPARQL-T-0011).
+# backend-independent evaluator. sparql/kvstore is its instantiation over the
+# store's backend -- a separate package because the core names no backend
+# (SPARQL-T-0011). It was one of two until odin-rdf-store retired its in-memory
+# backend (STORE-A-0006); the split survives because the core/instantiation
+# boundary is what a future backend would use, not because two exist today.
 # tests/w3c/harness runs the vendored W3C suites; tests/guards holds the
 # allocation-guard tests; tests/readme compiles and asserts the README's
 # example (SPARQL-T-0009).
-PKGS     := sparql sparql/srj sparql/srx sparql/memstore sparql/kvstore tests/guards tests/w3c/harness tests/readme
+PKGS     := sparql sparql/srj sparql/srx sparql/kvstore tests/guards tests/w3c/harness tests/readme
 SRC_DIRS := $(PKGS)
 
 # STORE-A-0001 makes the store's Term_ID width a build-time choice, and this

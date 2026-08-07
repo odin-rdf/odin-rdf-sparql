@@ -1,4 +1,4 @@
-package sparql_memstore
+package sparql_kvstore
 
 // The blocking operators' semantics (SPARQL-T-0015), asserted directly
 // rather than only through the W3C suites.
@@ -18,7 +18,7 @@ import "core:testing"
 
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql ".."
 
@@ -404,15 +404,16 @@ test_bind_over_a_subquery_reaches_the_answer :: proc(t: ^testing.T) {
 // the VALUES-driven cases above are.
 @(private = "file")
 solutions :: proc(t: ^testing.T, source: string, query: string, loc := #caller_location) -> (rows: [dynamic]string, ok: bool) {
-	d: memstore.Dictionary
-	memstore.dictionary_init(&d)
-	defer memstore.dictionary_destroy(&d)
-	ds: memstore.Dataset
-	memstore.dataset_init(&ds)
-	defer memstore.dataset_destroy(&ds)
+	path := scratch_path("blocking")
+	defer remove_scratch(path)
+	s, open_err := kvstore.open(path)
+	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
+		return nil, false
+	}
+	defer kvstore.close(s)
 	if source != "" {
-		_, err := memstore.load_turtle(&d, &ds, transmute([]byte)source, "http://example/")
-		if !testing.expectf(t, err.message == "", "fixture did not load: %s", err.message, loc = loc) {
+		_, parse_err, load_err := kvstore.load_turtle(s, transmute([]byte)source, "http://example/")
+		if !testing.expectf(t, parse_err.message == "" && load_err == nil, "fixture did not load: %s %v", parse_err.message, load_err, loc = loc) {
 			return nil, false
 		}
 	}
@@ -429,7 +430,7 @@ solutions :: proc(t: ^testing.T, source: string, query: string, loc := #caller_l
 	}
 
 	q: Query
-	if !query_init(&q, algebra, &d, &ds, sparql.parser_base(&p)) {
+	if !query_init(&q, algebra, s, sparql.parser_base(&p)) {
 		testing.expectf(t, false, "query not supported: %s", q.unsupported, loc = loc)
 		query_destroy(&q)
 		return nil, false

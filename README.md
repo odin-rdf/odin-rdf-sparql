@@ -26,11 +26,13 @@ engine. SPARQL Update, the HTTP and Graph Store protocols, federation
 | `sparql`          | Tokenizer, recursive-descent parser (query text → AST), §18.2/§18.4 translation (AST → algebra), the SSE algebra printer, and the backend-independent evaluation engine |
 | `sparql/srj`      | Writes the SPARQL Query Results **JSON** Format (SELECT and ASK)        |
 | `sparql/srx`      | Writes the SPARQL Query Results **XML** Format (SELECT and ASK)         |
-| `sparql/memstore` | The engine instantiated against the in-memory backend                   |
 | `sparql/kvstore`  | The engine instantiated against the persistent (LMDB) backend           |
 
-`sparql` names no storage backend and imports none, so a program that
-only wants an in-memory store never links LMDB. The sibling checkouts
+`sparql` names no storage backend and imports none. That split was
+originally what kept LMDB out of the link of a program that only wanted
+an in-memory store; odin-rdf-store retired that backend (STORE-A-0006),
+so today it is the seam a future backend would bind to rather than a
+linkage guarantee. The sibling checkouts
 are reached through collections — `rdf:` for the data model, `store:`
 for the match interface — as declared in the Makefile and `ols.json`.
 
@@ -101,10 +103,10 @@ run :: proc() {
 import "core:fmt"
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql "sparql"
-import sparql_memstore "sparql/memstore"
+import sparql_kvstore "sparql/kvstore"
 
 DATA :: `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <http://example/alice> a foaf:Person ; foaf:name "Alice" ; foaf:knows <http://example/bob> .
@@ -121,17 +123,17 @@ ORDER BY ?name
 `
 
 evaluate :: proc() {
-	// A dictionary and a dataset are the in-memory backend's two halves.
-	dictionary: memstore.Dictionary
-	memstore.dictionary_init(&dictionary)
-	defer memstore.dictionary_destroy(&dictionary)
-	dataset: memstore.Dataset
-	memstore.dataset_init(&dataset)
-	defer memstore.dataset_destroy(&dataset)
-	_, load_err := memstore.load_turtle(
-		&dictionary, &dataset, transmute([]byte)string(DATA), "http://example/")
-	if load_err.message != "" {
-		fmt.eprintfln("data did not load: %s", load_err.message)
+	// A store is a directory on disk, opened once and kept.
+	db, open_err := kvstore.open("/var/lib/example/rdf")
+	if open_err != nil {
+		fmt.eprintfln("cannot open the store: %v", open_err)
+		return
+	}
+	defer kvstore.close(db)
+	_, load_err, db_err := kvstore.load_turtle(
+		db, transmute([]byte)string(DATA), "http://example/")
+	if load_err.message != "" || db_err != nil {
+		fmt.eprintfln("data did not load: %s %v", load_err.message, db_err)
 		return
 	}
 
@@ -144,19 +146,19 @@ evaluate :: proc() {
 	algebra, _ := sparql.translate(&p)
 
 	// A prepared query borrows the algebra, so the parser outlives it.
-	q: sparql_memstore.Query
-	defer sparql_memstore.query_destroy(&q)
-	if !sparql_memstore.query_init(&q, algebra, &dictionary, &dataset, sparql.parser_base(&p)) {
+	q: sparql_kvstore.Query
+	defer sparql_kvstore.query_destroy(&q)
+	if !sparql_kvstore.query_init(&q, algebra, store_handle, sparql.parser_base(&p)) {
 		fmt.eprintfln("unsupported: %s", q.unsupported)
 		return
 	}
 
-	names := sparql_memstore.query_var_names(&q)
-	internal := sparql_memstore.query_var_internal(&q)
+	names := sparql_kvstore.query_var_names(&q)
+	internal := sparql_kvstore.query_var_internal(&q)
 	for {
 		// A row is Term_IDs indexed by variable slot, valid until the
 		// next pull. Deep-copy it if you keep it.
-		row, more := sparql_memstore.query_next(&q)
+		row, more := sparql_kvstore.query_next(&q)
 		if !more {
 			break
 		}
@@ -164,7 +166,7 @@ evaluate :: proc() {
 			if id == store.UNBOUND || internal[slot] {
 				continue   // unbound, or a pattern blank node
 			}
-			#partial switch term in sparql_memstore.query_term(&q, id) {
+			#partial switch term in sparql_kvstore.query_term(&q, id) {
 			case rdf.IRI:
 				fmt.printf("?%s=<%s> ", names[slot], string(term))
 			case rdf.Literal:
@@ -208,10 +210,9 @@ The evaluator's half:
   the query.
 - A **solution row** is the execution's working row, valid until the
   next `query_next`. A consumer that keeps a solution copies it.
-- A **term** from `query_term` is valid until `query_destroy` on both
-  backends — memstore borrows its dictionary's storage, kvstore builds
-  the term and frees it later, and the contract is the same either way.
-  Clone it to outlive the query.
+- A **term** from `query_term` is valid until `query_destroy`: the query
+  builds it from database bytes and frees it later. Clone it to outlive
+  the query.
 - A **Result_Graph** from `query_construct` / `query_describe` owns
   every term in it and is the caller's: free it with
   `sparql.result_graph_destroy`. That is what lets it outlive both the
@@ -253,7 +254,6 @@ Or individually:
 
 ```sh
 odin test sparql            -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
-odin test sparql/memstore   -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 odin test sparql/kvstore    -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 odin test tests/guards      -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 odin test tests/w3c/harness -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store

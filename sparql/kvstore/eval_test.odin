@@ -1,8 +1,5 @@
 package sparql_kvstore
 
-import "core:fmt"
-import "core:os"
-import "core:strings"
 import "core:testing"
 
 import rdf "rdf:rdf"
@@ -16,39 +13,6 @@ import sparql ".."
 // is the part the suites cannot reach: that preparing a query against a
 // persistent store stays a read, and that a store failure is reported as a
 // failure rather than as an empty answer.
-
-@(private = "file")
-scratch_path :: proc(name: string) -> string {
-	return fmt.aprintf("%s/odin-sparql-kv-%s-%d", temp_dir(), name, os.get_pid())
-}
-
-// temp_dir returns the OS temp directory with no trailing separator, so
-// callers add their own. macOS exports TMPDIR with a trailing slash and
-// Linux usually exports nothing, which makes concatenating onto the
-// variable a coin flip; Windows names it TEMP or TMP and has no /tmp to
-// fall back to, so the fallback alone is not enough.
-@(private = "file")
-temp_dir :: proc() -> string {
-	tmp := os.get_env("TMPDIR", context.temp_allocator)
-	if tmp == "" {
-		tmp = os.get_env("TEMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = os.get_env("TMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = "/tmp"
-	}
-	return strings.trim_right(tmp, `/\`)
-}
-
-@(private = "file")
-remove_scratch :: proc(path: string) {
-	os.remove(fmt.tprintf("%s/data.mdb", path))
-	os.remove(fmt.tprintf("%s/lock.mdb", path))
-	os.remove(path)
-	delete(path)
-}
 
 @(private = "file")
 DATA :: `@prefix : <http://example/> .

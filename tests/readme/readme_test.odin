@@ -5,15 +5,16 @@
 package readme
 
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:testing"
 
 import rdf "rdf:rdf"
 import store "store:store"
-import memstore "store:store/memstore"
+import kvstore "store:store/kvstore"
 
 import sparql "../../sparql"
-import sparql_memstore "../../sparql/memstore"
+import sparql_kvstore "../../sparql/kvstore"
 
 QUERY :: `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
@@ -67,22 +68,49 @@ SELECT ?name ?friend WHERE {
 ORDER BY ?name
 `
 
+// A throwaway database directory, and its cleanup. The README shows
+// kvstore.open against a path the reader chooses; this is only how the
+// test picks one it can delete afterwards.
+@(private = "file")
+scratch_path :: proc() -> string {
+	tmp := os.get_env("TMPDIR", context.temp_allocator)
+	if tmp == "" {
+		tmp = os.get_env("TEMP", context.temp_allocator)
+	}
+	if tmp == "" {
+		tmp = os.get_env("TMP", context.temp_allocator)
+	}
+	if tmp == "" {
+		tmp = "/tmp"
+	}
+	return fmt.aprintf("%s/odin-sparql-readme-%d", strings.trim_right(tmp, `/\`), os.get_pid())
+}
+
+@(private = "file")
+remove_scratch :: proc(path: string) {
+	os.remove(fmt.tprintf("%s/data.mdb", path))
+	os.remove(fmt.tprintf("%s/lock.mdb", path))
+	os.remove(path)
+	delete(path)
+}
+
 @(test)
 readme_evaluation :: proc(t: ^testing.T) {
-	// A dictionary and a dataset are the in-memory backend's two halves.
-	dictionary: memstore.Dictionary
-	memstore.dictionary_init(&dictionary)
-	defer memstore.dictionary_destroy(&dictionary)
-	dataset: memstore.Dataset
-	memstore.dataset_init(&dataset)
-	defer memstore.dataset_destroy(&dataset)
-	_, load_err := memstore.load_turtle(
-		&dictionary,
-		&dataset,
+	// The store is a directory on disk. This one is scratch, so it is
+	// removed at the end; a real one is opened once and kept.
+	path := scratch_path()
+	defer remove_scratch(path)
+	store_handle, open_err := kvstore.open(path)
+	if !testing.expectf(t, open_err == nil, "the store should open: %v", open_err) {
+		return
+	}
+	defer kvstore.close(store_handle)
+	_, load_err, db_err := kvstore.load_turtle(
+		store_handle,
 		transmute([]byte)string(DATA),
 		"http://example/",
 	)
-	if !testing.expectf(t, load_err.message == "", "data did not load: %s", load_err.message) {
+	if !testing.expectf(t, load_err.message == "" && db_err == nil, "data did not load: %s %v", load_err.message, db_err) {
 		return
 	}
 
@@ -98,21 +126,21 @@ readme_evaluation :: proc(t: ^testing.T) {
 	}
 
 	// A prepared query borrows the algebra, so the parser outlives it.
-	q: sparql_memstore.Query
-	defer sparql_memstore.query_destroy(&q)
-	if !sparql_memstore.query_init(&q, algebra, &dictionary, &dataset, sparql.parser_base(&p)) {
+	q: sparql_kvstore.Query
+	defer sparql_kvstore.query_destroy(&q)
+	if !sparql_kvstore.query_init(&q, algebra, store_handle, sparql.parser_base(&p)) {
 		testing.expectf(t, false, "unsupported: %s", q.unsupported)
 		return
 	}
 
 	answer := strings.builder_make()
 	defer strings.builder_destroy(&answer)
-	names := sparql_memstore.query_var_names(&q)
-	internal := sparql_memstore.query_var_internal(&q)
+	names := sparql_kvstore.query_var_names(&q)
+	internal := sparql_kvstore.query_var_internal(&q)
 	for {
 		// A row is Term_IDs indexed by variable slot, valid until the
 		// next pull. Deep-copy it if you keep it.
-		row, more := sparql_memstore.query_next(&q)
+		row, more := sparql_kvstore.query_next(&q)
 		if !more {
 			break
 		}
@@ -120,7 +148,7 @@ readme_evaluation :: proc(t: ^testing.T) {
 			if id == store.UNBOUND || internal[slot] {
 				continue // unbound, or a pattern blank node
 			}
-			#partial switch term in sparql_memstore.query_term(&q, id) {
+			#partial switch term in sparql_kvstore.query_term(&q, id) {
 			case rdf.IRI:
 				fmt.sbprintf(&answer, "?%s=<%s> ", names[slot], string(term))
 			case rdf.Literal:

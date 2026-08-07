@@ -4,7 +4,7 @@
 //
 // Both backends run every enabled test. That is the initiative's
 // dual-backend discipline and it is not ceremony: the engine core is
-// generic over the backend, so a difference between memstore and kvstore
+// generic over the backend, so a difference between backends
 // is either a backend bug or a place where the core leaked an assumption
 // about one of them. Running both is how either becomes visible.
 //
@@ -27,17 +27,17 @@ import kvstore "store:store/kvstore"
 
 import sparql "../../../sparql"
 import sparql_kv "../../../sparql/kvstore"
-import sparql_mem "../../../sparql/memstore"
 
+// One arm today. The enum and the dispatch below are kept rather than
+// collapsed: they are the seam a second backend would use, the same reason
+// odin-rdf-store retained its conformance Backend adapter when it became a
+// single-backend library (STORE-A-0006).
 Backend :: enum {
-	Memstore,
 	Kvstore,
 }
 
 backend_name :: proc(b: Backend) -> string {
 	switch b {
-	case .Memstore:
-		return "memstore"
 	case .Kvstore:
 		return "kvstore"
 	}
@@ -141,8 +141,6 @@ evaluate_algebra :: proc(
 	detail: string,
 ) {
 	switch backend {
-	case .Memstore:
-		return evaluate_memstore(suite, e, algebra, query, base, declared)
 	case .Kvstore:
 		return evaluate_kvstore(suite, e, algebra, query, base, declared)
 	}
@@ -186,83 +184,6 @@ query_is_ordered :: proc(suite: Suite, e: Entry) -> bool {
 		return false
 	}
 	return len(p.query.order) > 0
-}
-
-@(private = "file")
-evaluate_memstore :: proc(
-	suite: Suite,
-	e: Entry,
-	algebra: sparql.Algebra,
-	query: ^sparql.Query,
-	base: string,
-	declared: []Dataset_Document,
-) -> (
-	rs: Result_Set,
-	status: Eval_Status,
-	detail: string,
-) {
-	td: Test_Dataset
-	test_dataset_init(&td)
-	defer test_dataset_destroy(&td)
-	if loaded, why := load_entry_dataset(&td, suite, e); !loaded {
-		return {}, .Failed, why
-	}
-	for document in declared {
-		graph: rdf.Graph_Label
-		graph_iri: string
-		if document.named {
-			graph_iri = strings.concatenate({suite.base, document.name})
-			graph = rdf.IRI(graph_iri)
-		}
-		loaded, why := load_declared_document(&td, suite, document.name, graph)
-		delete(graph_iri)
-		if !loaded {
-			return {}, .Failed, why
-		}
-	}
-
-	q: sparql_mem.Query
-	defer sparql_mem.query_destroy(&q)
-	if !sparql_mem.query_init(&q, algebra, &td.dictionary, &td.dataset, base) {
-		return {}, .Unsupported, q.unsupported
-	}
-
-	#partial switch query.form {
-	case .Construct:
-		template: sparql.Template
-		defer sparql.template_destroy(&template)
-		if !sparql.template_build(&template, query.template, sparql_mem.query_slots(&q)) {
-			return {}, .Unsupported, "CONSTRUCT template"
-		}
-		graph := sparql_mem.query_construct(&q, &template)
-		defer sparql.result_graph_destroy(&graph)
-		return graph_result(&graph), .Ok, ""
-	case .Describe:
-		targets: sparql.Describe_Targets
-		defer sparql.describe_destroy(&targets)
-		sparql.describe_build(&targets, query, sparql_mem.query_slots(&q), find_memstore, &q)
-		graph := sparql_mem.query_describe(&q, &targets)
-		defer sparql.result_graph_destroy(&graph)
-		return graph_result(&graph), .Ok, ""
-	}
-
-	rs.kind = .Bindings
-	names := sparql_mem.query_var_names(&q)
-	internal := sparql_mem.query_var_internal(&q)
-	for {
-		row, more := sparql_mem.query_next(&q)
-		if !more {
-			break
-		}
-		at := result_set_add_row(&rs)
-		for id, slot in row {
-			if id == store.UNBOUND || internal[slot] {
-				continue
-			}
-			result_set_bind(&rs, at, names[slot], sparql_mem.query_term(&q, id))
-		}
-	}
-	return rs, .Ok, ""
 }
 
 @(private = "file")
@@ -368,11 +289,6 @@ evaluate_kvstore :: proc(
 // same non-interning lookup plan building uses. The two adapters are what
 // carry it across the backend boundary this file dispatches on.
 @(private = "file")
-find_memstore :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
-	return sparql_mem.query_find(cast(^sparql_mem.Query)data, term)
-}
-
-@(private = "file")
 find_kvstore :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
 	return sparql_kv.query_find(cast(^sparql_kv.Query)data, term)
 }
@@ -453,6 +369,12 @@ load_kv_document :: proc(
 // cannot be created there.
 @(private = "file")
 kv_scratch_path :: proc(suite: Suite, e: Entry) -> string {
+	return fmt.aprintf("%s/odin-sparql-eval-%d-%s-%s", kv_temp_dir(), os.get_pid(), suite.dir, e.id)
+}
+
+// kv_temp_dir is shared with dataset.odin, which needs a scratch database
+// of its own now that the in-memory backend is gone (STORE-A-0006).
+kv_temp_dir :: proc() -> string {
 	tmp := os.get_env("TMPDIR", context.temp_allocator)
 	if tmp == "" {
 		tmp = os.get_env("TEMP", context.temp_allocator)
@@ -463,11 +385,9 @@ kv_scratch_path :: proc(suite: Suite, e: Entry) -> string {
 	if tmp == "" {
 		tmp = "/tmp"
 	}
-	tmp = strings.trim_right(tmp, `/\`)
-	return fmt.aprintf("%s/odin-sparql-eval-%d-%s-%s", tmp, os.get_pid(), suite.dir, e.id)
+	return strings.trim_right(tmp, `/\`)
 }
 
-@(private = "file")
 remove_store :: proc(path: string) {
 	data := fmt.tprintf("%s/data.mdb", path)
 	lock := fmt.tprintf("%s/lock.mdb", path)

@@ -43,18 +43,8 @@ import "core:testing"
 // is a data-model change rather than a function-library one.
 
 @(test)
-test_eval_sparql10_triple_match_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-triple-match", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_triple_match_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-triple-match", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_basic_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-basic", .Memstore)
 }
 
 @(test)
@@ -63,18 +53,8 @@ test_eval_sparql10_basic_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql10_ask_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-ask", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_ask_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-ask", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_bnode_coreference_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-bnode-coreference", .Memstore)
 }
 
 @(test)
@@ -83,18 +63,8 @@ test_eval_sparql10_bnode_coreference_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql10_expr_equals_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-expr-equals", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_expr_equals_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-expr-equals", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_type_promotion_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-type-promotion", .Memstore)
 }
 
 @(test)
@@ -104,18 +74,8 @@ test_eval_sparql10_type_promotion_kvstore :: proc(t: ^testing.T) {
 
 
 @(test)
-test_eval_sparql10_boolean_effective_value_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-boolean-effective-value", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_boolean_effective_value_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-boolean-effective-value", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_bound_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-bound", .Memstore)
 }
 
 @(test)
@@ -124,18 +84,8 @@ test_eval_sparql10_bound_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql10_distinct_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-distinct", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_distinct_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-distinct", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_open_world_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-open-world", .Memstore)
 }
 
 @(test)
@@ -144,18 +94,8 @@ test_eval_sparql10_open_world_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql10_optional_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-optional", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_optional_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-optional", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_reduced_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-reduced", .Memstore)
 }
 
 @(test)
@@ -165,18 +105,8 @@ test_eval_sparql10_reduced_kvstore :: proc(t: ^testing.T) {
 
 
 @(test)
-test_eval_algebra_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-algebra", .Memstore)
-}
-
-@(test)
 test_eval_algebra_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-algebra", .Kvstore)
-}
-
-@(test)
-test_eval_expr_ops_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-expr-ops", .Memstore)
 }
 
 @(test)
@@ -185,18 +115,8 @@ test_eval_expr_ops_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_optional_filter_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-optional-filter", .Memstore)
-}
-
-@(test)
 test_eval_optional_filter_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-optional-filter", .Kvstore)
-}
-
-@(test)
-test_eval_bind_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-bind", .Memstore)
 }
 
 @(test)
@@ -206,18 +126,8 @@ test_eval_bind_kvstore :: proc(t: ^testing.T) {
 
 
 @(test)
-test_eval_dataset_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-dataset", .Memstore)
-}
-
-@(test)
 test_eval_dataset_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-dataset", .Kvstore)
-}
-
-@(test)
-test_eval_exists_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-exists", .Memstore)
 }
 
 @(test)
@@ -226,18 +136,8 @@ test_eval_exists_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_bindings_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-bindings", .Memstore)
-}
-
-@(test)
 test_eval_bindings_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-bindings", .Kvstore)
-}
-
-@(test)
-test_eval_functions_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-functions", .Memstore)
 }
 
 @(test)
@@ -246,18 +146,8 @@ test_eval_functions_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_regex_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-regex", .Memstore)
-}
-
-@(test)
 test_eval_regex_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-regex", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_cast_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-cast", .Memstore)
 }
 
 @(test)
@@ -266,18 +156,8 @@ test_eval_sparql10_cast_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql11_cast_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-cast", .Memstore)
-}
-
-@(test)
 test_eval_sparql11_cast_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-cast", .Kvstore)
-}
-
-@(test)
-test_eval_sparql11_aggregates_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-aggregates", .Memstore)
 }
 
 @(test)
@@ -286,18 +166,8 @@ test_eval_sparql11_aggregates_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql11_grouping_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-grouping", .Memstore)
-}
-
-@(test)
 test_eval_sparql11_grouping_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-grouping", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_sort_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-sort", .Memstore)
 }
 
 @(test)
@@ -306,18 +176,8 @@ test_eval_sparql10_sort_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql10_solution_seq_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-solution-seq", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_solution_seq_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-solution-seq", .Kvstore)
-}
-
-@(test)
-test_eval_sparql11_project_expression_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-project-expression", .Memstore)
 }
 
 @(test)
@@ -326,28 +186,13 @@ test_eval_sparql11_project_expression_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql11_property_path_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-property-path", .Memstore)
-}
-
-@(test)
 test_eval_sparql11_property_path_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-property-path", .Kvstore)
 }
 
 @(test)
-test_eval_sparql10_construct_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-construct", .Memstore)
-}
-
-@(test)
 test_eval_sparql10_construct_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql10-construct", .Kvstore)
-}
-
-@(test)
-test_eval_sparql11_construct_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-construct", .Memstore)
 }
 
 @(test)
@@ -360,18 +205,8 @@ test_eval_sparql11_construct_kvstore :: proc(t: ^testing.T) {
 // out-of-engine-scope entries by run_eval_suite, the same way a syntax
 // entry in an evaluation directory is.
 @(test)
-test_eval_sparql12_eval_triple_terms_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-eval-triple-terms", .Memstore)
-}
-
-@(test)
 test_eval_sparql12_eval_triple_terms_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql12-eval-triple-terms", .Kvstore)
-}
-
-@(test)
-test_eval_sparql12_expression_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-expression", .Memstore)
 }
 
 @(test)
@@ -380,18 +215,8 @@ test_eval_sparql12_expression_kvstore :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_eval_sparql12_grouping_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-grouping", .Memstore)
-}
-
-@(test)
 test_eval_sparql12_grouping_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql12-grouping", .Kvstore)
-}
-
-@(test)
-test_eval_sparql12_rdf11_memstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-rdf11", .Memstore)
 }
 
 @(test)
