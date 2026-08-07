@@ -3,16 +3,16 @@ id: retire-the-memstore-instantiation
 level: task
 title: "Retire the memstore instantiation: port sparql/memstore's tests to kvstore"
 short_code: "SPARQL-T-0023"
-created_at: 2026-08-07T16:45:00.000000+00:00
-updated_at: 2026-08-07T16:45:00.000000+00:00
+created_at: 2026-08-07T16:45:00+00:00
+updated_at: 2026-08-07T17:56:00.353236+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#feature"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -67,6 +67,12 @@ the sibling checkout, so the deletion breaks this build the instant it lands.
   simpler because of it.
 - **Effort Estimate**: M — mechanical but not small: 2,415 lines of tests move, 299 lines
   of code are deleted.
+
+## Acceptance Criteria
+
+## Acceptance Criteria
+
+## Acceptance Criteria
 
 ## Acceptance Criteria **[REQUIRED]**
 
