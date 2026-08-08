@@ -45,7 +45,7 @@ a graph rather than a result set and are emitted through
 odin-rdf-parser's format emitters instead.
 
 ```odin
-import srj "sparql/srj"
+import "sparql/srj"
 
 e: srj.Emitter
 srj.emitter_init(&e, w, []string{"s", "o"}) // w: io.Writer
@@ -61,7 +61,7 @@ srj.emitter_finish(&e)
 
 ```odin
 import "core:fmt"
-import sparql "sparql"
+import "sparql"
 
 QUERY :: `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
@@ -101,11 +101,10 @@ run :: proc() {
 
 ```odin
 import "core:fmt"
-import rdf "rdf:rdf"
-import store "store:store"
-import kvstore "store:store/kvstore"
-
-import sparql "sparql"
+import "rdf:rdf"
+import "store:store"
+import "store:store/kvstore"
+import "sparql"
 import sparql_kvstore "sparql/kvstore"
 
 DATA :: `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -148,7 +147,7 @@ evaluate :: proc() {
 	// A prepared query borrows the algebra, so the parser outlives it.
 	q: sparql_kvstore.Query
 	defer sparql_kvstore.query_destroy(&q)
-	if !sparql_kvstore.query_init(&q, algebra, store_handle, sparql.parser_base(&p)) {
+	if !sparql_kvstore.query_init(&q, algebra, db, sparql.parser_base(&p)) {
 		fmt.eprintfln("unsupported: %s", q.unsupported)
 		return
 	}
@@ -222,6 +221,42 @@ The evaluator's half:
   the query computed — including after a run abandoned mid-stream and
   after a `query_init` that returned false.
 
+### A query is one snapshot
+
+On `sparql/kvstore`, `query_init` takes a **read transaction** and
+`query_destroy` ends it, so every read a query makes — binding its ground
+terms, matching each pattern at each depth, materializing terms at the
+answer boundary — sees one dataset. Without that they are independent
+reads, and a writer committing between two of them yields a solution
+assembled from two datasets, which is not an answer to the query. It is
+the property the engine already gives `NOW()` (§17.4.5.1), moved from the
+clock to the data.
+
+Two consequences worth knowing before you meet them:
+
+- **An open read transaction pins pages**, so a concurrent writer grows
+  the file for as long as the query lives. A query is a fine lifetime for
+  that; a request handler that holds a `Query` open across unrelated work
+  is making a storage-sizing decision.
+- **A query cannot see an uncommitted write it did not open inside.** To
+  run one inside a write transaction you hold — deciding whether a
+  candidate may join the dataset, say — use `query_init_txn`, which takes
+  your `^kvstore.Txn` and leaves it open for you to commit or abort:
+
+  ```odin
+  tx, _ := kvstore.txn_begin(db, .Write)
+  defer kvstore.txn_abort(&tx)
+  kvstore.load_turtle_txn(&tx, candidate)
+
+  q: sparql_kvstore.Query
+  defer sparql_kvstore.query_destroy(&q)   // leaves tx open
+  sparql_kvstore.query_init_txn(&q, algebra, &tx, sparql.parser_base(&p))
+  ```
+
+  An ordinary `query_init` at that moment is not refused — it opens a read
+  transaction of its own and answers about the committed dataset. The
+  wrong constructor gives you an answer, not a diagnostic.
+
 Allocator discipline: every entry point takes an
 `allocator := context.allocator`, allocates only from it, and frees
 through it. The streaming operators allocate **nothing per solution**;
@@ -260,5 +295,6 @@ odin test tests/w3c/harness -collection:rdf=../odin-rdf-parser -collection:store
 odin test tests/readme      -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 ```
 
-Both README examples above are compiled and asserted by `tests/readme`,
-so they cannot drift from the real API.
+All three README examples above — the parser quick start, the evaluation
+walk-through, and the query inside a write transaction — are compiled and
+asserted by `tests/readme`, so they cannot drift from the real API.

@@ -48,14 +48,17 @@ jobs:
       # move a deliberate bump here, and a red build then means this repository
       # broke.
       #
-      # **odin-rdf-store v0.2.0 is a floor, not just a pin**, for two reasons.
-      # `v0.1.0` vendored exactly one LMDB archive — `liblmdb_darwin_arm64.a` —
-      # and `sparql/kvstore` links those archives, so against that tag this
-      # builds on macOS and fails to link on the ubuntu and windows runners
-      # above; STORE-A-0004's five-platform vendoring is what `v0.1.1` released.
-      # Above that, `v0.2.0` is the release that retired `store/memstore`
-      # (STORE-A-0006), and since SPARQL-T-0023 this repository has no memstore
-      # instantiation to build against an earlier store. Do not pin below it.
+      # **odin-rdf-store v0.3.0 is a floor, not just a pin**, for three reasons,
+      # each strictly above the last. `v0.1.0` vendored exactly one LMDB archive
+      # — `liblmdb_darwin_arm64.a` — and `sparql/kvstore` links those archives,
+      # so against that tag this builds on macOS and fails to link on the ubuntu
+      # and windows runners above; STORE-A-0004's five-platform vendoring is what
+      # `v0.1.1` released. Above that, `v0.2.0` is the release that retired
+      # `store/memstore` (STORE-A-0006), and since SPARQL-T-0023 this repository
+      # has no memstore instantiation to build against an earlier store. Above
+      # that again, SPARQL-T-0024 made a query one snapshot: `txn_begin`,
+      # `match_txn`, `find_term_txn` and `lookup_term_txn` do not exist before
+      # `v0.3.0` (STORE-A-0007). Do not pin below it.
       #
       # To bump either: change the ref, run `make test` and `make check` locally
       # against the new checkout, and commit them together — a collection is
@@ -71,7 +74,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-store
-          ref: v0.2.0
+          ref: v0.3.0
           path: odin-rdf-store
 
       - uses: laytan/setup-odin@v2
