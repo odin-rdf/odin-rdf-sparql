@@ -6,8 +6,23 @@ package sparql_kvstore
 // Ported here when the in-memory backend was retired (odin-rdf-store
 // STORE-A-0006): the suites in this package used to build a dictionary
 // and a dataset in memory, which needed no path and no cleanup. Every one
-// of them now needs a database directory, and this is the one place that
-// knows how to make one.
+// of them then needed a database directory, and this was the one place
+// that knew how to make one.
+//
+// **Most of them no longer do.** odin-rdf-store v0.3.0's `open_ephemeral`
+// needs no path to name, make unique, or clean up, and this package uses it
+// almost everywhere. Three tests still need a real directory, and they are
+// the reason this file survives:
+//
+//   - `test_kvstore_query_setup_does_not_write` closes a store and reopens
+//     the same path read-only. There is no path to reopen otherwise, and
+//     `open_ephemeral` ignores `read_only` by contract.
+//   - every test in `snapshot_test.odin`, because an ephemeral store opens
+//     with `NOLOCK` and those tests deliberately hold a reader open across
+//     a writer — the one arrangement LMDB says `NOLOCK` callers must not
+//     create. The comment at the head of that file has the detail.
+//
+// Reach for `open_ephemeral` unless the test needs one of those two things.
 //
 // Uniqueness matters more than it looks. The test runner uses ~10
 // threads, so several tests hold scratch databases at the same moment

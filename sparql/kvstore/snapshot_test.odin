@@ -20,6 +20,18 @@ import sparql ".."
 // the family's deployment shape makes that a question of when. So these are
 // written on purpose rather than derived from a suite, and each one asserts
 // something a per-operation-read engine would get wrong.
+//
+// **Every store here is `kvstore.open`, and must stay that way.** The rest
+// of this package moved to `open_ephemeral`, which opens with `NOLOCK` —
+// and LMDB's contract for that flag is explicit: the caller "must ensure
+// that no readers are using old transactions while a writer is active".
+// A reader holding an old transaction while a writer commits is precisely
+// what these tests set up on purpose. Without the reader table a writer
+// cannot know which pages a reader still needs, so it may recycle them
+// underneath it; the tests would keep passing on fixtures this small,
+// because a freelist that never wraps never hands a reused page back, and
+// would start lying the moment a fixture grew. The reader-table test below
+// needs a reader table for the additional reason that it counts slots.
 
 @(private = "file")
 SNAPSHOT_DATA :: `@prefix : <http://example/> .

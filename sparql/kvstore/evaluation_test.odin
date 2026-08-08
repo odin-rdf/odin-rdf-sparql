@@ -21,14 +21,12 @@ DATA :: `@prefix : <http://example/> .
 @(private = "file")
 Fixture :: struct {
 	store: ^kvstore.Store,
-	path:  string,
 }
 
 @(private = "file")
 fixture_init :: proc(f: ^Fixture, t: ^testing.T, source := DATA) {
-	f.path = scratch_path("eval")
 	open_err: kvstore.Error
-	f.store, open_err = kvstore.open(f.path)
+	f.store, open_err = kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
 		return
 	}
@@ -41,7 +39,6 @@ fixture_destroy :: proc(f: ^Fixture) {
 	if f.store != nil {
 		kvstore.close(f.store)
 	}
-	remove_scratch(f.path)
 }
 
 // solve parses, translates, and evaluates a query, returning each

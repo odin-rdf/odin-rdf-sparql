@@ -24,8 +24,6 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
-import "core:fmt"
-import "core:sync"
 
 import rdf "rdf:rdf"
 import store "store:store"
@@ -39,30 +37,23 @@ SUITE_ROOT :: #directory + ".."
 // inseparable — an ID means nothing without the dictionary that assigned
 // it.
 //
-// The path is unique per instance rather than per process. Suites run on
-// several threads at once, so a pid alone would let two datasets collide,
-// which fails as a store error and reproduces only under load.
+// There is no path: an ephemeral store has none to make unique, and the
+// collisions this struct used to guard against cannot arise. Suites run on
+// several threads at once, and two datasets sharing a path used to fail as
+// a store error that reproduced only under load.
 Test_Dataset :: struct {
 	store: ^kvstore.Store,
-	path:  string,
 	err:   kvstore.Error,
 }
 
-@(private = "file")
-dataset_counter: u64
-
 test_dataset_init :: proc(td: ^Test_Dataset) {
-	n := sync.atomic_add(&dataset_counter, 1)
-	td.path = fmt.aprintf("%s/odin-sparql-w3c-ds-%d-%d", kv_temp_dir(), os.get_pid(), n)
-	td.store, td.err = kvstore.open(td.path)
+	td.store, td.err = kvstore.open_ephemeral()
 }
 
 test_dataset_destroy :: proc(td: ^Test_Dataset) {
 	if td.store != nil {
 		kvstore.close(td.store)
 	}
-	remove_store(td.path)
-	delete(td.path)
 }
 
 // load_entry_dataset loads an entry's documents into td. reason

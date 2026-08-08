@@ -328,9 +328,7 @@ write_link :: proc(b: ^strings.Builder, i: int) {
 // building has to enumerate the graphs above it.
 @(test)
 test_path_under_a_graph_variable :: proc(t: ^testing.T) {
-	db_path := scratch_path("path-graphvar")
-	defer remove_scratch(db_path)
-	s, open_err := kvstore.open(db_path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
 		return
 	}
@@ -366,9 +364,7 @@ test_path_under_a_graph_variable :: proc(t: ^testing.T) {
 
 @(private = "file")
 solutions :: proc(t: ^testing.T, source: string, query: string, loc := #caller_location) -> (rows: [dynamic]string, ok: bool) {
-	path := scratch_path("path")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
 		return nil, false
 	}

@@ -2,8 +2,6 @@ package guards
 
 import "core:fmt"
 import "core:mem"
-import "core:os"
-import "core:sync"
 import "core:strings"
 import "core:testing"
 
@@ -215,9 +213,7 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	path := guard_scratch_path()
-	defer remove_guard_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
 	defer kvstore.close(s)
 
@@ -324,9 +320,7 @@ test_grouping_is_bounded_by_its_groups :: proc(t: ^testing.T) {
 
 @(private = "file")
 grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
-	path := guard_scratch_path()
-	defer remove_guard_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
 	defer kvstore.close(s)
 
@@ -423,9 +417,7 @@ test_property_path_traversal_is_bounded_by_the_graph :: proc(t: ^testing.T) {
 // per path solution.
 @(private = "file")
 path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
-	path := guard_scratch_path()
-	defer remove_guard_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
 	defer kvstore.close(s)
 
@@ -496,8 +488,7 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	allocator := mem.tracking_allocator(&track)
 
-	path := guard_scratch_path(allocator)
-	s, open_err := kvstore.open(path, kvstore.DEFAULT_OPTIONS, allocator)
+	s, open_err := kvstore.open_ephemeral(kvstore.EPHEMERAL_OPTIONS, allocator)
 	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
 	context.allocator = allocator
 	_, load_err, _ := kvstore.load_triples(
@@ -614,7 +605,6 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 	// deferred destroy runs after the check and would leave the store's
 	// own live allocations looking like the engine's leaks.
 	kvstore.close(s, allocator)
-	remove_guard_scratch(path, allocator)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
@@ -636,8 +626,7 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	allocator := mem.tracking_allocator(&track)
 
-	path := guard_scratch_path(allocator)
-	s, open_err := kvstore.open(path, kvstore.DEFAULT_OPTIONS, allocator)
+	s, open_err := kvstore.open_ephemeral(kvstore.EPHEMERAL_OPTIONS, allocator)
 	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
 	context.allocator = allocator
 	_, load_err, _ := kvstore.load_triples(
@@ -702,7 +691,6 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 		sparql.parser_destroy(&p)
 	}
 	kvstore.close(s, allocator)
-	remove_guard_scratch(path, allocator)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
@@ -713,32 +701,3 @@ find_guard :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: b
 	return sparql_kv.query_find(cast(^sparql_kv.Query)data, term)
 }
 
-
-// Scratch databases for the guards. The in-memory backend needed no path;
-// kvstore does (odin-rdf-store STORE-A-0006).
-@(private = "file")
-guard_counter: u64
-
-@(private = "file")
-guard_scratch_path :: proc(allocator := context.allocator) -> string {
-	tmp := os.get_env("TMPDIR", context.temp_allocator)
-	if tmp == "" {
-		tmp = os.get_env("TEMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = os.get_env("TMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = "/tmp"
-	}
-	n := sync.atomic_add(&guard_counter, 1)
-	return fmt.aprintf("%s/odin-sparql-guard-%d-%d", strings.trim_right(tmp, `/\`), os.get_pid(), n, allocator = allocator)
-}
-
-@(private = "file")
-remove_guard_scratch :: proc(path: string, allocator := context.allocator) {
-	os.remove(fmt.tprintf("%s/data.mdb", path))
-	os.remove(fmt.tprintf("%s/lock.mdb", path))
-	os.remove(path)
-	delete(path, allocator)
-}

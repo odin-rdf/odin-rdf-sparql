@@ -5,9 +5,7 @@
 package readme
 
 import "core:fmt"
-import "core:os"
 import "core:strings"
-import "core:sync"
 import "core:testing"
 
 import "rdf:rdf"
@@ -71,46 +69,11 @@ SELECT ?name ?friend WHERE {
 ORDER BY ?name
 `
 
-// A throwaway database directory, and its cleanup. The README shows
-// kvstore.open against a path the reader chooses; this is only how the
-// test picks one it can delete afterwards.
-@(private = "file")
-scratch_counter: u64
-
-@(private = "file")
-scratch_path :: proc() -> string {
-	tmp := os.get_env("TMPDIR", context.temp_allocator)
-	if tmp == "" {
-		tmp = os.get_env("TEMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = os.get_env("TMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = "/tmp"
-	}
-	// The counter, not the pid, is what separates two tests in one run: the
-	// runner is threaded, and this package now has more than one test that
-	// opens a store.
-	n := sync.atomic_add(&scratch_counter, 1)
-	return fmt.aprintf("%s/odin-sparql-readme-%d-%d", strings.trim_right(tmp, `/\`), os.get_pid(), n)
-}
-
-@(private = "file")
-remove_scratch :: proc(path: string) {
-	os.remove(fmt.tprintf("%s/data.mdb", path))
-	os.remove(fmt.tprintf("%s/lock.mdb", path))
-	os.remove(path)
-	delete(path)
-}
-
 @(test)
 readme_evaluation :: proc(t: ^testing.T) {
 	// The store is a directory on disk. This one is scratch, so it is
 	// removed at the end; a real one is opened once and kept.
-	path := scratch_path()
-	defer remove_scratch(path)
-	db, open_err := kvstore.open(path)
+	db, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "the store should open: %v", open_err) {
 		return
 	}
@@ -183,9 +146,7 @@ CANDIDATE :: `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 
 @(test)
 readme_query_inside_a_write_transaction :: proc(t: ^testing.T) {
-	path := scratch_path()
-	defer remove_scratch(path)
-	db, open_err := kvstore.open(path)
+	db, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "the store should open: %v", open_err) {
 		return
 	}

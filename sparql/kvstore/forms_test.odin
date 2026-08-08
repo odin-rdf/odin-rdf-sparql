@@ -155,9 +155,7 @@ test_construct_drops_triples_rdf_does_not_admit :: proc(t: ^testing.T) {
 // reason this test is worth more against kvstore than it was before.
 @(test)
 test_construct_graph_outlives_its_store :: proc(t: ^testing.T) {
-	path := scratch_path("forms-lifetime")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
 		return
 	}
@@ -376,9 +374,7 @@ run_form :: proc(
 	blanks: int,
 	ok: bool,
 ) {
-	path := scratch_path("forms")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
 		return nil, 0, false
 	}

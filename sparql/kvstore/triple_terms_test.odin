@@ -272,9 +272,7 @@ triple_solutions :: proc(
 	rows: [dynamic]string,
 	ok: bool,
 ) {
-	path := scratch_path("tt")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
 		return nil, false
 	}

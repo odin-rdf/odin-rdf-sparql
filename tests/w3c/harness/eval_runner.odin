@@ -16,7 +16,6 @@
 // these are two genuinely separate instantiations.
 package w3c
 
-import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -199,18 +198,11 @@ evaluate_kvstore :: proc(
 	status: Eval_Status,
 	detail: string,
 ) {
-	path := kv_scratch_path(suite, e)
-	defer delete(path)
-	remove_store(path)
-
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if open_err != nil {
 		return {}, .Failed, "cannot open the kvstore"
 	}
-	defer {
-		kvstore.close(s)
-		remove_store(path)
-	}
+	defer kvstore.close(s)
 	if loaded, why := load_entry_into_kvstore(s, suite, e); !loaded {
 		return {}, .Failed, why
 	}
@@ -360,38 +352,3 @@ load_kv_document :: proc(
 	return true, ""
 }
 
-// Each evaluated entry gets a fresh database directory: a persistent
-// store carries state between opens by design, and a test that inherited
-// the previous test's quads would pass or fail for reasons that have
-// nothing to do with it.
-// Windows names the temp directory TEMP or TMP and has no /tmp to fall
-// back to, so consulting TMPDIR alone leaves the path at a directory that
-// cannot be created there.
-@(private = "file")
-kv_scratch_path :: proc(suite: Suite, e: Entry) -> string {
-	return fmt.aprintf("%s/odin-sparql-eval-%d-%s-%s", kv_temp_dir(), os.get_pid(), suite.dir, e.id)
-}
-
-// kv_temp_dir is shared with dataset.odin, which needs a scratch database
-// of its own now that the in-memory backend is gone (STORE-A-0006).
-kv_temp_dir :: proc() -> string {
-	tmp := os.get_env("TMPDIR", context.temp_allocator)
-	if tmp == "" {
-		tmp = os.get_env("TEMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = os.get_env("TMP", context.temp_allocator)
-	}
-	if tmp == "" {
-		tmp = "/tmp"
-	}
-	return strings.trim_right(tmp, `/\`)
-}
-
-remove_store :: proc(path: string) {
-	data := fmt.tprintf("%s/data.mdb", path)
-	lock := fmt.tprintf("%s/lock.mdb", path)
-	os.remove(data)
-	os.remove(lock)
-	os.remove(path)
-}

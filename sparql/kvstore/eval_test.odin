@@ -22,9 +22,7 @@ DATA :: `@prefix : <http://example/> .
 
 @(test)
 test_kvstore_evaluates_a_join :: proc(t: ^testing.T) {
-	path := scratch_path("join")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err) {
 		return
 	}

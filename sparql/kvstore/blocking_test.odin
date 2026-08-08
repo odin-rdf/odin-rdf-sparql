@@ -404,9 +404,7 @@ test_bind_over_a_subquery_reaches_the_answer :: proc(t: ^testing.T) {
 // the VALUES-driven cases above are.
 @(private = "file")
 solutions :: proc(t: ^testing.T, source: string, query: string, loc := #caller_location) -> (rows: [dynamic]string, ok: bool) {
-	path := scratch_path("blocking")
-	defer remove_scratch(path)
-	s, open_err := kvstore.open(path)
+	s, open_err := kvstore.open_ephemeral()
 	if !testing.expectf(t, open_err == nil, "cannot open the store: %v", open_err, loc = loc) {
 		return nil, false
 	}
