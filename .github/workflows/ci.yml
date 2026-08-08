@@ -60,13 +60,21 @@ jobs:
       # `match_txn`, `find_term_txn` and `lookup_term_txn` do not exist before
       # `v0.3.0` (STORE-A-0007). Do not pin below it.
       #
-      # **Pinned at `v0.4.0`, which is above the floor for a reason that is not
-      # a floor.** Nothing here needs it to compile. `v0.4.0` retries
-      # `open_ephemeral`'s reservation, which this repository leans on harder
-      # than any other in the family — roughly 966 ephemeral opens, two per
-      # evaluation entry. odin-rdf-shacl's Windows job failed intermittently on
-      # ~58 of them (STORE-T-0042) before that fix, so this one is exposed to
-      # the same transient and pinned above it deliberately.
+      # **`v0.5.0` is a floor too, and the newest one** (SPARQL-T-0025).
+      # `as_of_test.odin` calls `kvstore.txn_begin_as_of` and `kvstore.remove`,
+      # neither of which exists before it (STORE-A-0008), so this cannot pin
+      # below `v0.5.0` while that test is in the suite. Note also that `v0.5.0`
+      # is a **format** break: a database written by an earlier store will not
+      # open, which costs this repository nothing because every store it makes
+      # is ephemeral, but it is the reason the bump is a minor rather than a
+      # patch.
+      #
+      # The prior pin's reasoning is kept because it is still true and still
+      # load-bearing: `v0.4.0` retries `open_ephemeral`'s reservation, which
+      # this repository leans on harder than any other in the family — roughly
+      # 966 ephemeral opens, two per evaluation entry. odin-rdf-shacl's Windows
+      # job failed intermittently on ~58 of them (STORE-T-0042) before that fix,
+      # so this one is exposed to the same transient and must stay above it.
       #
       # To bump either: change the ref, run `make test` and `make check` locally
       # against the new checkout, and commit them together — a collection is
@@ -82,7 +90,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-store
-          ref: v0.4.0
+          ref: v0.5.0
           path: odin-rdf-store
 
       - uses: laytan/setup-odin@v2
