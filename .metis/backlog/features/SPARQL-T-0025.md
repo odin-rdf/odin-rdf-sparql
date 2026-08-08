@@ -4,15 +4,15 @@ level: task
 title: "As-of costs this engine nothing: a permanent test that a horizon reaches SPARQL through query_init_txn"
 short_code: "SPARQL-T-0025"
 created_at: 2026-08-08T20:04:08.547580+00:00
-updated_at: 2026-08-08T20:04:08.547580+00:00
+updated_at: 2026-08-08T20:26:33.290929+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#feature"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
