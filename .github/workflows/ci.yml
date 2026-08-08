@@ -60,6 +60,14 @@ jobs:
       # `match_txn`, `find_term_txn` and `lookup_term_txn` do not exist before
       # `v0.3.0` (STORE-A-0007). Do not pin below it.
       #
+      # **Pinned at `v0.4.0`, which is above the floor for a reason that is not
+      # a floor.** Nothing here needs it to compile. `v0.4.0` retries
+      # `open_ephemeral`'s reservation, which this repository leans on harder
+      # than any other in the family — roughly 966 ephemeral opens, two per
+      # evaluation entry. odin-rdf-shacl's Windows job failed intermittently on
+      # ~58 of them (STORE-T-0042) before that fix, so this one is exposed to
+      # the same transient and pinned above it deliberately.
+      #
       # To bump either: change the ref, run `make test` and `make check` locally
       # against the new checkout, and commit them together — a collection is
       # resolved in the *importing* compilation, so the store's sources are built
@@ -74,7 +82,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-store
-          ref: v0.3.0
+          ref: v0.4.0
           path: odin-rdf-store
 
       - uses: laytan/setup-odin@v2

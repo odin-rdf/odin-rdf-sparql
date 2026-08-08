@@ -113,7 +113,7 @@ design task and not a patch.
 
   **Where it must land, when it lands: odin-rdf-parser, at literal construction.** This was traced rather than assumed:
 
-  - Changing `rdf.equal`/`rdf.hash` alone is **ineffective**. memstore interns with `map[rdf.Literal]store.Term_ID` — Odin's built-in struct hashing — and never calls them. Two IDs would still be assigned.
+  - Changing `rdf.equal`/`rdf.hash` alone was **ineffective** while memstore existed: it interned with `map[rdf.Literal]store.Term_ID` — Odin's built-in struct hashing — and never called them. *(Amended 2026-08-08: memstore is gone, STORE-A-0006. The point survives in weaker form — the store's dictionary is what assigns IDs, and kvstore keys on `literal_canonical` bytes rather than on `rdf.equal`, so changing the comparison functions alone still does not change what gets interned.)*
   - Folding in the store dictionaries alone leaves `rdf.equal` reporting `@EN` != `@en`, so every consumer comparing `rdf.Term`s outside the store (this engine's expression evaluation; SHACL's `sh:hasValue`/`sh:in`/`sh:languageIn`) disagrees with storage — two notions of identity in one family. It also rewrites kvstore's `literal_canonical`, which appends `v.language` verbatim into the persistent `term2id` key, so existing databases holding `EN` would stop matching: a STORE-A-0003 format-version bump.
   - Folding in `literal_lang`/`literal_dir_lang` fixes all of it at once, because memstore's struct key, kvstore's canonical bytes, and direct `rdf.Term` comparison all inherit it.
 

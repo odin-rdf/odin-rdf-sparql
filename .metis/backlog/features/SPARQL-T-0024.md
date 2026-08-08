@@ -1,10 +1,10 @@
 ---
-id: a-query-is-one-snapshot
+id: a-query-is-one-snapshot-hold-a
 level: task
 title: "A query is one snapshot: hold a read transaction for the Query's lifetime"
 short_code: "SPARQL-T-0024"
-created_at: 2026-08-08T00:06:00.000000+00:00
-updated_at: 2026-08-08T00:06:00.000000+00:00
+created_at: 2026-08-08T00:06:00+00:00
+updated_at: 2026-08-08T15:32:41.664725+00:00
 parent: 
 blocked_by: []
 archived: false
@@ -12,7 +12,7 @@ archived: false
 tags:
   - "#task"
   - "#feature"
-  - "#phase/backlog"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -101,13 +101,13 @@ Two details that matter for this engine specifically:
 
 ## Acceptance Criteria **[REQUIRED]**
 
-- [ ] `Session` gains a transaction alongside `store` (`sparql/kvstore/eval.odin:35`), and the
+- [x] `Session` gains a transaction alongside `store` (`sparql/kvstore/eval.odin:35`), and the
       reads go through it.
-- [ ] **The transaction is taken at `query_init` and released at `query_destroy`** — the
+- [x] **The transaction is taken at `query_init` and released at `query_destroy`** — the
       lifetime a `Query` already has, so no new lifetime enters this repo. `query_destroy` is
       documented as safe on a query whose `query_init` returned false, and that must stay true:
       a failed init must not leak a transaction.
-- [ ] The seven read sites take the `_txn` form:
+- [x] The seven read sites take the `_txn` form:
   - `sparql/kvstore/eval.odin:42` — `match_adapter`
   - `sparql/kvstore/eval.odin:77` — `lookup_term`, expression materialization
   - `sparql/kvstore/eval.odin:92` — `find_term`, term binding
@@ -116,22 +116,22 @@ Two details that matter for this engine specifically:
   - `sparql/kvstore/eval.odin:266` — `lookup_term`, the answer boundary
   - and the `match_next` / `match_destroy` pair, which need no change but should be confirmed
     against the borrowing rule rather than assumed.
-- [ ] **The error-slot contract is unchanged**: a failed read still records into `Session.err`
+- [x] **The error-slot contract is unchanged**: a failed read still records into `Session.err`
       and still hands back an already-done iterator, so a failure cannot read as an exhausted
       match.
-- [ ] **A test that would fail without this.** The suites cannot produce it — they are
+- [x] **A test that would fail without this.** The suites cannot produce it — they are
       single-threaded — so it has to be written on purpose: open a query, drain part of it,
       commit a write through a second handle, and assert the query's remaining solutions are
       the ones the dataset had at `query_init`. Asserting the *dictionary* half is worth it
       too: a term interned by the later write must not resolve through the query's snapshot,
       which is what stops a query half-seeing a write.
-- [ ] **The page-pinning cost is documented on `query_init`**, as contract rather than as a
+- [x] **The page-pinning cost is documented on `query_init`**, as contract rather than as a
       note: an open read transaction pins pages, so a concurrent writer grows the file for as
       long as the query lives. A query is a fine lifetime for that; a request handler that
       holds a `Query` open across unrelated work is making a storage-sizing decision.
-- [ ] `make test` green at both `Term_ID` widths, all 483 evaluation tests and 352 syntax tests
+- [x] `make test` green at both `Term_ID` widths, all 483 evaluation tests and 352 syntax tests
       unchanged; `make check` clean.
-- [ ] The CI pin moves to `v0.3.0` — a **floor, not just a pin**, as `v0.2.0` already is here:
+- [x] The CI pin moves to `v0.3.0` — a **floor, not just a pin**, as `v0.2.0` already is here:
       `match_txn` does not exist before it.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
@@ -193,3 +193,41 @@ covering both.
   28s** for precisely that reason, with one store opened per evaluation entry.
   odin-rdf-store's own job went 64s → 41s while running 83% more tests once it adopted it.
   Bumping the pin to v0.3.0 is the prerequisite for both, so they are one pass.
+
+- **2026-08-08 — Done. 71 tests in `sparql/kvstore` (was 66), green at both `Term_ID`
+  widths, all 483 evaluation and 352 syntax entries unchanged; `make check` clean.**
+
+  **The open question this item left to this repository is answered: the transaction is
+  not optional.** `Session` holds a `^kvstore.Txn` and no store at all, so there is one
+  read path rather than a transactional one beside an autocommit one. The item worried
+  that the untested path is whichever the suite does not exercise; the way to retire that
+  worry is to not have a second path. `query_init` opens a read transaction and owns it,
+  `query_init_txn` takes one the caller holds and leaves it open, and both share a private
+  `query_prepare`. `query_init`'s signature is unchanged, so every existing caller
+  compiled untouched.
+
+  Two lifetime details worth keeping. `query_destroy` ends the transaction **after**
+  `exec_destroy`, because a match iterator borrows it and every cursor has to close first.
+  And `query_init` releases the transaction on its own failure paths rather than relying
+  on the destroy that usually follows — "a failed init must not leak" should hold for a
+  caller that abandons the query too. `txn_abort` zeroes its handle, so the later destroy
+  is a no-op rather than a double end.
+
+  **The test almost tested nothing, and that is the part to remember.** The first version
+  used a single-pattern query and passed *without* the change: `match` hands its iterator a
+  transaction of its own, so one iterator opened before a commit already ignores that
+  commit. Exposing the bug needs a second read — the inner pattern of a join, which
+  reopens once per outer solution. Verified by reverting the read path to autocommit and
+  confirming three tests fail; the central one failed with exactly the smear this item
+  predicted, returning `bob carol dave`, a solution assembled from two datasets.
+
+  Two tests assert the lifetime the only way it is observable from here: LMDB's reader
+  table is 126 slots, so 300 query cycles and 300 *failed* inits with no `query_destroy`
+  at all would exhaust it if anything leaked.
+
+  **Paired work, both done.** The CI pin moved to `v0.3.0` and then to `v0.4.0`
+  (STORE-T-0042). `open_ephemeral` was adopted across the suites in its own commit: 17 of
+  24 opens, three scratch-path helper sets deleted, and the W3C harness went 11.5s → 0.44s
+  locally with the Windows job going 31m16s → 59s. Seven opens stay on `kvstore.open`,
+  and the reason is recorded at both sites — `NOLOCK` forbids holding a reader across a
+  writer, which every test in `snapshot_test.odin` does deliberately.
