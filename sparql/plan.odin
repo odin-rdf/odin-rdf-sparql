@@ -318,6 +318,56 @@ Plan_Graph_Scan :: struct {
 	slot: int,
 }
 
+// Plan_Graph_Bind is the second half of §18.5's Graph(var, P):
+//
+//     for each IRI i in D:  R := Union(R, Join(eval(D(D[i]), P), Ω(?var→i)))
+//
+// The engine evaluates the `for each` by putting `graph` — a slot of its
+// own, never the query's ?g — in the graph position of every triple
+// pattern of P and letting the index enumerate. This node is the `Join`
+// with Ω(?var→i) that follows: it binds ?g to the graph the solution was
+// found in, or drops the solution when P bound ?g to something else.
+//
+// The two slots are the whole point, and the reason is one line of the
+// specification: **?g is not in scope inside the clause.** Inside P the
+// triple patterns match a plain graph, so an occurrence of ?g there is an
+// ordinary variable bound by a subject, predicate or object position, and
+// the graph it was found in reaches it only through the join above. The
+// suite says the same thing three times — `graph-variable-scope` ("the
+// variable bound by the GRAPH operator is not in-scope inside it"),
+// `graph-optional` ("…is not used when evaluating a nested OPTIONAL") and
+// `graph-minus` ("outer GRAPH operator does not affect MINUS
+// disjointness") — and the last two are what this node was built for.
+//
+// Binding ?g in the graph position directly, which is what this engine
+// did before, is the same computation only while P is a pure pattern.
+// Where it is not:
+//
+//   - `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }` — pushed down, the
+//     OPTIONAL demands that a triple's object equal its own graph, which
+//     almost never holds, so it never matches and every left solution
+//     survives with ?g bound. Correctly, the OPTIONAL binds ?g from the
+//     *object* and the join above then drops every solution whose object
+//     is not the graph IRI. `graph-optional` pins it: four solutions
+//     become the one whose object is `<>`.
+//   - `GRAPH ?g { ?a :p :o MINUS { ?b :p :o } }` — pushed down, ?g is in
+//     both sides' domains, so they are no longer disjoint and MINUS
+//     removes what it should have left alone. `graph-minus` pins it.
+//
+// The internal slot is still in both sides' rows, and is still what
+// confines MINUS's right side to one graph, but it is not a variable: see
+// minus_excluded, which counts only query variables as shared.
+//
+// slot is pre-bound rather than post-checked when the enclosing solution
+// already bound ?g — `?d :graph ?g . GRAPH ?g { … }`. That is the same
+// join done early, and it is what keeps the graph position an index probe
+// instead of a scan of every graph followed by a filter.
+Plan_Graph_Bind :: struct {
+	slot:  int, // the query's ?g
+	graph: int, // the internal slot P's triple patterns match in
+	input: Plan,
+}
+
 // Plan_Group_Key is one GROUP BY condition: the expression that
 // computes the key, and the slot its value binds in the group's output
 // solution.
@@ -488,6 +538,7 @@ Plan :: union {
 	^Plan_Table,
 	^Plan_Materialized,
 	^Plan_Graph_Scan,
+	^Plan_Graph_Bind,
 	^Plan_Group,
 	^Plan_Order,
 }
@@ -735,57 +786,76 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		if !present {
 			return new(Plan_Nothing, b.allocator), true
 		}
-		b.graph = ref
+		if !plan_ref_is_var(ref) {
+			// GRAPH <iri> names one graph and binds nothing. §18.5 reads
+			// it as eval(D(D[iri]), P), which is the swap and no more.
+			b.graph = ref
+			return plan_build(b, v.input)
+		}
+		// GRAPH ?g is §18.5's `for each IRI i in D` and the join with
+		// Ω(?g→i) that follows it. The body matches in a slot of the
+		// engine's own so that ?g stays out of scope inside it, exactly as
+		// the specification has it, and Plan_Graph_Bind performs the join
+		// on the way out. See Plan_Graph_Bind for the two entries that
+		// pin the difference.
+		inner_slot := fresh_internal_slot(b.slots)
+		b.graph = Plan_Ref{slot = inner_slot, id = store.UNBOUND}
 		inner := plan_build(b, v.input) or_return
-		if plan_ref_is_var(ref) && !plan_matches_triples(inner) {
+		body := inner
+		if !plan_matches_triples(inner) {
+			// Nothing in the body carries the graph position — `GRAPH ?g
+			// {}`, or a body that is only a VALUES block — so there is
+			// nothing to enumerate the graphs by matching, and the clause
+			// still ranges over them. Then they are enumerated.
 			scan := new(Plan_Graph_Scan, b.allocator)
-			scan.slot = ref.slot
+			scan.slot = inner_slot
 			node := new(Plan_Join, b.allocator)
 			node.left = scan
 			node.right = scoped(b, inner)
-			return node, true
-		}
-		if plan_ref_is_var(ref) && plan_blocks(inner) {
+			body = node
+		} else if plan_blocks(inner) {
 			// A blocking operator under GRAPH ?g has to run once per
-			// graph, and putting ?g in the triple patterns' graph position
-			// does not achieve that: the pattern would match every graph
-			// and the group or the sort would collapse them into one
-			// answer. So the graphs are enumerated and the body is run
-			// against each — correlated on ?g, which is the one binding it
-			// is meant to see.
+			// graph, and having the triple patterns carry the graph
+			// position does not achieve that: the pattern would match
+			// every graph and the group or the sort would collapse them
+			// into one answer. So the graphs are enumerated and the body
+			// is run against each.
 			//
 			// It is materialized *correlated*: collected once per graph
 			// rather than once per query. Collecting is what makes the
 			// body's solutions merge into the enclosing row instead of
 			// replacing it — a subquery projects its own variables and
-			// nothing else, so its rows would otherwise arrive with ?g
-			// masked back out. The trade is deliberate and narrow: the
-			// body's own variables are correlated too, which a subquery's
-			// scoping says they should not be, and the alternative is a
-			// wrong answer for every query of this shape.
+			// nothing else, so its rows would otherwise arrive with the
+			// graph masked back out. The trade is deliberate and narrow:
+			// the body's own variables are correlated too, which a
+			// subquery's scoping says they should not be, and the
+			// alternative is a wrong answer for every query of this shape.
 			scan := new(Plan_Graph_Scan, b.allocator)
-			scan.slot = ref.slot
+			scan.slot = inner_slot
 			collected := new(Plan_Materialized, b.allocator)
 			collected.input = inner
 			collected.correlated = true
 			node := new(Plan_Join, b.allocator)
 			node.left = scan
 			node.right = collected
-			return node, true
-		}
-		if plan_ref_is_var(ref) && plan_has_path(inner) {
+			body = node
+		} else if plan_has_path(inner) {
 			// A path operator reads the active graph rather than binding
-			// it, so a body holding one needs ?g bound before it runs even
-			// when the body also has triple patterns that could have bound
-			// it themselves. See plan_has_path.
+			// it, so a body holding one needs the graph bound before it
+			// runs even when the body also has triple patterns that could
+			// have bound it themselves. See plan_has_path.
 			scan := new(Plan_Graph_Scan, b.allocator)
-			scan.slot = ref.slot
+			scan.slot = inner_slot
 			node := new(Plan_Join, b.allocator)
 			node.left = scan
 			node.right = scoped(b, inner)
-			return node, true
+			body = node
 		}
-		return inner, true
+		bind := new(Plan_Graph_Bind, b.allocator)
+		bind.slot = ref.slot
+		bind.graph = inner_slot
+		bind.input = body
+		return bind, true
 	case ^Alg_Extend:
 		for binding in v.bindings {
 			if !expr_check(b, binding.expr) {
@@ -1206,6 +1276,12 @@ plan_has_path :: proc(p: Plan) -> bool {
 		return plan_has_path(v.input)
 	case ^Plan_Materialized:
 		return plan_has_path(v.input)
+	case ^Plan_Graph_Bind:
+		// A nested GRAPH clause has bound its own graph already, and a
+		// path inside it reads that one. Whether the *enclosing* clause
+		// must enumerate is not a question its subtree can answer, so it
+		// answers no — for the same reason plan_matches_triples does.
+		return false
 	case ^Plan_Group:
 		return plan_has_path(v.input)
 	case ^Plan_Order:
@@ -1247,6 +1323,8 @@ plan_blocks :: proc(p: Plan) -> bool {
 	case ^Plan_Extend:
 		return plan_blocks(v.input)
 	case ^Plan_Materialized:
+		return plan_blocks(v.input)
+	case ^Plan_Graph_Bind:
 		return plan_blocks(v.input)
 	case ^Plan_Union:
 		return plan_blocks(v.left) || plan_blocks(v.right)
@@ -1391,6 +1469,12 @@ probe_safe_under :: proc(b: ^Plan_Builder, p: Plan, bindable: []bool) -> bool {
 			}
 		}
 		return probe_safe_under(b, v.input, bindable)
+	case ^Plan_Graph_Bind:
+		// Safe exactly when its body is. Pre-binding ?g is the one case
+		// the operator is glad to see: it hands the binding down to the
+		// graph position instead of checking it afterwards, which is the
+		// join with Ω(?g→i) done early rather than late.
+		return probe_safe_under(b, v.input, bindable)
 	case ^Plan_Project,
 	     ^Plan_Distinct,
 	     ^Plan_Slice,
@@ -1433,6 +1517,12 @@ plan_matches_triples :: proc(p: Plan) -> bool {
 		return plan_matches_triples(v.input)
 	case ^Plan_Materialized:
 		return plan_matches_triples(v.input)
+	case ^Plan_Graph_Bind:
+		// The triple patterns under a GRAPH clause match in *its* graph
+		// slot, so they can carry no enclosing GRAPH variable however many
+		// of them there are. `GRAPH ?g { GRAPH ?h { ?s ?p ?o } }` has to
+		// enumerate ?g's graphs; nothing below binds it.
+		return false
 	case ^Plan_Group:
 		return plan_matches_triples(v.input)
 	case ^Plan_Order:
@@ -1481,6 +1571,11 @@ plan_bindable :: proc(p: Plan, out: []bool) {
 			}
 		}
 	case ^Plan_Graph_Scan:
+		if v.slot >= 0 && v.slot < len(out) {
+			out[v.slot] = true
+		}
+	case ^Plan_Graph_Bind:
+		plan_bindable(v.input, out)
 		if v.slot >= 0 && v.slot < len(out) {
 			out[v.slot] = true
 		}
@@ -1928,6 +2023,9 @@ plan_destroy :: proc(p: Plan, allocator := context.allocator) {
 		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	case ^Plan_Graph_Scan:
+		free(v, allocator)
+	case ^Plan_Graph_Bind:
+		plan_destroy(v.input, allocator)
 		free(v, allocator)
 	case ^Plan_Group:
 		delete(v.keys)

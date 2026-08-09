@@ -115,30 +115,43 @@ Expr_Context :: struct {
 // exists to prevent.
 //
 // So the engine names computed terms itself, in a space the store
-// guarantees it will never assign: the Sentinel kind, whose counters 0,
-// 1, and 2 are DEFAULT_GRAPH, WILDCARD, and UNBOUND, and whose counters
-// from 3 up are unused. A synthetic ID is an index into the query's own
-// table of computed terms, and it is resolved before the store is asked.
+// guarantees it will never assign: the Sentinel kind's counters at and
+// above store.SENTINEL_CONSUMER_FIRST. A synthetic ID is an index into
+// the query's own table of computed terms, and it is resolved before the
+// store is asked.
 //
-// This works, and it is also evidence: an engine that has to invent a
-// term space because the store has no query-local one is describing a
-// gap in the interface. Recorded for SPARQL-T-0019.
-SYNTHETIC_FIRST :: 3
+// The base is the store's constant and never a literal. This engine used
+// to start at counter 3 — "the first one the store has not taken" read
+// off the three sentinels that existed — and STORE-T-0017 then took
+// counter 3 for NAMED_GRAPHS. The two spaces met, the first computed term
+// of every query became the named-graph wildcard, and the backend
+// asserted. That is exactly the collision STORE-T-0021 reserved this
+// space against; the reserve has been in the store since v0.5.0, and
+// naming it is what keeps the next store sentinel from doing it again.
+//
+// The whole arrangement is also evidence: an engine that has to invent a
+// term space because the store has no query-local one is describing a gap
+// in the interface. Recorded for SPARQL-T-0019.
+SYNTHETIC_FIRST :: store.SENTINEL_CONSUMER_FIRST
 
 // synthetic_id names the index-th computed term; is_synthetic recognizes
 // one, and synthetic_index reads the index back out. A synthetic ID is
 // valid only inside the query that made it and must never reach a match
 // pattern — plan building asserts on one that does.
+//
+// The arithmetic is on the ID rather than on the counter: the counter is
+// the low bits, so adding an index to the base ID walks the counter and
+// leaves the Sentinel tag alone.
 synthetic_id :: proc(index: int) -> store.Term_ID {
-	return store.make_id(.Sentinel, u64(SYNTHETIC_FIRST + index))
+	return SYNTHETIC_FIRST + store.Term_ID(index)
 }
 
 is_synthetic :: proc(id: store.Term_ID) -> bool {
-	return store.id_kind(id) == .Sentinel && store.id_counter(id) >= SYNTHETIC_FIRST
+	return store.id_kind(id) == .Sentinel && id >= SYNTHETIC_FIRST
 }
 
 synthetic_index :: proc(id: store.Term_ID) -> int {
-	return int(store.id_counter(id)) - SYNTHETIC_FIRST
+	return int(id - SYNTHETIC_FIRST)
 }
 
 // expr_context_init prepares the evaluation context a plan's expressions

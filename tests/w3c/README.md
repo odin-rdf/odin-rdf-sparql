@@ -146,8 +146,9 @@ floor for every vendored evaluation directory, enabled or not, is that
 its manifest reads, its expectations parse (556 across four formats), its
 data loads, and its queries parse and translate.
 
-Enabled for evaluation so far, each fully green against **both** backends
-(memstore and kvstore) at both Term_ID widths:
+Enabled for evaluation so far, each fully green against kvstore at both
+Term_ID widths (it read "both backends, memstore and kvstore" until
+odin-rdf-store retired the in-memory one — STORE-A-0006):
 
 | Directory | Enabled by | Tests |
 |---|---|---|
@@ -186,9 +187,13 @@ Enabled for evaluation so far, each fully green against **both** backends
 | `sparql12-expression/` | SPARQL-T-0018 | 5 |
 | `sparql12-grouping/` | SPARQL-T-0018 | 2 |
 | `sparql12-rdf11/` | SPARQL-T-0018 | 3 |
+| `sparql10-graph/` | SPARQL-T-0020 | 17 |
+| `sparql11-negation/` | SPARQL-T-0020 | 12 |
 
-That is **483 evaluation tests across thirty-five directories**, each run
-against both backends at both Term_ID widths.
+That is **512 evaluation tests across thirty-seven directories**, each run
+at both Term_ID widths. (It read "both backends" until odin-rdf-store
+retired its in-memory one — STORE-A-0006 — leaving the width matrix as the
+whole of the matrix.)
 
 ## What DESCRIBE returns
 
@@ -198,7 +203,7 @@ resources, and which triples that is nobody's business but the engine's.
 So no W3C evaluation directory pins DESCRIBE output. That is measured
 rather than assumed: the vendored corpus contains no `qt:QueryDescribe`
 entry and no query whose form is DESCRIBE at all. The form is therefore
-covered by `sparql/memstore/forms_test.odin` instead, which is the only
+covered by `sparql/kvstore/forms_test.odin` instead, which is the only
 place its behaviour is stated.
 
 This engine answers a DESCRIBE with **every triple of the query's default
@@ -209,37 +214,41 @@ nothing rather than failing. It is the smallest answer that is a
 description, and it is stable — which is what a caller can build on when
 the specification promises nothing.
 
-## The five that are not enabled
+## The three that are not enabled
 
-Forty evaluation directories are vendored and thirty-five are enabled.
-Four of the other five fail exactly one entry; the fifth fails ten, all
-for one reason. Across the corpus of 556 evaluable entries, 542 pass —
-97.5%. Each failure is recorded here rather than skipped, with what it
-is waiting for. Re-measured 2026-08-06 (see the correction below).
+Forty evaluation directories are vendored and thirty-seven are enabled.
+Two of the other three fail exactly one entry; the third fails ten, all
+for one reason. Across the corpus of 556 evaluable entries, 544 pass —
+97.8%. Each failure is recorded here rather than skipped, with what it
+is waiting for. Re-measured 2026-08-09; the 2026-08-06 correction below
+still stands.
 
 | Directory | | Entry | Waiting on |
 |---|---|---|---|
-| `sparql10-graph/` | 16/17 | `graph-optional` | SPARQL-T-0020 |
-| `sparql11-negation/` | 11/12 | `graph-minus` | SPARQL-T-0020 |
 | `sparql10-expr-builtin/` | 24/25 | `dawg-lang-3` | SPARQL-T-0021 |
 | `sparql10-i18n/` | 4/5 | `normalization-2` | SPARQL-T-0021 |
 | `sparql11-subquery/` | 4/14 | `subquery01`–`subquery10` | RDF/XML in odin-rdf-parser |
 
-Those five directories hold **59 passing entries** that no test asserts,
+Those three directories hold **32 passing entries** that no test asserts,
 because enablement is per-directory: a directory with one known failure
-is dark in its entirety. Enabling all five with pinned counts would take
-asserted coverage from 483 to 542 without fixing anything.
+is dark in its entirety. Enabling all three with pinned counts would take
+asserted coverage from 512 to 544 without fixing anything.
 
-**The two that are this engine's semantics** are `graph-optional` ("the
-variable bound by the GRAPH operator is not used when evaluating a
-nested OPTIONAL") and `graph-minus` ("outer GRAPH operator does not
-affect MINUS disjointness"). Both are about what a GRAPH clause does to
-an operator inside it that sees more than one solution at a time —
-SPARQL-T-0015 fixed that shape for the blocking operators and the fix
-does not transfer to either of these. SPARQL-T-0013 recorded that the
-reading of §18 producing the DAWG's `graph-optional` answer could not be
-established from the spec text with confidence, and declined to fit the
-code to the expected result; that judgement still stands.
+**It was five directories until 2026-08-09**, when SPARQL-T-0020 settled
+the last two failures that were this engine's own semantics and
+`sparql10-graph` and `sparql11-negation` joined the enabled list at 17 and
+12. Both entries — `graph-optional` ("the variable bound by the GRAPH
+operator is not used when evaluating a nested OPTIONAL") and `graph-minus`
+("outer GRAPH operator does not affect MINUS disjointness") — turned out
+to be one reading of §18.5 and not two problems: `Graph(?g, P)` evaluates
+P against one graph at a time and joins `?g` on afterwards, so `?g` is not
+in scope inside the clause and an operator in there that sees more than
+one solution at a time must not have it in its domain. SPARQL-T-0013 had
+declined to fit the code to the DAWG's `graph-optional` answer without a
+reading it could defend; the reading is `graph-variable-scope`'s own
+comment, which is in this corpus and says "the variable bound by the GRAPH
+operator is not in-scope inside it". See `Plan_Graph_Bind` in
+`sparql/plan.odin`.
 
 **Two are term identity, and they are the family's question rather than
 this engine's.** `dawg-lang-3` asks for `?x :p "string"@EN` against

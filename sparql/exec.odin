@@ -71,6 +71,7 @@ Exec_Kind :: enum {
 	Table,
 	Materialized,
 	Graph_Scan,
+	Graph_Bind,
 	Group,
 	Order,
 }
@@ -156,9 +157,16 @@ Exec_Node :: struct($It: typeid) {
 	bind_slots: []int,
 	bind_exprs: []Expr,
 
-	// Graph_Scan
+	// Graph_Scan, and Graph_Bind's internal graph slot
 	graph_slot: int,
 	graph_seen: map[store.Term_ID]bool,
+
+	// Graph_Bind: the query's ?g, and whatever it was bound to when the
+	// operator was entered. The second is not the same as reading the slot
+	// per solution — this operator writes that slot, so by the second
+	// solution the row would be reporting the operator's own last answer.
+	graph_var:  int,
+	graph_outer: store.Term_ID,
 
 	// Group and Order, the blocking operators. Both fill `rows` with the
 	// answers they will hand out and then replay them, so they share the
@@ -589,6 +597,12 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.bound_count = make([]int, 1, e.allocator)
 		bind_bound_slots(e, &node, 1, 4)
 		node.set_slots = make([dynamic]int, e.allocator)
+	case ^Plan_Graph_Bind:
+		node.kind = .Graph_Bind
+		node.graph_slot = v.graph
+		node.graph_var = v.slot
+		node.input = build_node(e, v.input)
+		node.set_slots = make([dynamic]int, e.allocator)
 	}
 	node.subtree_start = start
 	append(&e.nodes, node)
@@ -768,6 +782,21 @@ start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 		if !node.recollect || node.collected {
 			return -1
 		}
+	case .Graph_Bind:
+		// Entering the operator hands the enclosing ?g, if there is one,
+		// down to the graph position the body matches in: §18.5's join
+		// with Ω(?g→i) done before the scan instead of after it, which is
+		// what keeps `?d :graph ?g . GRAPH ?g { … }` an index probe.
+		// Nothing is pushed down when ?g is unbound, and then the body
+		// enumerates and the join happens on the way out.
+		if !node.started {
+			node.started = true
+			node.graph_outer = e.work[node.graph_var]
+			e.work[node.graph_slot] = node.graph_outer
+		}
+		// Whatever the last solution bound ?g to is this operator's own
+		// doing, and the body about to run must not see it.
+		release_set_slots(e, node)
 	case .Group, .Order:
 		// A blocking operator is an input-driven node until its input runs
 		// out and a source afterwards. Collecting lazily, here, rather
@@ -1140,6 +1169,38 @@ consume :: proc(
 			return nil, false, node.input
 		}
 		return row, true, -1
+
+	case .Graph_Bind:
+		// §18.5's Join(eval(D(D[i]), P), Ω(?g→i)), one solution at a time.
+		if !have {
+			return nil, false, -1
+		}
+		if node.graph_outer != store.UNBOUND {
+			// ?g came in bound, so the graph was pushed down and every
+			// solution the body produced is already in it.
+			return row, true, -1
+		}
+		graph := row[node.graph_slot]
+		found := row[node.graph_var]
+		if found == store.UNBOUND {
+			// The body did not bind ?g, so the join binds it. A body that
+			// bound no graph either — a solution reached without matching
+			// a triple — leaves it unbound, which is what writing UNBOUND
+			// says.
+			row[node.graph_var] = graph
+			if graph != store.UNBOUND {
+				e.work[node.graph_var] = graph
+				append(&node.set_slots, node.graph_var)
+			}
+			return row, true, -1
+		}
+		if graph != store.UNBOUND && found != graph {
+			// The body bound ?g from a subject, predicate or object, and
+			// it is not the graph the solution was found in. Ω(?g→i) and
+			// the solution are incompatible, so there is no join.
+			return nil, false, node.input
+		}
+		return row, true, -1
 	}
 	return row, have, -1
 }
@@ -1443,18 +1504,33 @@ join_step :: proc(
 // variable. The shared-variable requirement is what makes MINUS differ
 // from NOT EXISTS — with disjoint domains every solution is compatible
 // with every other, and MINUS would remove everything.
+//
+// Compatibility is over every slot; sharing is over the query's
+// variables only. The distinction is not pedantry: a MINUS inside `GRAPH
+// ?g { … }` has an internal slot bound on both sides naming the graph the
+// two were evaluated in, and it must go on restricting the right side to
+// that graph — that is the compatibility half — without ever *being* the
+// shared variable that licenses the removal. `graph-minus` pins exactly
+// that: `{ ?a :p :o MINUS { ?b :p :o } }` has disjoint domains and so
+// removes nothing, and the enclosing GRAPH does not change that. The
+// engine's other invented slots — path endpoints, triple-term shapes,
+// pattern blank nodes — are none of them in a solution's domain either,
+// and are excluded here for the same reason.
 @(private = "file")
 minus_excluded :: proc(e: ^Exec($D, $It), right: int, row: []store.Term_ID) -> bool {
+	internal := e.expr.slots.internal[:]
 	for stored in e.nodes[right].rows {
 		shared, compatible := false, true
 		for value, slot in stored {
 			if value == store.UNBOUND || row[slot] == store.UNBOUND {
 				continue
 			}
-			shared = true
 			if value != row[slot] {
 				compatible = false
 				break
+			}
+			if !internal[slot] {
+				shared = true
 			}
 		}
 		if shared && compatible {

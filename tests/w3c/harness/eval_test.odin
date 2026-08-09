@@ -31,7 +31,11 @@ import "core:testing"
 // tests that pin alternation and sequence as bags against the repeats as
 // sets. SPARQL-T-0017 adds the two CONSTRUCT directories, whose
 // expectations are RDF graphs compared up to blank-node renaming rather
-// than solution sequences. The rest arrive as their operators do.
+// than solution sequences. SPARQL-T-0020 adds the last two the engine's
+// own semantics held back — sparql10-graph and sparql11-negation, one
+// entry short each, and the same entry twice: what a GRAPH clause does to
+// an operator inside it that sees more than one solution at a time. The
+// rest arrive as their operators do.
 //
 // sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
 // of its 25 entries pass, and the one that does not — dawg-lang-3,
@@ -222,6 +226,22 @@ test_eval_sparql12_grouping_kvstore :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql12_rdf11_kvstore :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql12-rdf11", .Kvstore)
+}
+
+// The two GRAPH-scoping directories (SPARQL-T-0020). Each was one entry
+// short of green, and both entries were the same reading of §18.5: the
+// variable a GRAPH clause binds is not in scope inside the clause, so
+// `Graph(?g, P)` evaluates P against one graph at a time and joins ?g on
+// afterwards. Whichever of the two is read first, the other stops being
+// a surprise — see Plan_Graph_Bind.
+@(test)
+test_eval_sparql10_graph_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-graph", .Kvstore)
+}
+
+@(test)
+test_eval_sparql11_negation_kvstore :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-negation", .Kvstore)
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,
