@@ -3,16 +3,16 @@ id: synthetic-term-ids-collided-with
 level: task
 title: "Synthetic term IDs collided with the store's new NAMED_GRAPHS sentinel"
 short_code: "SPARQL-T-0027"
-created_at: 2026-08-09T11:55:00.000000+00:00
-updated_at: 2026-08-09T11:55:00.000000+00:00
+created_at: 2026-08-09T11:55:00+00:00
+updated_at: 2026-08-09T12:01:58.190860+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#bug"
+  - "#phase/completed"
 
 
 exit_criteria_met: true
@@ -116,3 +116,18 @@ matching the wrong thing."
   take a baseline measurement until the suite ran at all. Filed after the
   fact so the cause is on the record rather than buried in another task's
   diff; the fix is in that task's commit.
+
+- **2026-08-09 — Completed, and the fix verified in both directions.**
+  `store.SENTINEL_CONSUMER_FIRST` is counter 8 in `v0.5.0` and in the
+  store's `main` alike, so the base is the same constant either way. Both
+  checkouts were built and run: every package, both `Term_ID` widths,
+  against a `v0.5.0` worktree and against `main`. Green in all four
+  combinations.
+
+  That measurement was taken to settle a different question — whether this
+  repository could be pushed on its current pin — and it answers this one
+  too. It is worth stating because the old `SYNTHETIC_FIRST :: 3` also
+  passed against `v0.5.0`: the bug was invisible from the pinned side,
+  which is exactly the blindness the Risk Considerations section names, and
+  the reason the fix has to be checked against the ref CI uses rather than
+  only against the checkout that exposed the bug.
