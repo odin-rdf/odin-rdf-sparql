@@ -4,15 +4,15 @@ level: task
 title: "GRAPH scoping for OPTIONAL and MINUS: the last two engine-semantics entries"
 short_code: "SPARQL-T-0020"
 created_at: 2026-08-05T22:47:26.063058+00:00
-updated_at: 2026-08-05T22:47:26.063058+00:00
+updated_at: 2026-08-09T11:55:37.191040+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#feature"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
