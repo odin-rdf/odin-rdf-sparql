@@ -237,6 +237,29 @@ semantics have to come first.
   guessing. Filed as SPARQL-T-0027 for the record, fixed here because
   nothing in this task was measurable until it was.
 
-  **Not pushed.** `main` already carries SPARQL-T-0026, which consumes
-  `store.NAMED_GRAPHS` — unreleased in odin-rdf-store — so this repository
-  cannot be released or its CI pin bumped until v0.6.0 exists there.
+  **Not pushed**, on instruction.
+
+- **2026-08-09 — Correction to the paragraph above.** It read: "`main`
+  already carries SPARQL-T-0026, which consumes `store.NAMED_GRAPHS` —
+  unreleased in odin-rdf-store — so this repository cannot be released or
+  its CI pin bumped until v0.6.0 exists there." That is wrong in its
+  premise. SPARQL-T-0026's commit (`e189f59`) added one file, its own
+  backlog item; it changed no source, and its five acceptance criteria are
+  all open. `store.NAMED_GRAPHS` appears nowhere in this repository outside
+  a comment.
+
+  Measured rather than reasoned about, after the error was caught: every
+  package builds and every test passes against a `v0.5.0` checkout of
+  odin-rdf-store at both `Term_ID` widths — the same result as against the
+  store's `main`. So CI is green on the pin it has, and nothing in this
+  repository is waiting on a store release.
+
+  The real dependency is narrower and is SPARQL-T-0027's: the *sibling
+  checkout* used for local development is the store's `main`, and against
+  that the suite aborted on the sentinel collision until `SYNTHETIC_FIRST`
+  was moved to `store.SENTINEL_CONSUMER_FIRST`. Both directions now work,
+  which is what makes the pin bump — when v0.6.0 arrives for
+  SPARQL-T-0026 — an ordinary change rather than a rescue.
+
+  The commit message of `fef6bf7` carries the same wrong claim in its last
+  paragraph and is left as written; this is the correction.
