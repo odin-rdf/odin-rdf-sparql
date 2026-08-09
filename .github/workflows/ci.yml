@@ -69,6 +69,21 @@ jobs:
       # is ephemeral, but it is the reason the bump is a minor rather than a
       # patch.
       #
+      # **`v0.6.0` is the pin and is *not* a floor** — the distinction matters
+      # here, because everything above this line is a floor and this is not.
+      # Nothing in this repository needs `v0.6.0` to compile: it is purely
+      # additive over `v0.5.0` (`estimate`, `match_order`/`match_orderable`/
+      # `match_ordered`, `store.NAMED_GRAPHS`, `graphs`/`nodes`), the format
+      # version is unchanged at 2, and no signature moved. The pin is here so
+      # that this repository is what proves the store's release safe for its
+      # consumers, which is the only thing that can — the store's own CI cannot
+      # tell whether a capability it added broke somebody downstream.
+      #
+      # It becomes a floor the moment SPARQL-T-0026, -0028 or -0029 lands, each
+      # of which names something that does not exist before `v0.6.0`. Until
+      # then, dropping back to `v0.5.0` would still build; it would simply stop
+      # testing the thing this pin exists to test.
+      #
       # The prior pin's reasoning is kept because it is still true and still
       # load-bearing: `v0.4.0` retries `open_ephemeral`'s reservation, which
       # this repository leans on harder than any other in the family — roughly
@@ -90,7 +105,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-store
-          ref: v0.5.0
+          ref: v0.6.0
           path: odin-rdf-store
 
       - uses: laytan/setup-odin@v2
