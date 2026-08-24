@@ -1,12 +1,12 @@
 ---
 id: bench-the-first-measurement-this
 level: task
-title: "bench/: the first measurement this repository has ever had, and the GRAPH case"
+title: "bench/ rebuilt against record: the same workload, and whether the read counts held"
 short_code: "SPARQL-T-0036"
 created_at: 2026-08-24T20:42:43.053786+00:00
 updated_at: 2026-08-24T20:42:43.053786+00:00
 parent: SPARQL-I-0003
-blocked_by: ["SPARQL-T-0033"]
+blocked_by: ["SPARQL-T-0033", "SPARQL-T-0040"]
 archived: false
 
 tags:
@@ -17,7 +17,7 @@ tags:
 exit_criteria_met: false
 initiative_id: SPARQL-I-0003
 ---
-# bench/: the first measurement this repository has ever had, and the GRAPH case
+# bench/ rebuilt against record: the same workload, and whether the read counts held
 
 ## Parent Initiative
 
@@ -25,54 +25,62 @@ initiative_id: SPARQL-I-0003
 
 ## Objective
 
-Build the measurement this repository has never had. The `Makefile`'s
-`bench` and `build-bench` targets are already written and guard on a
-`bench/` directory that does not exist — so every performance claim this
-engine has ever made has been an argument rather than a number.
+Rebuild SPARQL-T-0040's bench against record — same workload, same query
+mix, same pinned counts — and answer the question the two-step exists
+for: **did the read counts hold?**
 
-Two things make it due now (owner decision 4). The port has **one known
-regression** — `RECORD-A-0004`'s G-residual permutations turn
-`GRAPH <g> { … }` from a prefix range into a scan — and there is no way
-to size it or to file honest evidence with record without a bench. And
-SPARQL-T-0037 and -T-0038 are about to change *what the engine decides*,
-which is the one kind of change a green suite cannot detect.
+odin-rdf-shacl's port found that its did, to the integer, across three
+backends; its own acceptance criterion had predicted they would not and
+the measurement reversed it. If sparql's hold too, the port moved cost
+and not behaviour, which is the strongest statement this initiative can
+make about its own correctness. If they do not, the engine's control
+flow changed when it was supposed only to change store — the most
+interesting result available here, and one that sends work back to
+SPARQL-T-0031 rather than forward.
+
+It also produces the record-side half of the initiative's §12 evidence:
+`RECORD-A-0004`'s G-residual permutations turn `GRAPH <g> { … }` from a
+prefix range into a scan, and T-0040 measured what that cost on the
+store.
 
 ## Acceptance Criteria
 
-- [ ] **A `bench/` package** that builds and runs under the existing
-      `make bench` / `make build-bench` targets with `-o:speed
-      -no-bounds-check`, with no changes to those targets beyond what the
-      collections require.
-- [ ] **A fixture corpus larger than the W3C suites**, generated rather
-      than vendored, big enough that a scan and a prefix range are
-      distinguishable — the suites are far too small to show anything and
-      that is precisely why nothing has been measured. Scale it to the
-      deployment shape the vision states (~200 processes per machine,
-      each embedding a store), not to a server.
-- [ ] **A query mix covering the operator classes the port touches**: BGP
-      joins of two and three patterns, `GRAPH`, `OPTIONAL`, aggregation
-      with `GROUP BY`, `ORDER BY` with and without `LIMIT`, and a
-      property path. Each named, each timed, each reported as a line.
-- [ ] **The `GRAPH` case measured explicitly and separately**, at more
-      than one ratio of default-graph size to named-graph size — the cost
-      only bites when the default graph is large relative to the named
-      ones, which is exactly the claim that needs numbers rather than
-      arithmetic.
-- [ ] **Read counting, behind a build-time switch.** Follow
-      odin-rdf-shacl's `SHACL_COUNT_READS` precedent: `make bench` becomes
-      two builds, one timing and one instrumented, because counting in the
-      timed build measures the counter. The counts are what separate "the
-      backend moved" from "the engine changed its mind" — odin-rdf-shacl's
-      port found read counts survived to the integer while timings moved
-      fourfold, and that is the single most useful thing its bench told
-      it.
-- [ ] **Baselines recorded in this task's Status**, with the machine, the
-      record version and the fixture size stated. They are the first
-      numbers this repository has; they are *not* comparable to anything
-      from odin-rdf-store, and the task must say so rather than inviting
-      the comparison.
-- [ ] **`bench/` is in `SRC_DIRS`/`make check`** so it cannot rot into
-      something that no longer compiles.
+- [ ] **The same workload, ported.** SPARQL-T-0040's query mix, fixture
+      generator shape, reporting and pinned counts carry over unchanged;
+      only the store setup is rewritten — `open_ephemeral` + `load_*`
+      becomes `Mem_FS` + `store_open` + `ingest` + `apply`. A workload
+      that drifts in the rebuild answers a different question and makes
+      the comparison meaningless.
+- [ ] **The read counts are compared against T-0040's pins, and the
+      result is reported either way.** This is the task's headline.
+      Equal counts mean the engine asks record exactly the questions it
+      asked LMDB — the port moved cost, not behaviour. Unequal counts
+      mean the control flow changed when only the store was supposed to,
+      and the finding goes back to SPARQL-T-0031 rather than forward.
+      **Do not write the verdict before the run**: shacl's equivalent
+      criterion predicted the counts would be incomparable, and its
+      Status records the author taking that prose back out after the
+      first run.
+- [ ] **Read counting rehomed.** With the parapoly seam collapsed there
+      is no adapter struct to wrap, so the counter goes around the
+      engine's calls to `snapshot_match` / `range_iter` / `scan_next` /
+      `snapshot_resolve` / `snapshot_term`. `make bench` stays two
+      builds — timed and instrumented — because counting inside the
+      timed build measures the counter.
+- [ ] **The `GRAPH` case re-measured at the same ratios**, giving the
+      record-side half of the initiative's §12 evidence. T-0040 measured
+      what a graph-first index cost; this measures what
+      `RECORD-A-0004`'s G-residual permutations cost, and the pair is
+      what SPARQL-T-0039 files with record. **Neither number alone is
+      evidence.**
+- [ ] **Timings reported as context, not as a target.** LMDB against a
+      resident projection is not a like-for-like comparison and the task
+      says so. shacl's moved roughly fourfold on validate; expect
+      movement here and do not read it as a result.
+- [ ] **New baselines recorded in this task's Status**, stating machine,
+      record version and fixture size — and noting that the width matrix
+      is gone, so unlike T-0040's these are single-configuration.
+- [ ] **`bench/` stays in `SRC_DIRS`** and `make check` vets both builds.
 
 ## Implementation Notes
 
@@ -85,11 +93,16 @@ construction will not dominate the run.
 
 **Where to hook the read counter.** With the parapoly seam collapsed
 (SPARQL-T-0031) there is no seam struct to wrap, so the counter goes
-around record's read calls in the engine — one place if the engine's
-calls to `snapshot_match`/`range_iter`/`scan_next` are funnelled, which
-is worth arranging in SPARQL-T-0031 if it is cheap. odin-rdf-shacl notes
-this exact consequence of one-package layout; steal the answer rather
-than rediscovering it.
+around record's read calls in the engine. **Funnelling those calls
+through one place is worth arranging during SPARQL-T-0031**, while that
+file is open anyway — it is much cheaper than retrofitting a counter into
+scattered direct calls afterwards. odin-rdf-shacl hit this exact
+consequence of the one-package layout; steal the answer rather than
+rediscovering it.
+
+**Read SPARQL-T-0040's Status before starting.** It carries the pins this
+task is measured against, the fixture parameters, and whatever its own
+run taught about the workload.
 
 **Report shape**: one line per case, name + time + reads, stable enough
 to diff between runs. Not a framework.
@@ -97,16 +110,18 @@ to diff between runs. Not a framework.
 ### Dependencies
 
 Blocked by SPARQL-T-0033 — the engine must be correct before it is worth
-timing. Deliberately *before* SPARQL-T-0037 and -T-0038, so those two have
-a baseline to move rather than a claim to assert.
+timing — and by SPARQL-T-0040, whose pins are the thing being compared
+against. Deliberately *before* SPARQL-T-0037 and -T-0038, so those two
+have a measured baseline to move rather than a claim to assert.
 
 ### Risk Considerations
 
-**A bench that measures the wrong thing is worse than no bench**, because
-it launders a guess into a number. The specific trap here: a corpus small
-enough to fit in cache makes the `GRAPH` scan look free, and a corpus
-built with one enormous named graph makes it look catastrophic. Vary the
-ratio and report the shape, not a single figure.
+**The workload drifting during the rebuild is this task's specific
+risk.** Every criterion above rests on the two runs asking the same
+question; a fixture generated slightly differently, or a query quietly
+adjusted to suit record, turns the comparison into two unrelated numbers
+that happen to sit in one table. If something genuinely cannot be
+reproduced, say so per case rather than adjusting the whole workload.
 
 **Scope discipline.** This task exists to make three specific claims
 checkable — the GRAPH regression, the "no result changes" of T-0037/38,

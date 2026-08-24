@@ -6,7 +6,7 @@ short_code: "SPARQL-T-0031"
 created_at: 2026-08-24T20:42:33.614314+00:00
 updated_at: 2026-08-24T20:42:33.614314+00:00
 parent: SPARQL-I-0003
-blocked_by: ["SPARQL-T-0030"]
+blocked_by: ["SPARQL-T-0030", "SPARQL-T-0040"]
 archived: false
 
 tags:
@@ -102,12 +102,20 @@ back in SPARQL-T-0032; between the two this repository does not run.
       `Session.err`, `query_error` and every `err != nil` branch the
       kvstore adapters carry go. An empty answer is the answer.
       odin-rdf-shacl deleted the same machinery and found no consumer.
-- [ ] **A query is still one snapshot.** `query_init` takes a
-      `record.Snapshot` and holds it for the `Query`'s life;
-      `query_destroy` releases it. `query_init_txn`'s role — running
-      inside a caller's handle — is served by the caller passing its own
-      snapshot, so the two constructors collapse into one unless the
-      design finds a reason they should not.
+- [ ] **A query is still one snapshot, and there is now exactly one
+      constructor** — decided by the owner, 2026-08-24.
+      `query_init(q, algebra, snapshot, base)` takes a
+      `record.Snapshot`, holds it for the `Query`'s life, and
+      `query_destroy` releases it. **`query_init_txn` is deleted.** The
+      distinction the two drew was who owns the handle, and on record
+      that distinction collapses: a snapshot is a snapshot whether it
+      came from `store_latest`, from `store_at`, or from a `Validator`'s
+      candidate at the new epoch. The consumer that motivated
+      `query_init_txn` — one judging whether a candidate may join the
+      dataset — is served by record's `Validator` hook handing it a
+      candidate snapshot, so SHACL-SPARQL querying a candidate becomes
+      the ordinary call. A branch the suite cannot exercise is a branch
+      that rots.
 - [ ] **One package.** `sparql/kvstore` deleted outright (all 4344
       lines). `sparql/srj` and `sparql/srx` stay separate — they are
       output formats, never instantiations.
@@ -135,6 +143,26 @@ hand-built site list for 449 references over 52 names.
 expect one long red period. Take `exec.odin` before `plan.odin`: the plan
 builder's shape follows from what the executor needs, not the reverse.
 
+**The quad representation is decided: keep `[4]Term_ID`, copy at the
+scan boundary** (owner, 2026-08-24). record yields a `Fact` with named
+`s, p, o, g` fields plus the epoch interval; the engine indexes quads
+positionally at ten sites, and **four of those are dynamic** — `quad[i]`
+inside `unify_quad`'s per-position loop, the hottest code in the
+executor. Copying the four components into the engine's own
+`[4]Term_ID` at the scan boundary costs one 16-byte copy per matched
+fact and leaves that loop untouched, which is much the smallest diff
+through the riskiest task. Revisit with numbers afterwards —
+SPARQL-T-0040's baseline and SPARQL-T-0036's re-measurement will show
+whether the copy is visible at all.
+
+**Explicitly rejected: reinterpreting the layout.** record's `Quad` is
+`{s, p, o, g: Term_ID}` and is layout-identical to `[4]Term_ID` given
+`QUAD_S..QUAD_G` are `0..3`, so a transmute would be free and would
+change no engine code. It is rejected because it couples this engine to
+a sibling's struct field order across a repository boundary: a reorder
+in record would compile cleanly here and corrupt every result. The
+copy is the price of not making that bet.
+
 **What the read path becomes**, per the record handoff: `0` is unbound in
 a `Pattern`; `Filter{origin = .Any}` — origin must be stated, and
 `Origin(0)` is refused by an assert in `range_iter`; `snapshot_match`
@@ -155,7 +183,10 @@ old ownership code is right just because it looks right.
 ### Dependencies
 
 Blocked by SPARQL-T-0030 (the collection must resolve before anything can
-compile against record).
+compile against record) **and by SPARQL-T-0040** — once this task
+collapses the seam, the easy read-instrumentation point is gone and the
+"before" numbers can no longer be taken. Taking them is the whole reason
+T-0040 runs first.
 
 ### Risk Considerations
 
@@ -171,10 +202,11 @@ the W3C corpus is the only thing that will catch it — one task later.
 Auditing those sites by hand *now*, with comments, is cheaper than
 finding it through a failing `sparql10-graph` entry.
 
-**The `Encoded_Quad` question is the likeliest performance regression
-introduced by this task rather than by the backend**, and there is no
-bench until SPARQL-T-0036 to catch it. Leave a note in that task if a
-choice was made on judgement rather than measurement.
+**The scan-boundary copy is the likeliest performance regression
+introduced by this task rather than by the backend.** It is a decided
+trade rather than an open one, but SPARQL-T-0040's pinned read counts and
+timings are the baseline that will show it: if the port's timings move
+more than the backend change explains, this copy is the first suspect.
 
 ## Status Updates
 

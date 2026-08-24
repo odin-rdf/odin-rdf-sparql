@@ -280,7 +280,15 @@ question, small: whether `sparql/srj` and `sparql/srx` stay separate packages
 (lean: yes — they are output formats, not instantiations, and were never part of
 the seam).
 
-**4. The session over a snapshot, and the sentinel remapping.** A record read
+**4. The session over a snapshot, one constructor, and the sentinel remapping.**
+**Decided 2026-08-24: there is exactly one constructor,
+`query_init(q, algebra, snapshot, base)`, and `query_init_txn` is deleted.** The
+distinction the two drew was who owns the handle, and record collapses it — a
+snapshot is a snapshot whether it came from `store_latest`, `store_at`, or a
+`Validator`'s candidate at the new epoch. The consumer that motivated
+`query_init_txn` (one judging whether a candidate may join the dataset) is served
+by record's `Validator` hook handing it exactly that snapshot, so SHACL-SPARQL
+querying a candidate is the ordinary call rather than a second entry point. A record read
 handle *is* a snapshot (acquire, use, release; `store_latest`/`store_at`), so
 `Session`'s two fields both go: the transaction becomes the snapshot itself, and
 the error slot becomes nothing — **a read on record cannot fail**, the
@@ -414,18 +422,32 @@ result changes.** 512/512 before and after. A changed answer means the
 reordering is not order-independent, which is an evaluator bug rather than a plan
 one.
 
-**10. `bench/` (owner decision 4).** There is none today; the `Makefile`'s
-`bench` and `build-bench` targets are already written and guard on the directory
-existing. Scope it to what makes this initiative's claims checkable rather than
-to a benchmark suite: a small fixture corpus, a query mix that exercises the
+**10. `bench/`, in two steps — before the port and after (owner decision 4,
+resequenced 2026-08-24).**
+
+**The resequencing is the important part.** The original plan built bench once,
+after the port. That would have made this initiative's central correctness claim
+unprovable, because odin-rdf-shacl's most valuable port finding — **read counts
+survived to the integer**, 7503 and seven other pins identical across memstore,
+kvstore and record — was available only because `SHACL-I-0003` built bench
+*before* its port. `SHACL-T-0036`'s Status records that its own acceptance
+criterion predicted the opposite and asked for the two to be "stated to be
+incomparable"; the author had written that into the prose before the first run
+and removed it after. Equal counts prove the engine asks the new store exactly
+the questions it asked the old one — that the port moved cost and not behaviour.
+
+So: **SPARQL-T-0040** builds bench against the engine as it stands,
+instrumenting reads through the five seam adapters in
+`sparql/kvstore/eval.odin` — easy today, materially harder once SPARQL-T-0031
+collapses that seam — and pinning the counts per case; **SPARQL-T-0036**
+rebuilds it against record with the same workload and reports whether the pins
+held. Read counting follows shacl's `SHACL_COUNT_READS` shape: a build-time
+switch, `make bench` as two builds, because counting inside the timed build
+measures the counter. Timings across the two are context, not a target — LMDB
+against a resident projection is not like-for-like. The workload covers the
 operator classes the port touches (BGP joins, GRAPH, OPTIONAL, aggregation,
-ORDER BY, a property path), and the §12 GRAPH case explicitly. Design-phase
-detail: whether to instrument read counts the way shacl does
-(`SHACL_COUNT_READS`, a build-time switch, `make bench` becoming two builds).
-The lean is **yes** — shacl's port found that read counts survived to the integer
-while timings moved fourfold, and that is exactly the evidence that separates
-"the backend moved" from "the engine changed its mind", which matters more here
-because §9 deliberately changes what the engine decides.
+ORDER BY, a property path) and the §12 GRAPH case explicitly, at more than one
+graph-size ratio.
 
 **11. Build and CI.** `COLL` becomes `-collection:rdf=../odin-rdf-parser
 -collection:record=../odin-rdf-record`; `rdf:` stays, because record's own
@@ -452,7 +474,14 @@ is ~200 processes per machine. `sparql10-graph` (17 entries) and
 `sparql10-dataset` (12) exercise it. Three consequences: the port measures it
 (§10) rather than asserting it; the measurement is filed as an evidence-backed
 note on record's backlog under the family's "capability gaps become evidence, not
-workarounds" convention, with numbers rather than speculation; and
+workarounds" convention, with numbers rather than speculation — and it needs
+**both** benches, T-0040's graph-first number and T-0036's G-residual one, since
+neither alone is evidence. **Decided 2026-08-24: record's design gate is also
+told now**, rather than only at T-0039. `RECORD-A-0004` is the ADR in question
+and `RECORD-T-0021` is convening on the format; a short note there, labelled
+explicitly as an unmeasured consumer concern and not a request or a
+precondition, costs nothing and means the gate closes knowing that a
+first-class SPARQL operator lands on that choice. And
 **`SPARQL-T-0026` dies here** — it asks for `store.NAMED_GRAPHS`, a sentinel that
 leaves with the store, and its problem takes a different shape on record, where
 `Filter.graphs` scopes to a set of graphs (`FROM`/`FROM NAMED`) but "every graph
@@ -502,15 +531,18 @@ closed with a dated note rather than left reading as open.
 ## Implementation Plan **[REQUIRED]**
 
 Sequenced so each step ends green; the honest unit of "green" is the step
-boundary, not every intermediate commit. **Not yet decomposed into tasks — that
-is the next check-in with the owner.** The shape:
+boundary, not every intermediate commit. Decomposed 2026-08-24 into
+SPARQL-T-0030 … T-0040; dependencies are in each task's `blocked_by`:
 
 0. **The record-side prerequisite** (§6) — `RECORD-I-0004`, tracked on record's
    side. Everything below through step 4 proceeds against `v0.3.0` in parallel
    with it; step 5 needs its release.
-1. **Plumbing**: record checkout, collections, `ols.json`, CI leg changes, a
-   smoke test that opens a record store over `Mem_FS` and answers one query.
-   Adds only; nothing store-side deleted yet.
+1. **Plumbing** (SPARQL-T-0030): record checkout, collections, `ols.json`, CI
+   leg changes, a smoke test that opens a record store over `Mem_FS` and answers
+   one query. Adds only; nothing store-side deleted yet. **In parallel, `bench/`
+   against the engine as it stands** (SPARQL-T-0040): the workload, and read
+   counts pinned through the seam adapters while that seam still exists. Step 2
+   is blocked on it — see §10.
 2. **The core ports**: ids to `record.Term_ID`, the seam collapsed to direct
    calls, one package, the session over a snapshot, sentinels remapped (§4),
    synthetic ids range-tested (§5). `sparql/kvstore` and every `store:` import
@@ -529,8 +561,9 @@ is the next check-in with the owner.** The shape:
    `sparql12-eval-triple-terms` enabled and passing, **512/512 restored**, and
    `triple_adapter`'s two-round-trip note replaced by what the encoding now
    gives directly.
-6. **`bench/`** (§10): the harness, the query mix, the GRAPH case, baselines
-   recorded.
+6. **`bench/` rebuilt against record** (SPARQL-T-0036, §10): the same workload
+   over `Mem_FS` + `ingest`, read counting rehomed, and the comparison against
+   SPARQL-T-0040's pins — did the counts hold?
 7. **The planner surface** (§9): cardinality-ordered `join_order`, then the
    ordered-iteration consumers. Held to no result changes, with tests that the
    chosen path is *taken* rather than merely available. `SPARQL-T-0028` and
@@ -548,6 +581,31 @@ producing the numbers this initiative's claims rest on; CI green on all three
 runners; odin-rdf-store's retirement unblocked.
 
 ## Status
+
+**2026-08-24, later still — four open questions walked through with the owner
+and closed.** Three of them changed the plan:
+
+1. **`bench/` splits in two and the first half moves before the port** (§10;
+   SPARQL-T-0040 added, SPARQL-T-0031 now blocked on it). Found by checking
+   odin-rdf-shacl's actual numbers rather than trusting this document's summary
+   of them: its read-count invariant was obtainable only because bench predated
+   its port, and the original single-bench plan would have made the same check
+   impossible here.
+2. **One query constructor** (§4) — `query_init_txn` deleted, not ported.
+3. **The quad representation is decided rather than deferred**
+   (SPARQL-T-0031): keep `[4]Term_ID` and copy at the scan boundary, preserving
+   `unify_quad`'s dynamic positional loop. Reinterpreting record's
+   layout-identical `Quad` was considered and **rejected** — it would couple
+   this engine to a sibling's struct field order, where a reorder compiles
+   cleanly and corrupts every result.
+4. **record's design gate is told about the GRAPH cost now** (§12), unmeasured
+   and labelled as such, while `RECORD-T-0021` is open. The evidence filing
+   stays at SPARQL-T-0039.
+
+Two smaller ones settled without the owner: `sparql/srj` and `sparql/srx` stay
+separate packages (output formats, never instantiations), and `readers_test`'s
+store-loading trap is resolved by pinning a named refusal count in the style of
+`RDF_XML_DATA_ENTRIES`, which disappears at SPARQL-T-0035.
 
 **2026-08-24, later — active, and the gate moved to where it bites.** The
 initiative's own `blocked_by` named `RECORD-I-0004` while it was in discovery;
