@@ -172,3 +172,62 @@ is the comparison this task exists to make; re-pinning earlier would
 have destroyed it. Timings were taken on the ported engine and are in
 SPARQL-T-0031's run output but were not recorded as a measurement — the
 machine was busy compiling, and a proper best-of-5 belongs here.
+
+
+### 2026-08-25 — this is the only actionable task; the initiative Status has the session handoff
+
+`main` at `72ccfa6`, clean. Everything before this task is complete
+(`T-0030`…`T-0035`, `T-0040`). `SPARQL-I-0003`'s Status carries the full
+handoff — what moved, the four owner decisions, the findings. What
+matters here, restated so it is not missed:
+
+**`make bench` fails today and is meant to.** It builds and runs both
+binaries; the failure is `check_pin` on two of sixteen. Everything else
+about the benchmark is ported and working, including all sixteen
+solution counts, which are identical to `SPARQL-T-0040`'s odin-rdf-store
+baseline.
+
+**The two moved pins, with their cause, so this task can start from
+analysis rather than from debugging:**
+
+	small/group   load 4000  -> 4012   (+12 = the number of groups)
+	large/group   load 40000 -> 40012  (+12)
+	store_ops follows both; find is 26 in each, unchanged.
+
+`bindable_id` (`sparql/exec.odin`) resolves an aggregate's result
+against the store, so that a computed term the data already holds gets
+the store's own id and a later pattern can match on it. `COUNT(?s)`
+produces a small canonical integer. odin-rdf-store had never interned
+one; **record inlines it** — a canonical `xsd:integer` in
+`RECORD-A-0001`'s range *is* its own id and resolves without ever having
+been stored. So the aggregate's id is real rather than synthetic, and
+reading it back in the projection is a `load` where it used to be a
+lookup in the engine's own computed table. `AVG(?r)` produces a decimal,
+is not inlineable, and did not move.
+
+That is a term-identity difference behaving correctly, not a control-flow
+regression — and it is arguably an improvement, since
+`BIND(?o+1 AS ?z) . ?s ?p ?z` now matches for inlined values. Re-pin
+both with a comment saying so.
+
+**Timings were taken but not recorded**, deliberately: T-0031's run was
+on a machine that had just been compiling. A best-of-5 on a quiet
+machine is this task's, and `config.odin`'s header should say when and
+on what.
+
+**The §12 GRAPH question is also this task's.** record has no
+graph-first permutation (`RECORD-A-0004`), so a bound graph is always
+residual where odin-rdf-store answered it from a prefix range — the
+`graph` case's pinned `1 match / 4123 next`, identical in `small` and
+`large` while the default graph around it grows tenfold, is the baseline
+half of the experiment. It did **not** show as wall-clock anywhere in
+the harness (`sparql10-graph` 17/17, the whole harness 1.7 s). Whether
+it shows as reads is the measurement, and the answer belongs in
+`SPARQL-I-0003` §12.
+
+**One thing to check while measuring**, from the scan-boundary decision
+in T-0031: `match_next` copies a `Fact`'s four components into the
+engine's own `[4]Term_ID` per matched fact. It was decided as a trade,
+not left open. `bgp3` (36.6 ms over 164,933 triples, 380,006 store ops)
+and `path` (13.3 ms, 117,674) are where a per-fact 16-byte copy would
+show first.

@@ -582,6 +582,115 @@ runners; odin-rdf-store's retirement unblocked.
 
 ## Status
 
+**2026-08-25, end of session — the port is done. Seven of eleven tasks
+complete; the engine runs on odin-rdf-record and nothing links LMDB.**
+
+`main` at `72ccfa6`, working tree clean. `make check` green on every
+package plus both `bench` builds. `make test` green: **183 `sparql`, 6
+srj, 7 srx, 9 guards, 72 W3C harness, 3 readme.** The verdict is **537
+of 537 evaluated entries across 38 directories**, no skip list and no
+expected-failure file — 25 *more* than the port started with.
+
+Done: `T-0030` (plumbing), `T-0040` (the baseline), `T-0031` (the core
+port), `T-0032` (the suite), `T-0033` (the W3C harness), `T-0034`
+(as-of), `T-0035` (triple terms). Left: **`T-0036`** (bench
+re-measurement — the only actionable one), then `T-0037`, `T-0038`,
+`T-0039`.
+
+### Read this before starting T-0036
+
+**`make bench` currently fails, by design.** Fourteen of sixteen
+read-count pins hold to the integer; two moved and were deliberately not
+re-pinned, because re-pinning them is the comparison T-0036 exists to
+make. Both are `group`, both by exactly the number of groups: `load`
+4000 → 4012 (small) and 40000 → 40012 (large), `store_ops` following.
+**The cause is understood and is not a control-flow regression** —
+`bindable_id` resolves an aggregate's result so a computed term the data
+already holds gets the store's own id; `COUNT(?s)` produces a small
+canonical integer, which odin-rdf-store had never interned and record
+*inlines*, so it resolves without ever having been stored. The id is
+real rather than synthetic, and reading it back in the projection is a
+load where it used to be a lookup in the engine's own computed table.
+`AVG(?r)` is a decimal, not inlineable, and did not move.
+
+`bench/` was ported at T-0031, not at T-0036 — `make check` vets it, so
+it could not be left naming a deleted package. **T-0036's job is what
+its title says: run it and compare.** Timings on the ported engine exist
+in T-0031's run output but were not recorded as a measurement; a proper
+best-of-5 on a quiet machine belongs there. The `§12 GRAPH` question is
+also T-0036's: record has no graph-first permutation, so a bound graph
+is always residual — it did not show as wall-clock in the harness
+(`sparql10-graph` 17/17, whole harness 1.7 s), and whether it shows as
+reads is the measurement.
+
+### Four decisions the owner may want to revisit
+
+Each is recorded in full in the task that made it; none is load-bearing
+for what follows.
+
+1. **`query_destroy` does not release the snapshot** (T-0031),
+   contrary to that task's own criterion. record's `Validator` hands
+   `check` a borrowed handle it releases itself, so a query releasing it
+   would drop a count it never raised — in exactly the case the single
+   constructor exists to serve. The criterion's substance (one
+   constructor, `query_init_txn` deleted) is unaffected.
+2. **The AST `Query` became `Parsed_Query`** (T-0031), because the
+   prepared query moved into the package and the two names met. The
+   prepared query took the shorter name.
+3. **`sparql10-expr-builtin` was enabled** (T-0033) — a scope addition,
+   +25 entries and +1 directory. It sat out for one entry whose
+   documented reason (no language-tag case normalization anywhere in the
+   family) record made false. Trivially reversible.
+4. **`bench/store.odin` was ported at T-0031** rather than at T-0036,
+   confirming the handoff's recommendation rather than assuming it.
+
+### Findings the port produced, for T-0039's reconciliation
+
+- **Two real defects, both found by restoring tests rather than by the
+  compiler.** T-0031 left a second copy of the `UNBOUND leaked into a
+  match pattern` assert in `nps_next`, which fired on any negated
+  property set with an unbound endpoint (UNBOUND and WILDCARD are one
+  value on record); and `query_init` released only its transaction on
+  failure, leaking its slot table and builder. `make check` saw neither
+  and `make bench` runs no NPS. Both fixed at T-0032.
+- **record refuses an empty changeset** (`.Empty`), and several W3C
+  suites ship an empty data document deliberately. 15 entries across
+  five directories failed on the first survey run; an empty document is
+  now a no-op (T-0033).
+- **The term-identity question was settled by running** (T-0033).
+  Language-tag folding, non-canonical numerics and always-resolvable
+  inlined literals cost the corpus nothing; the inlined-literal
+  behaviour is visible in the benchmark instead, as the two moved pins
+  above. The one mismatch anywhere is `sparql10-i18n/normalization-02`,
+  in a never-enabled directory, and it is measurably **parser-side**:
+  the SPARQL parser leaves an IRI's dot segments where Turtle's removes
+  them. That belongs to the family's IRI-normalization question
+  (`SPARQL-T-0021`), not to any store.
+- **One capability the port loses**: there is no `epoch_at(wall)`
+  (T-0034). record's as-of coordinate is the epoch and `wall` is
+  advisory, so a caller holding a time must walk `snapshot_epoch_meta`
+  itself. Nothing in this repository needed it.
+- **`SPARQL-T-0019`'s store-evidence log is closed** (T-0035), on that
+  task, covering all seven STORE-T-0015..0021 asks — the store they were
+  filed against is being retired.
+
+### What T-0039 will have to reconcile
+
+The repository's own documents are current: `README.md`, `tests/w3c/
+README.md`, the Makefile, `ci.yml` and every package doc were rewritten
+as the port went, with the amend-don't-rewrite convention throughout
+(old paragraphs stand under dated notes). **What is not touched yet is
+`.metis/vision.md` and the family file** `odin-rdf/CLAUDE.md`, which
+still describe an engine over odin-rdf-store's match interface at
+512/512 across 35 suite directories with a `Term_ID` width matrix.
+Neither is true. That is T-0039's, along with the backlog items whose
+subjects moved (`SPARQL-T-0026` names `store.NAMED_GRAPHS`;
+`SPARQL-T-0021` is the family term-identity question this port fed).
+
+**odin-rdf-store is now unreferenced by this repository** — no
+collection, no CI checkout, no import — which is the precondition its
+retirement was waiting on.
+
 **2026-08-25 — the record-side gate is closed, `v0.4.0` is cut, and step 1
 is half done.** `RECORD-I-0004` was built in full while this initiative
 sat: `RECORD-T-0021`…`-T-0025`, two ADRs ([[RECORD-A-0007]] the format
