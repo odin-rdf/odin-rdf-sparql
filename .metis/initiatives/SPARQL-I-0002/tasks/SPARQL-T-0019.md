@@ -135,3 +135,57 @@ making it.
 symbols are exported only because the instantiation packages are
 separate packages, and narrowing them to `@(private)` is a refactor with
 its own risk, not documentation. They are documented as what they are.
+
+### 2026-08-25 — the evidence log, answered by a different store (SPARQL-T-0035)
+
+This task's central artefact was the store-evidence log above: seven
+capabilities this engine had demonstrated a need for, filed into
+odin-rdf-store's backlog as STORE-T-0015..0021. **The engine has since
+been ported off odin-rdf-store onto odin-rdf-record (SPARQL-I-0003), and
+odin-rdf-store is to be retired**, so the log is worth closing out here
+rather than left pointing at a repository nobody will act in.
+
+Two of the seven were answered, and the difference between how is the
+interesting part:
+
+- **STORE-T-0020 — `triple_parts`.** Asked for because a non-ground
+  triple-term pattern had to take a stored term apart, and kvstore could
+  only do that by materializing the whole term and re-resolving each of
+  its three components: two round trips through the database for
+  something the dictionary knew outright. odin-rdf-record answered it as
+  **`snapshot_triple_parts`** (RECORD-I-0004): the component ids are *in*
+  the encoding, so taking a triple term apart is a tag check and three
+  reads out of the arena — no allocation, no decode, no recursion. The
+  engine consumes it at one site, `exec_triple_parts` in
+  `sparql/exec.odin`, and the four-round-trip adapter it replaced is
+  deleted. **It cost this repository nothing**: the capability arrived in
+  the encoding rather than as an API this engine had to adapt to.
+- **STORE-T-0021 — reserving an id range for the engine's query-local
+  term names.** Asked for after the engine's synthetic ids, which had
+  squatted on an unassigned sentinel range, collided with `NAMED_GRAPHS`
+  when the store took the next counter. odin-rdf-store reserved a range
+  in `v0.5.0`; **odin-rdf-record reserved one from the start and by
+  name** — `CONSUMER_ID_FIRST ..= CONSUMER_ID_LAST`, stated in its
+  `api.md` par. 3 *for a query engine's computed values*, with the store's
+  own procedures neither accepting nor checking for one. See
+  `SYNTHETIC_FIRST` in `sparql/expr_eval.odin`, where the constant is now
+  the record's rather than this engine's guess at where the record's ids
+  stop.
+
+The other five were never built in odin-rdf-store and are not asks
+against odin-rdf-record today. Two of them changed character with the
+port and are recorded where they now live: **STORE-T-0017** (a
+named-graph wildcard) has no record equivalent either — an unbound `G`
+spans the default graph and `Filter.graphs` takes a set of names rather
+than a class — so `unify_quad` still over-fetches and filters, with the
+comment there re-aimed; and **STORE-T-0015/0018** (ordered iteration and
+cardinality estimates, the planner surface) are what SPARQL-T-0037 and
+SPARQL-T-0038 consume from record's `snapshot_match_as` and `range_len`,
+which exist. **STORE-T-0016** (the graph list and a graph's terms) and
+**STORE-T-0019** (snapshot reads) were both built in odin-rdf-store
+(`graphs`/`nodes`, and the transactions this engine adopted in
+SPARQL-T-0024); on record, a snapshot *is* the dataset, and there is no
+graph list — `Plan_Graph_Scan` still scans.
+
+*(This amendment is SPARQL-T-0035's last criterion. The task it belongs
+to is complete; the log it closes is this one.)*
