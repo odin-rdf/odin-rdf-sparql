@@ -126,3 +126,104 @@ rather than asserting one.
 ## Status Updates
 
 *To be added during implementation*
+
+### 2026-08-25 — the premise does not hold: record's id order and SPARQL's order are unrelated, and no plan can tell when they agree
+
+**Finding first, because it decides the task.** Every criterion here rests
+on one thing being possible: that the plan can establish, from the pattern
+and the sort key, that record's id order and SPARQL's `ORDER BY` order
+agree. **It cannot, and not because this engine lacks information — no
+SPARQL query contains it.**
+
+The task named this as its own biggest risk ("the term-order-versus-value-
+order trap ... getting it wrong returns wrong answers, not slow ones") and
+told this task to take the streaming path "only where the agreement is
+provable from the sort key's type". The measurement is that **the set of
+provable cases is empty.**
+
+### The mechanism, measured rather than reasoned about
+
+`RECORD-A-0001`'s frozen scheme: bit 31 flags an inlined term, bits 30..28
+tag it, the low 28 bits are an offset-binary payload. Two consequences —
+inlined integers *do* sort numerically among themselves, and **every
+dictionary id (< 2^31) sorts before every inlined id (>= 2^31)**.
+
+Five ordinary values, loaded into one store, ids read back with
+`snapshot_resolve`:
+
+| term | id | |
+|---|---|---|
+| `1` | 0xa8000001 | inlined |
+| `3` | 0xa8000003 | inlined |
+| `200000000` | 6 | **dictionary** — past the 2^27 inline range |
+| `"2.5"^^xsd:decimal` | 9 | **dictionary** — decimal is never inlined |
+| `"007"^^xsd:integer` | 11 | **dictionary** — a non-canonical lexical form |
+
+- **By record's id order**: 200000000, 2.5, 007, 1, 3.
+- **By SPARQL's `ORDER BY`**: 1, 2.5, 3, 007, 200000000.
+
+Not a permutation apart at one position — unrelated. The largest value
+sorts first and the smallest fourth. An ordered read taken as `ORDER BY`
+returns the first list.
+
+**Three independent mechanisms, none of them exotic.** Out of range at
+1.34x10^8; any decimal, float or double, which SPARQL compares by value
+across the whole numeric tower; and any non-canonical lexical form, which
+is RDF term identity done *correctly*. Each alone is fatal, and each is
+ordinary data.
+
+### Why no plan can rule them out
+
+What disqualifies a value is a property of that value. SPARQL has no
+static types: a variable's datatype is not knowable from the query text,
+`FILTER(?r < 100)` admits `"5.0"^^xsd:decimal`, and a pattern says nothing
+about the terms its object position will hold. So the plan cannot
+establish the agreement from the pattern and the sort key — the criterion
+as written has no satisfiable instance.
+
+This applies identically to all three operators, because SPARQL defines
+`MIN`/`MAX` over the `ORDER BY` ordering: `agg_keep_extreme` compares with
+`value_order`, and taking the first fact of an id-ordered range would
+answer a different question. **The "small and self-contained" half of the
+task is not smaller than the other half; it has the same blocker.**
+
+### What is banked
+
+`sparql/order_id_gap_test.odin` — two tests, and they are the durable
+deliverable of this finding rather than a demonstration of it. One asserts
+the id relationships above against a live store, so the day record's
+encoding changes it will say so. The other asserts the engine returns
+SPARQL's order for the same fixture. Together they are a guard: if someone
+later takes the streaming path on the grounds that "record's ids are
+ordered", these fail with the reason attached.
+
+`make test` 289 tests, 537/537 unchanged.
+
+### The decision this needs
+
+Not this task's to make. Three ways forward, and they are materially
+different work:
+
+1. **Close it as evidence.** The gap is real, proven, and belongs on
+   record's backlog next to the §12 GRAPH note — the same "capability gaps
+   become evidence, not workarounds" convention, and the same initiative
+   to file it. Costs nothing further here; the three operators keep doing
+   what they do today, which is correct.
+2. **A narrow data-dependent variant.** For a single-pattern BGP whose
+   sort key leads the chosen order, the range is sorted, so its first and
+   last ids at that position are its min and max — and if *both* fall in
+   one inlined tag band, every id between them does too, since the bands
+   are contiguous. That is an exact proof in two array reads at plan time.
+   It contradicts this task's "never from the data" (though not its
+   intent, which is that nothing be decided mid-stream), it is narrow, and
+   **it would not move `bench/`**: `order` sorts by `?name`, a string, and
+   would never qualify.
+3. **Ask record for an order-preserving id space.** `api.md` §5.3 rejected
+   a globally order-preserving dictionary because renumbering is fatal,
+   and §12.8 already records the consequence as a known SPARQL cost.
+   `architecture.md` §10.3 sketches a per-type order-preserving subspace.
+   This is a record-side initiative and a format change, which is a much
+   larger thing than this task.
+
+**Recommendation: 1.** The measurement says the optimization has no safe
+instance, and 2 buys a case the corpus and the benchmark do not contain.
