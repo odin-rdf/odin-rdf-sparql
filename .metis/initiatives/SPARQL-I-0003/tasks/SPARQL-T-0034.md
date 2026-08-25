@@ -4,14 +4,14 @@ level: task
 title: "As-of still costs this engine nothing: SPARQL-T-0025's scenarios onto store_at"
 short_code: "SPARQL-T-0034"
 created_at: 2026-08-24T20:42:37.966524+00:00
-updated_at: 2026-08-24T20:42:37.966524+00:00
+updated_at: 2026-08-25T16:00:00.000000+00:00
 parent: SPARQL-I-0003
 blocked_by: ["SPARQL-T-0033"]
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -39,18 +39,18 @@ the assumption.
 
 ## Acceptance Criteria
 
-- [ ] **`sparql/kvstore/as_of_test.odin`'s scenarios move and pass**
+- [x] **`sparql/kvstore/as_of_test.odin`'s scenarios move and pass**
       against `store_at`. The fixture's design survives: it **retracts**,
       because an answer that only ever grows can also be produced by a
       read that stopped early, where a solution that comes back from the
       past cannot; and every assertion names the HEAD answer it is *not*,
       because a query returning the same thing either way is satisfied by
       an engine that ignores the handle it was given.
-- [ ] **No non-test source changes to make this work.** If any does, that
+- [x] **No non-test source changes to make this work.** If any does, that
       is the finding — record it here rather than quietly making the
       change, because the whole claim of this task is that the capability
       arrives by being in the right place.
-- [ ] **Three record behaviours that differ from the store are pinned**,
+- [x] **Three record behaviours that differ from the store are pinned**,
       each with a test:
       - `store_at` past head is `.Future_Epoch` — **refused, not
         clamped**. The store's horizon had no equivalent refusal.
@@ -67,11 +67,11 @@ the assumption.
         deliberately non-temporal dictionary, and the existing test that
         pins that division should port across almost unchanged — it is
         the same correct division reached by a different mechanism.
-- [ ] **`store_at(0)` — the empty world before the first commit — answers
+- [x] **`store_at(0)` — the empty world before the first commit — answers
       a query**, returning no solutions rather than failing. The store had
       `EPOCH_NEVER`; record has epoch 0, and the difference is worth one
       test.
-- [ ] The W3C suites are untouched by this task. They cannot produce
+- [x] The W3C suites are untouched by this task. They cannot produce
       these scenarios: no entry edits its dataset after loading it, so no
       entry has a second epoch to read at, and an engine that silently
       ignored the handle would pass all 474 of them. That is why this task
@@ -122,4 +122,71 @@ running in parallel with it.
 
 ## Status Updates
 
-*To be added during implementation*
+### 2026-08-25 — done, and it found nothing, which is the result
+
+Four tests in `sparql/as_of_test.odin`, all green. **`git status` after
+the work shows one added file and nothing else**: no non-test source
+changed, which was this task's real criterion and the whole of what
+SPARQL-T-0025 established. As-of arrives by `store_at` returning an
+ordinary `Snapshot` and `query_init` taking one — the same structural
+reason it arrived on odin-rdf-store, reached through a different handle.
+
+The risk note's one way this could have been long — `query_init`
+re-acquiring `store_latest` somewhere instead of using the snapshot it
+was handed — did not happen. Every as-of answer differs from HEAD's, so
+an engine that ignored its snapshot would fail all four.
+
+#### What the port made simpler
+
+**There is one `answer_at`, where there were two.** The old file had
+`answer_at_head` and `answer_as_of`, differing only in which constructor
+they called — `query_init` against the store, `query_init_txn` against a
+transaction carrying a horizon. On record there is one constructor and
+one kind of handle, so reading the past and reading the present are the
+same procedure called with a different snapshot. The file's shape is now
+the claim.
+
+**The epoch comes back from `apply`.** The old fixture read the clock
+after each commit and converted it with `epoch_at(wall)`, carrying a
+paragraph on why that was deterministic — and a warning that a timestamp
+captured *between* two commits would name the wrong epoch on a platform
+with a coarse clock. None of it applies.
+
+#### The three record behaviours, pinned
+
+- **`store_at` past head is `.Future_Epoch` — refused, not clamped.**
+  odin-rdf-store's `EPOCH_LATEST` read HEAD, so a caller that computed a
+  horizon wrongly got an answer; record makes the same mistake a
+  diagnostic. Nothing in this engine chose either, which is the point.
+- **`store_at(0)` is the empty world and answers a query** rather than
+  failing, returning no solutions where HEAD returns two edges. The store
+  spelled it `EPOCH_NEVER`, a reserved value; record spells it 0, one
+  below the first epoch it issues.
+- **Terms are not epoch-scoped; facts are.** `:dave`, interned at epoch
+  2, still resolves through a snapshot at epoch 1 and matches nothing
+  there. Both halves are asserted, because if binding had failed to
+  resolve it the query would return the same empty answer for an entirely
+  different reason. This is odin-rdf-store's deliberately non-temporal
+  dictionary reached by a different mechanism: an index set bounds
+  *facts* by epoch and *terms* by the count it published with.
+
+#### One capability the port loses, for SPARQL-T-0039
+
+**There is no `epoch_at(wall)`.** The store turned a wall-clock time
+into a horizon. record's as-of coordinate is the epoch, and `wall` in
+`snapshot_epoch_meta` is advisory evidence rather than an index — so a
+caller holding a time and wanting the epoch it belongs to must walk the
+epoch metadata itself. Small, real, and stated here rather than
+discovered later. Nothing in this repository needed it; the fixture
+needed it only because the store gave it no other way to learn an
+epoch, and `apply` returns one.
+
+#### One thing that got narrower, and correctly
+
+**A retraction names its quad.** odin-rdf-store spelled it
+`remove(ds, pattern)` over a `Match_Pattern`, so "retract everything
+:bob :knows" was one call. record retracts a named quad, refused with
+`.Not_Live` if no live generation matches — more work for a fixture, a
+narrower promise, and the narrower promise is why `.Not_Live` can exist
+at all. Either way it is a tombstone rather than an erasure, which is
+what keeps the earlier epochs readable.
