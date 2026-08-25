@@ -12,13 +12,19 @@
 // directories.
 //
 // Variables are read from the solution row, so evaluating an expression
-// means materializing the terms it mentions and nothing else. Terms come
-// back through a Term_Loader, a procedure pointer: it is called once per
-// variable occurrence per solution, not per matched quad, and the
-// SPARQL-T-0011 spike measured indirect calls at that frequency as free.
-// The loader says whether the term it returned is owned, because the two
-// backends differ — memstore borrows from its dictionary, kvstore builds
-// the term — and an owned one is released when the evaluation ends.
+// means materializing the terms it mentions and nothing else. That is a
+// direct call to record's `snapshot_term` since SPARQL-T-0031; before
+// the port it went through a Term_Loader procedure pointer, so that the
+// engine core could name no backend.
+//
+// **Ownership is record's rule, and it is not "always owned" or "always
+// borrowed".** A dictionary term borrows the arena, an inlined literal
+// borrows a buffer the caller supplies, a split IRI owns its joined
+// string, and a triple term owns its whole tree (RECORD-A-0008).
+// `snapshot_term_destroy` is total over all four and takes the id,
+// because the term alone cannot say which case it is — so every load is
+// remembered with its id and released through that verb. See
+// Scratch_Term.
 package sparql
 
 import "base:runtime"
@@ -27,22 +33,22 @@ import "core:strings"
 import "core:time"
 
 import rdf "rdf:rdf"
-import store "store:store"
+import record "record:record"
 
-// Term_Loader materializes a term ID. owned=true means the term was
-// allocated for this call and the caller releases it.
-Term_Loader :: #type proc(
-	data: rawptr,
-	id: store.Term_ID,
-	allocator: runtime.Allocator,
-) -> (
+// Scratch_Term is one term an evaluation materialized, and how to free
+// it.
+//
+// `id` is the id it was loaded from, which is what
+// `record.snapshot_term_destroy` needs to know whether it owns anything;
+// `0` means the engine built the term itself (TRIPLE(), STRDT() and the
+// rest of §17.4's constructors) and `rdf.destroy_term` is the right
+// verb. The two cases are kept in one list because they have one
+// lifetime — everything materialized for one evaluation dies together,
+// after the value has been rendered into a binding.
+Scratch_Term :: struct {
+	id:   record.Term_ID,
 	term: rdf.Term,
-	owned: bool,
-)
-
-// Exists_Runner evaluates the index-th EXISTS sub-plan against the
-// solution currently in the row, and reports whether it has one.
-Exists_Runner :: #type proc(data: rawptr, index: int) -> bool
+}
 
 // Bnode_Binding is one BNODE(str) memo entry: the string the query
 // passed and the label it produced. The list is short — a query names a
@@ -68,24 +74,34 @@ Regex_Cache_Entry :: struct {
 }
 
 // Expr_Context is everything an expression needs beyond its own tree.
-// row is repointed at each solution; scratch collects the terms the
-// loader allocated for the current evaluation.
+// row is repointed at each solution; scratch collects the terms one
+// evaluation materialized.
 Expr_Context :: struct {
 	slots:     ^Var_Slots,
-	row:       []store.Term_ID,
-	load:      Term_Loader,
-	load_data: rawptr,
-	scratch:   [dynamic]rdf.Term,
+	row:       []record.Term_ID,
+	// The dataset a variable's id is read out of.
+	snapshot:  record.Snapshot,
+	scratch:   [dynamic]Scratch_Term,
+	// The buffers an inlined literal materializes into. record decodes
+	// one into caller-supplied bytes and the term *borrows* them, so the
+	// bytes have to outlive the value the expression is building — a
+	// stack buffer would dangle the moment the loader returned. They are
+	// individually allocated (so appending to the list never moves one),
+	// reused across evaluations, and freed with the context; `inline_used`
+	// is how many this evaluation has handed out.
+	inline_bufs: [dynamic][]byte,
+	inline_used: int,
 	// Terms this query computed — BIND results, which the store has
 	// never seen. See the note on synthetic IDs below.
 	computed:  ^[dynamic]rdf.Term,
 	// EXISTS is a pattern inside a value, so evaluating one means running
-	// a sub-plan against the current solution. The executor supplies that
-	// as a procedure pointer: the call has to cross back into code that
-	// is generic over the backend, and a generic procedure that reaches
-	// itself directly is what hangs the compiler (SPARQL-T-0011).
-	exists:       Exists_Runner,
-	exists_data:  rawptr,
+	// a sub-plan against the current solution — back into the executor
+	// that is already running one. Since SPARQL-T-0031 that is an
+	// ordinary call through this pointer; it used to be a procedure value
+	// bound by the instantiation package, because the call crossed back
+	// into code generic over the backend and a generic procedure that
+	// reaches itself hangs the compiler.
+	exec:         ^Exec,
 	exists_nodes: []^Exists_Expr,
 
 	// Strings the §17 functions built. They are released with the rest of
@@ -115,64 +131,68 @@ Expr_Context :: struct {
 // exists to prevent.
 //
 // So the engine names computed terms itself, in a space the store
-// guarantees it will never assign: the Sentinel kind's counters at and
-// above store.SENTINEL_CONSUMER_FIRST. A synthetic ID is an index into
-// the query's own table of computed terms, and it is resolved before the
-// store is asked.
+// guarantees it will never assign: `record.CONSUMER_ID_FIRST ..=
+// record.CONSUMER_ID_LAST`. A synthetic ID is an index into the query's
+// own table of computed terms, and it is resolved before the store is
+// asked.
 //
-// The base is the store's constant and never a literal. This engine used
-// to start at counter 3 — "the first one the store has not taken" read
-// off the three sentinels that existed — and STORE-T-0017 then took
-// counter 3 for NAMED_GRAPHS. The two spaces met, the first computed term
-// of every query became the named-graph wildcard, and the backend
-// asserted. That is exactly the collision STORE-T-0021 reserved this
-// space against; the reserve has been in the store since v0.5.0, and
-// naming it is what keeps the next store sentinel from doing it again.
-//
-// The whole arrangement is also evidence: an engine that has to invent a
-// term space because the store has no query-local one is describing a gap
-// in the interface. Recorded for SPARQL-T-0019.
-SYNTHETIC_FIRST :: store.SENTINEL_CONSUMER_FIRST
+// **This is the gap SPARQL-T-0019 recorded, and odin-rdf-record closed
+// it before this engine arrived.** Against odin-rdf-store the engine
+// invented the space itself, off the end of the sentinel kind, and
+// STORE-T-0017 then took the next counter for NAMED_GRAPHS — the two
+// spaces met, the first computed term of every query became the
+// named-graph wildcard, and the backend asserted. STORE-T-0021 reserved
+// a range afterwards; record reserved one from the start, *for a query
+// engine's computed values, by name* (api.md par. 3, RECORD-I-0003
+// decision 10), and the store's own procedures neither accept nor check
+// for one. So the constant below is the record's, not this engine's
+// guess at where the record's ids stop.
+SYNTHETIC_FIRST :: record.CONSUMER_ID_FIRST
 
 // synthetic_id names the index-th computed term; is_synthetic recognizes
 // one, and synthetic_index reads the index back out. A synthetic ID is
 // valid only inside the query that made it and must never reach a match
 // pattern — plan building asserts on one that does.
-//
-// The arithmetic is on the ID rather than on the counter: the counter is
-// the low bits, so adding an index to the base ID walks the counter and
-// leaves the Sentinel tag alone.
-synthetic_id :: proc(index: int) -> store.Term_ID {
-	return SYNTHETIC_FIRST + store.Term_ID(index)
+synthetic_id :: proc(index: int) -> record.Term_ID {
+	return SYNTHETIC_FIRST + record.Term_ID(index)
 }
 
-is_synthetic :: proc(id: store.Term_ID) -> bool {
-	return store.id_kind(id) == .Sentinel && id >= SYNTHETIC_FIRST
+// **Both ends are tested, and the upper one is not decoration.** On
+// odin-rdf-store the reserved space ran to the top of the id range and a
+// bare `>=` was exact. On record, bit 31 is the *inline* flag: every
+// small canonical integer, boolean and date is its own id with that bit
+// set, so `id >= CONSUMER_ID_FIRST` alone would read `"1"^^xsd:integer`
+// as a term this query invented and resolve it out of the computed
+// table. The consumer range is the narrow window above
+// MATCH_DEFAULT_GRAPH that the inline tag 0 makes unreachable
+// (record/resident.odin), and membership in it is a range test.
+is_synthetic :: proc(id: record.Term_ID) -> bool {
+	return id >= record.CONSUMER_ID_FIRST && id <= record.CONSUMER_ID_LAST
 }
 
-synthetic_index :: proc(id: store.Term_ID) -> int {
+synthetic_index :: proc(id: record.Term_ID) -> int {
 	return int(id - SYNTHETIC_FIRST)
 }
 
 // expr_context_init prepares the evaluation context a plan's expressions
-// share. load/load_data materialize a term ID, computed is the execution's
-// table of terms the query invented, and everything the context allocates
-// comes from the given allocator. One context serves a whole execution:
-// only one operator evaluates an expression at a time.
+// share. snapshot is the dataset a variable's term is read from,
+// computed is the execution's table of terms the query invented, and
+// everything the context allocates comes from the given allocator. One
+// context serves a whole execution: only one operator evaluates an
+// expression at a time.
 expr_context_init :: proc(
 	ctx: ^Expr_Context,
 	slots: ^Var_Slots,
-	load: Term_Loader,
-	load_data: rawptr,
+	snapshot: record.Snapshot,
 	computed: ^[dynamic]rdf.Term,
 	allocator := context.allocator,
 ) {
 	ctx.slots = slots
-	ctx.load = load
-	ctx.load_data = load_data
+	ctx.snapshot = snapshot
 	ctx.computed = computed
 	ctx.allocator = allocator
-	ctx.scratch = make([dynamic]rdf.Term, allocator)
+	ctx.scratch = make([dynamic]Scratch_Term, allocator)
+	ctx.inline_bufs = make([dynamic][]byte, allocator)
 	ctx.texts = make([dynamic]string, allocator)
 	ctx.bnodes = make([dynamic]Bnode_Binding, allocator)
 	ctx.regexes = make([dynamic]Regex_Cache_Entry, allocator)
@@ -209,6 +229,10 @@ expr_context_destroy :: proc(ctx: ^Expr_Context) {
 	expr_context_release(ctx)
 	expr_context_new_solution(ctx)
 	delete(ctx.scratch)
+	for buf in ctx.inline_bufs {
+		delete(buf, ctx.allocator)
+	}
+	delete(ctx.inline_bufs)
 	delete(ctx.texts)
 	delete(ctx.bnodes)
 	for entry in ctx.regexes {
@@ -229,14 +253,59 @@ expr_context_destroy :: proc(ctx: ^Expr_Context) {
 // one evaluation. Called after each condition, so a filter over a
 // million solutions holds one solution's worth at a time.
 expr_context_release :: proc(ctx: ^Expr_Context) {
-	for term in ctx.scratch {
-		rdf.destroy_term(term, ctx.allocator)
+	for entry in ctx.scratch {
+		if entry.id == 0 {
+			rdf.destroy_term(entry.term, ctx.allocator)
+			continue
+		}
+		record.snapshot_term_destroy(ctx.snapshot, entry.id, entry.term, ctx.allocator)
 	}
 	clear(&ctx.scratch)
+	// The buffers themselves are kept and reused; only the claim on them
+	// is released, so a filter over a million solutions allocates them
+	// once.
+	ctx.inline_used = 0
 	for text in ctx.texts {
 		delete(text, ctx.allocator)
 	}
 	clear(&ctx.texts)
+}
+
+// expr_load_term materializes the term a solution's id names, and
+// registers it for release at the end of this evaluation.
+//
+// **Every load is paired with a destroy through record's verb**, which
+// is total: nothing for a term borrowed out of the dictionary arena or
+// out of an inline buffer, the joined string for a split IRI, the whole
+// tree for a triple term. Deciding here which case it is would mean
+// reading record's tag bytes, which is exactly what a published API
+// exists to prevent — so the id is remembered and the store is asked
+// (RECORD-A-0008).
+@(private = "file")
+expr_load_term :: proc(ctx: ^Expr_Context, id: record.Term_ID) -> (term: rdf.Term, ok: bool) {
+	when SPARQL_COUNT_READS {
+		read_counts.load += 1
+		read_counts.store_ops += 1
+	}
+	term, ok = record.snapshot_term(ctx.snapshot, id, expr_inline_buf(ctx), ctx.allocator)
+	// Registered even when the decode failed: snapshot_term_destroy is
+	// safe on a nil term, and pairing at every call is what keeps the
+	// two from drifting apart.
+	append(&ctx.scratch, Scratch_Term{id = id, term = term})
+	return term, ok
+}
+
+// expr_inline_buf hands out one of the context's stable buffers, for a
+// term record materializes rather than borrows. See Expr_Context's
+// inline_bufs for why they cannot live on the stack.
+@(private = "file")
+expr_inline_buf :: proc(ctx: ^Expr_Context) -> []byte {
+	if ctx.inline_used == len(ctx.inline_bufs) {
+		append(&ctx.inline_bufs, make([]byte, record.INLINE_LEXICAL_MAX, ctx.allocator))
+	}
+	buf := ctx.inline_bufs[ctx.inline_used]
+	ctx.inline_used += 1
+	return buf
 }
 
 // expr_context_new_solution ends BNODE(str)'s memo scope. §17.4.2.2
@@ -429,14 +498,14 @@ expr_eval :: proc(ctx: ^Expr_Context, e: Expr) -> Value {
 	case ^Builtin_Call:
 		return eval_builtin(ctx, v)
 	case ^Exists_Expr:
-		if ctx.exists == nil {
+		if ctx.exec == nil {
 			return ERROR_VALUE
 		}
 		index := exists_index(ctx.exists_nodes, v)
 		if index < 0 {
 			return ERROR_VALUE
 		}
-		found := ctx.exists(ctx.exists_data, index)
+		found := exec_exists(ctx.exec, index)
 		return value_boolean(found != v.negated)
 	case ^Function_Call:
 		// The only function calls that reach here are the §17.5 casts;
@@ -501,7 +570,7 @@ var_value :: proc(ctx: ^Expr_Context, name: string) -> Value {
 		return UNBOUND_VALUE
 	}
 	id := ctx.row[slot]
-	if id == store.UNBOUND {
+	if id == UNBOUND {
 		return UNBOUND_VALUE
 	}
 	if is_synthetic(id) {
@@ -510,9 +579,9 @@ var_value :: proc(ctx: ^Expr_Context, name: string) -> Value {
 		value.has_source = true
 		return value
 	}
-	term, owned := ctx.load(ctx.load_data, id, ctx.allocator)
-	if owned {
-		append(&ctx.scratch, term)
+	term, loaded := expr_load_term(ctx, id)
+	if !loaded {
+		return ERROR_VALUE
 	}
 	value := value_of(term)
 	value.source = id

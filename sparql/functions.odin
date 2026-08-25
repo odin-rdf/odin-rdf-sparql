@@ -40,7 +40,6 @@ import "core:unicode/utf8"
 
 import crypto_hash "core:crypto/hash"
 import rdf "rdf:rdf"
-import store "store:store"
 
 // The datatype TIMEZONE answers with (§17.4.5.9); the rest of the XSD
 // vocabulary this engine interprets is in value.odin.
@@ -211,7 +210,7 @@ eval_bound :: proc(ctx: ^Expr_Context, e: ^Builtin_Call) -> Value {
 	if !found || slot >= len(ctx.row) {
 		return value_boolean(false)
 	}
-	return value_boolean(ctx.row[slot] != store.UNBOUND)
+	return value_boolean(ctx.row[slot] != UNBOUND)
 }
 
 // COALESCE (§17.4.1.3) is the one function whose contract is to absorb
@@ -796,7 +795,8 @@ build_triple_value :: proc(ctx: ^Expr_Context, subject, predicate, object: Value
 		object    = o,
 	}
 	term := rdf.Term(node)
-	append(&ctx.scratch, term)
+	// Built here, so rdf.destroy_term is the verb: id 0 says so.
+	append(&ctx.scratch, Scratch_Term{term = term})
 	return Value{kind = .Triple, term = term}
 }
 

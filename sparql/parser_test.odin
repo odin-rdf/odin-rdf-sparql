@@ -5,7 +5,7 @@ import "core:testing"
 import rdf "rdf:rdf"
 
 @(private = "file")
-first_bgp :: proc(q: ^Query) -> ^Basic_Pattern {
+first_bgp :: proc(q: ^Parsed_Query) -> ^Basic_Pattern {
 	if q == nil || q.where_clause == nil || len(q.where_clause.elements) == 0 {
 		return nil
 	}

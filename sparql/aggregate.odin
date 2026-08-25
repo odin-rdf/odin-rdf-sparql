@@ -51,7 +51,7 @@ import "base:runtime"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
+import record "record:record"
 
 // DECIMAL_MAX_SCALE bounds the fraction digits a division may produce.
 // XSD leaves decimal precision to the implementation and asks for at
@@ -334,7 +334,7 @@ pow10_f64 :: proc(n: int) -> f64 {
 // which become the bindings of its answer, and one accumulator per
 // aggregate.
 Group_State :: struct {
-	key_ids: []store.Term_ID,
+	key_ids: []record.Term_ID,
 	accums:  []Agg_Accum,
 }
 
@@ -396,7 +396,7 @@ agg_accum_destroy :: proc(a: ^Agg_Accum) {
 
 // agg_accum_row is COUNT(*): the solution itself is the value, so
 // DISTINCT compares whole rows rather than one expression's result.
-agg_accum_row :: proc(a: ^Agg_Accum, row: []store.Term_ID) {
+agg_accum_row :: proc(a: ^Agg_Accum, row: []record.Term_ID) {
 	if a.is_distinct && !agg_first_sighting(a, row_key(row, a.allocator)) {
 		return
 	}
@@ -530,10 +530,10 @@ agg_accum_value_of :: proc(a: ^Agg_Accum, allocator: runtime.Allocator) -> (v: V
 // engine interns the terms it computes itself, so two equal IDs are one
 // term and two different IDs are two — which is exactly what value_key
 // establishes the long way round.
-id_key :: proc(b: ^strings.Builder, id: store.Term_ID) {
+id_key :: proc(b: ^strings.Builder, id: record.Term_ID) {
 	strings.write_byte(b, 'd')
 	raw := id
-	bytes := transmute([size_of(store.Term_ID)]u8)raw
+	bytes := transmute([size_of(record.Term_ID)]u8)raw
 	strings.write_bytes(b, bytes[:])
 	strings.write_byte(b, 0)
 }

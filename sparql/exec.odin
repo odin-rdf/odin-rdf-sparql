@@ -17,32 +17,40 @@
 // its iterator for the next quad; when a depth runs out, its iterator is
 // closed and the search moves back up.
 //
-// **How the backend is bound.** The three store operations on the hot
-// path — match, match_next, match_destroy — arrive as compile-time
-// procedure constants (`$MATCH`, `$NEXT`, `$DESTROY`), so every call is
-// direct and inlinable and the executor is monomorphized per backend.
-// The engine core therefore names no backend and imports none; the
-// instantiation packages `sparql/memstore` and `sparql/kvstore` supply
-// the three adapters. See SPARQL-T-0011's status log for why that beat
-// the alternatives.
+// **How the store is bound (SPARQL-T-0031).** Directly. The executor
+// holds one `record.Snapshot` and asks it; `match_open` and `match_next`
+// below are the whole read seam, and they are ordinary procedures.
 //
-// **Why the tree walk is a loop and not recursion.** A generic procedure
-// that takes compile-time procedure constants and calls itself sends the
-// Odin compiler (dev-2026-07) into unbounded instantiation — it does not
-// fail, it hangs. So the walk is explicit: a stack of node indices, and a
-// two-phase driver that either asks a node to produce a solution or hands
-// a child's solution to its parent. That is a constraint, but not a bad
-// shape: an operator here is already a resumable state machine, and the
-// driver generalizes to the operators with two inputs that arrive in
-// SPARQL-T-0013 — a node says which child it wants next rather than
-// calling into it.
+// Until the port this file was generic over a backend — `Exec($D, $It)`,
+// with match, match_next and match_destroy threaded through every
+// operator as compile-time procedure constants so that the engine core
+// could name no backend and the instantiation packages could supply the
+// adapters. odin-rdf-record is the one and only store (owner,
+// 2026-08-24), which retires the reason rather than re-points it: the
+// type parameters, the three constants and the six procedure types that
+// carried calls back across the seam are gone, not renamed. What that
+// bought is visible at every call site — an EXISTS or a path step is now
+// a call to `exec_exists` or `exec_path_expand` where it used to be a
+// procedure value routed through a concrete adapter in another package,
+// because the compiler could not close a cycle of generic
+// instantiations.
+//
+// **Why the tree walk is still a loop and not recursion.** It was
+// written that way because a generic procedure taking compile-time
+// procedure constants and calling itself sends the Odin compiler
+// (dev-2026-07) into unbounded instantiation. That constraint is gone
+// with the generics, and the shape is kept anyway: an operator here is
+// already a resumable state machine, the driver hands a child's solution
+// to its parent without a stack frame per level, and a plan's depth is
+// the query's rather than the machine's. Rewriting it as recursion would
+// be a large change that buys nothing.
 package sparql
 
 import "base:runtime"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
+import record "record:record"
 
 // Exec_Kind tags an operator node. The nodes are one struct rather than
 // a union of per-operator types because the executor is generic over the
@@ -89,7 +97,7 @@ Op_Phase :: enum {
 // iterator type. Every operator shares the struct — see Exec_Kind for
 // why — so most of its fields belong to one kind and are zero in the
 // rest; the comments below say which.
-Exec_Node :: struct($It: typeid) {
+Exec_Node :: struct {
 	kind:  Exec_Kind,
 	input: int, // the (left) input: an index into Exec.nodes; -1 for a leaf
 	right: int, // the second input, for the binary operators; -1 otherwise
@@ -104,7 +112,7 @@ Exec_Node :: struct($It: typeid) {
 
 	// BGP
 	bgp:         ^Plan_BGP,
-	iters:       []It,
+	iters:       []record.Scan,
 	iter_open:   []bool,
 	// What each depth bound, so backtracking can release exactly that.
 	// A depth binds at most the four quad positions — plus, when the
@@ -121,7 +129,7 @@ Exec_Node :: struct($It: typeid) {
 	// must not be masked in place — a basic graph pattern below reads it
 	// back when it backtracks).
 	keep:   []bool,
-	masked: []store.Term_ID,
+	masked: []record.Term_ID,
 
 	// Distinct
 	seen: map[string]bool,
@@ -138,13 +146,13 @@ Exec_Node :: struct($It: typeid) {
 	// Two-input operators
 	phase:   Op_Phase,
 	matched: bool,
-	saved:   []store.Term_ID,
+	saved:   []record.Term_ID,
 
 	// Table and Materialized: a stored solution sequence, merged into
 	// the current bindings one row at a time. set_slots records what the
 	// current row bound so the next one can release it.
 	table:      ^Plan_Table,
-	rows:       [dynamic][]store.Term_ID,
+	rows:       [dynamic][]record.Term_ID,
 	row_at:     int,
 	set_slots:  [dynamic]int,
 	collected:  bool,
@@ -159,14 +167,14 @@ Exec_Node :: struct($It: typeid) {
 
 	// Graph_Scan, and Graph_Bind's internal graph slot
 	graph_slot: int,
-	graph_seen: map[store.Term_ID]bool,
+	graph_seen: map[record.Term_ID]bool,
 
 	// Graph_Bind: the query's ?g, and whatever it was bound to when the
 	// operator was entered. The second is not the same as reading the slot
 	// per solution — this operator writes that slot, so by the second
 	// solution the row would be reporting the operator's own last answer.
 	graph_var:  int,
-	graph_outer: store.Term_ID,
+	graph_outer: record.Term_ID,
 
 	// Group and Order, the blocking operators. Both fill `rows` with the
 	// answers they will hand out and then replay them, so they share the
@@ -181,7 +189,7 @@ Exec_Node :: struct($It: typeid) {
 	// the group and once, for a new group, to bind it.
 	key_builder: strings.Builder,
 	key_values:  []Value,
-	key_direct:  []store.Term_ID,
+	key_direct:  []record.Term_ID,
 
 	order:     ^Plan_Order,
 	sort_keys: [dynamic][]Sort_Key,
@@ -201,14 +209,14 @@ Exec_Node :: struct($It: typeid) {
 	// a cycle from queueing a node twice, which is the whole of the
 	// termination argument.
 	path:          ^Plan_Path,
-	path_starts:   [dynamic]store.Term_ID,
-	path_result:   [dynamic]store.Term_ID,
-	path_queue:    [dynamic]store.Term_ID,
-	path_step_out: [dynamic]store.Term_ID,
-	path_seen:     map[store.Term_ID]bool,
-	path_expanded: map[store.Term_ID]bool,
-	path_nodes:    map[store.Term_ID]bool,
-	path_start:    store.Term_ID,
+	path_starts:   [dynamic]record.Term_ID,
+	path_result:   [dynamic]record.Term_ID,
+	path_queue:    [dynamic]record.Term_ID,
+	path_step_out: [dynamic]record.Term_ID,
+	path_seen:     map[record.Term_ID]bool,
+	path_expanded: map[record.Term_ID]bool,
+	path_nodes:    map[record.Term_ID]bool,
+	path_start:    record.Term_ID,
 	path_at:       int,
 	start_at:      int,
 	queue_at:      int,
@@ -221,54 +229,126 @@ Exec_Node :: struct($It: typeid) {
 	check_nodes:   bool,
 }
 
-// Path_Expander runs a property path's step sub-plan for one node of the
-// frontier and appends every node it reaches.
+// **Path_Expander, Triple_Reader and the rest of the backend-spanning
+// procedure types are gone (SPARQL-T-0031).** Six of them existed so
+// that this package could name no backend: three hot-path procedure
+// constants threaded through every operator, and three procedure values
+// for the calls that had to cross back into generic code. The owner's
+// decision that odin-rdf-record is the one and only store retires the
+// reason, so the executor is concrete and every one of them is an
+// ordinary call — `record.snapshot_triple_parts` in place of
+// Triple_Reader, `exec_path_expand` called directly in place of
+// Path_Expander, `exec_exists` in place of Exists_Runner.
 //
-// It is a procedure value for the same reason Exists_Runner is: expanding
-// a frontier node means running an operator tree, and the tree walk is
-// already running one. A generic procedure taking compile-time procedure
-// constants cannot be part of a call cycle without hanging the Odin
-// compiler (dev-2026-07), so the cycle is broken here — out through a
-// concrete adapter in the instantiation package and back into
-// exec_path_expand, which is generic again.
-Path_Expander :: #type proc(
-	data: rawptr,
-	node: int,
-	from: store.Term_ID,
-	backward: bool,
-	out: ^[dynamic]store.Term_ID,
-)
+// The compiler hang that shaped the old design (dev-2026-07: a generic
+// procedure taking compile-time procedure constants cannot be part of a
+// call cycle) was a property of the *generic* procedures. Nothing here
+// is generic now, so the cycles close: a path's step runs an operator
+// tree by calling into the executor, and the executor calls back.
 
-// Triple_Reader answers what a triple term's components are, by ID.
+// match_open asks the snapshot for a pattern and returns the scan.
 //
-// It is the one thing a non-ground triple-term pattern needs that the
-// match interface does not offer. `find_term` goes forwards — the
-// components of a term the query wrote, to that term's ID — and every
-// backend implements it. Nothing goes back. But a pattern like
-// `<<( ?s ?p ?o )>> ?q ?z` matches whatever triple term the store has in
-// that position, and checking it against the pattern means taking it
-// apart again.
+// This is the whole of the read seam that survives — record's
+// `snapshot_match` narrows to a window over one permutation and
+// `range_iter` binds the filters. Origin has no default in record
+// (api.md par. 12.5): a query answers about what the dataset says,
+// asserted and entailed alike, so `.Any` is stated here once.
+@(private = "file")
+match_open :: proc(e: ^Exec, pattern: Match_Pattern) -> record.Scan {
+	when SPARQL_COUNT_READS {
+		read_counts.match += 1
+		read_counts.store_ops += 1
+	}
+	p := record.Pattern {
+		s = pattern[QUAD_S],
+		p = pattern[QUAD_P],
+		o = pattern[QUAD_O],
+		g = pattern[QUAD_G],
+	}
+	return record.range_iter(record.snapshot_match(e.snapshot, p), record.Filter{origin = .Any})
+}
+
+// match_next yields the next matching fact as the engine's own quad.
 //
-// memstore answers from the component array its dictionary already keeps
-// and allocates nothing; kvstore has to materialize the whole term and
-// look each component up again. That asymmetry is store evidence for
-// SPARQL-T-0019: a `triple_parts(d, id)` in the backend convention would
-// make the second one a single read as well.
-Triple_Reader :: #type proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term_ID, ok: bool)
+// **The copy is the decided trade** (SPARQL-T-0031, owner 2026-08-24).
+// record hands back a `^Fact` with named components; the executor
+// indexes a quad by position, four of those sites dynamically. Copying
+// the four ids here costs 16 bytes per matched fact and leaves the
+// hottest loop in the package untouched. Reinterpreting record's layout
+// would be free and is refused: a field reorder there would compile
+// cleanly here and corrupt every result.
+//
+// A scan borrows its snapshot and carries it, so there is nothing to
+// close and no error to report — a read on a resident projection cannot
+// fail.
+@(private = "file")
+match_next :: proc(it: ^record.Scan) -> (quad: Encoded_Quad, ok: bool) {
+	when SPARQL_COUNT_READS {
+		read_counts.next += 1
+		read_counts.store_ops += 1
+	}
+	id, more := record.scan_next(it)
+	if !more {
+		return {}, false
+	}
+	f := record.snapshot_fact(it.snap, id)
+	return Encoded_Quad{f.s, f.p, f.o, f.g}, true
+}
+
+// exec_resolve is the term-binding bridge: the id a ground term has in
+// this snapshot, without interning it. A query must never be a write,
+// and record's read side has no way to be one.
+@(private)
+exec_resolve :: proc(snapshot: record.Snapshot, term: rdf.Term) -> (id: record.Term_ID, found: bool) {
+	when SPARQL_COUNT_READS {
+		read_counts.find += 1
+		read_counts.store_ops += 1
+	}
+	return record.snapshot_resolve(snapshot, term)
+}
+
+// exec_triple_parts takes a stored triple term apart into its three
+// component ids, for a triple-term pattern that is not ground.
+//
+// **This is what SPARQL-T-0019 asked the store for and got.** Against
+// odin-rdf-store the engine had to materialize the whole term and look
+// each component up again — two round trips through the database for
+// something the dictionary already knew. record publishes
+// `snapshot_triple_parts`, which reads the components straight out of
+// the encoding: no allocation, no decode, no recursion, and one
+// question rather than four.
+@(private)
+exec_triple_parts :: proc(
+	snapshot: record.Snapshot,
+	id: record.Term_ID,
+) -> (
+	parts: [3]record.Term_ID,
+	ok: bool,
+) {
+	when SPARQL_COUNT_READS {
+		read_counts.triple += 1
+		read_counts.store_ops += 1
+	}
+	return record.snapshot_triple_parts(snapshot, id)
+}
 
 // Exec is a plan ready to run against one dataset. work is the solution
 // row every operator reads and the basic graph patterns write; a row
 // handed to a consumer is valid until the next call.
-Exec :: struct($D: typeid, $It: typeid) {
-	dataset:   ^D,
-	nodes:     [dynamic]Exec_Node(It),
+Exec :: struct {
+	// The one snapshot every read goes through. A query is defined
+	// against one dataset (SPARQL-T-0024), and on record a snapshot is
+	// what a dataset *is* — epoch-pinned, refcounted, and unaffected by
+	// whatever the writer does next.
+	snapshot:  record.Snapshot,
+	nodes:     [dynamic]Exec_Node,
 	root:      int,
 	// The path from the root to the node currently producing, as
 	// (node, child) pairs — the child is what makes resuming a two-input
 	// operator possible. Sized once at setup: the walk never grows it,
 	// so no solution allocates.
 	stack:     [dynamic][2]int,
-	work:      []store.Term_ID,
+	work:      []record.Term_ID,
 	width:     int,
 	// One expression context for the whole plan: only one operator
 	// evaluates an expression at a time, because a node finishes with a
@@ -286,63 +366,38 @@ Exec :: struct($D: typeid, $It: typeid) {
 	computed:       [dynamic]rdf.Term,
 	computed_index: map[string]int,
 	computed_key:   strings.Builder,
-	// The store's non-interning lookup, used when a computed term turns
-	// out to be one the store already holds.
-	find:      Term_Finder,
-	find_data: rawptr,
-	// The other direction, for triple-term patterns. See Triple_Reader.
-	read_triple:      Triple_Reader,
-	read_triple_data: rawptr,
 	// The root node of each EXISTS sub-plan, in the order plan building
 	// registered them. They live in the same node array as the main plan
 	// — a sub-plan is an ordinary operator tree, just one nothing pulls
 	// from until an expression asks.
 	exists_roots: [dynamic]int,
-	// The door back into the executor for a property path's step, bound by
-	// the instantiation package. See Path_Expander.
-	expand:      Path_Expander,
-	expand_data: rawptr,
 	allocator: runtime.Allocator,
 }
 
 // exec_init builds the operator tree for a plan. width is the number of
 // variable slots the plan was built with (var_slots_count).
 exec_init :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	plan: Plan,
 	slots: ^Var_Slots,
-	dataset: ^D,
-	load: Term_Loader,
-	load_data: rawptr,
-	find: Term_Finder,
-	find_data: rawptr,
-	read_triple: Triple_Reader,
-	read_triple_data: rawptr,
+	snapshot: record.Snapshot,
 	exists_plans: []Plan,
 	exists_nodes: []^Exists_Expr,
-	exists: Exists_Runner,
-	expand: Path_Expander,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
-	e.dataset = dataset
-	e.expand = expand
-	e.expand_data = e
-	e.find = find
-	e.find_data = find_data
-	e.read_triple = read_triple
-	e.read_triple_data = read_triple_data
+	e.snapshot = snapshot
 	width := var_slots_count(slots)
 	e.width = width
 	e.computed = make([dynamic]rdf.Term, allocator)
 	e.computed_index = make(map[string]int, allocator)
 	e.computed_key = strings.builder_make(allocator)
-	expr_context_init(&e.expr, slots, load, load_data, &e.computed, allocator)
-	e.work = make([]store.Term_ID, width, allocator)
+	expr_context_init(&e.expr, slots, snapshot, &e.computed, allocator)
+	e.work = make([]record.Term_ID, width, allocator)
 	for &slot in e.work {
-		slot = store.UNBOUND
+		slot = UNBOUND
 	}
-	e.nodes = make([dynamic]Exec_Node(It), allocator)
+	e.nodes = make([dynamic]Exec_Node, allocator)
 	e.root = build_node(e, plan)
 	e.exists_roots = make([dynamic]int, allocator)
 	for sub in exists_plans {
@@ -352,8 +407,11 @@ exec_init :: proc(
 	// nested EXISTS walk shares the stack with the walk that asked for
 	// it — hence the doubling rather than a fresh allocation per call.
 	e.stack = make([dynamic][2]int, 0, 2 * len(e.nodes) + 2, allocator)
-	e.expr.exists = exists
-	e.expr.exists_data = e
+	// The self-pointer an expression's EXISTS runs back through. It is
+	// why an Exec must not be copied after exec_init — already true (the
+	// operators hold indices into its own arrays), and now stated once
+	// more.
+	e.expr.exec = e
 	e.expr.exists_nodes = exists_nodes
 }
 
@@ -361,7 +419,7 @@ exec_init :: proc(
 // only function that needs it, and it needs it at evaluation time
 // rather than at translation — the reference it resolves is a value the
 // query computed, not one the parser saw.
-exec_set_base :: proc(e: ^Exec($D, $It), base: string) {
+exec_set_base :: proc(e: ^Exec, base: string) {
 	expr_context_set_base(&e.expr, base)
 }
 
@@ -369,7 +427,7 @@ exec_set_base :: proc(e: ^Exec($D, $It), base: string) {
 // open, and releases the terms the query computed. It does not free the
 // plan the tree was built from: the plan is the caller's, and outlives
 // the execution by exactly the length of a plan_destroy call.
-exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
+exec_destroy :: proc(e: ^Exec) {
 	// The blocking operators own group tables and sort keys, which the
 	// shared loop below cannot free without knowing which node kind they
 	// belong to.
@@ -385,11 +443,11 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 		strings.builder_destroy(&node.key_builder)
 	}
 	for &node in e.nodes {
-		for open, i in node.iter_open {
-			if open {
-				DESTROY(&node.iters[i])
-			}
-		}
+		// No iterator to close: a record.Scan is a view over a
+		// permutation window and holds nothing — where a kvstore cursor
+		// had to be closed before its transaction ended, this one is
+		// released by forgetting it. `iter_open` survives because the
+		// executor still needs to know whether a depth has been started.
 		delete(node.iters, e.allocator)
 		delete(node.iter_open, e.allocator)
 		delete(node.bound_backing, e.allocator)
@@ -437,9 +495,9 @@ exec_destroy :: proc(e: ^Exec($D, $It), $DESTROY: proc(it: ^It)) {
 // Children are built first, so a node's input index is always lower than
 // its own — the tree is stored bottom-up.
 @(private = "file")
-build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
+build_node :: proc(e: ^Exec, plan: Plan) -> int {
 	start := len(e.nodes)
-	node := Exec_Node(It) {
+	node := Exec_Node {
 		input = -1,
 		right = -1,
 	}
@@ -452,14 +510,14 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.kind = .BGP
 		node.bgp = v
 		depth := len(v.order)
-		node.iters = make([]It, depth, e.allocator)
+		node.iters = make([]record.Scan, depth, e.allocator)
 		node.iter_open = make([]bool, depth, e.allocator)
 		node.bound_count = make([]int, depth, e.allocator)
 		bind_bound_slots(e, &node, depth, 4 + 3 * len(v.shapes))
 	case ^Plan_NPS:
 		node.kind = .NPS
 		node.nps = v
-		node.iters = make([]It, 1, e.allocator)
+		node.iters = make([]record.Scan, 1, e.allocator)
 		node.iter_open = make([]bool, 1, e.allocator)
 		node.bound_count = make([]int, 1, e.allocator)
 		bind_bound_slots(e, &node, 1, 4)
@@ -472,13 +530,13 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		// it itself, one frontier node at a time.
 		node.input = build_node(e, v.step)
 		node.set_slots = make([dynamic]int, e.allocator)
-		node.path_starts = make([dynamic]store.Term_ID, e.allocator)
-		node.path_result = make([dynamic]store.Term_ID, e.allocator)
-		node.path_queue = make([dynamic]store.Term_ID, e.allocator)
-		node.path_step_out = make([dynamic]store.Term_ID, e.allocator)
-		node.path_seen = make(map[store.Term_ID]bool, e.allocator)
-		node.path_expanded = make(map[store.Term_ID]bool, e.allocator)
-		node.path_nodes = make(map[store.Term_ID]bool, e.allocator)
+		node.path_starts = make([dynamic]record.Term_ID, e.allocator)
+		node.path_result = make([dynamic]record.Term_ID, e.allocator)
+		node.path_queue = make([dynamic]record.Term_ID, e.allocator)
+		node.path_step_out = make([dynamic]record.Term_ID, e.allocator)
+		node.path_seen = make(map[record.Term_ID]bool, e.allocator)
+		node.path_expanded = make(map[record.Term_ID]bool, e.allocator)
+		node.path_nodes = make(map[record.Term_ID]bool, e.allocator)
 		// A ground endpoint the store does not hold is still an endpoint:
 		// the zero-length path binds it to itself whether or not the data
 		// has ever mentioned it. So it gets a name of the engine's own,
@@ -499,7 +557,7 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		for slot in v.slots {
 			node.keep[slot] = true
 		}
-		node.masked = make([]store.Term_ID, e.width, e.allocator)
+		node.masked = make([]record.Term_ID, e.width, e.allocator)
 	case ^Plan_Distinct:
 		node.kind = .Distinct
 		node.input = build_node(e, v.input)
@@ -519,13 +577,13 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.right = build_node(e, v.right)
 		// The bindings in force when the union starts, so the right branch
 		// begins where the left one did. See start_child.
-		node.saved = make([]store.Term_ID, e.width, e.allocator)
+		node.saved = make([]record.Term_ID, e.width, e.allocator)
 	case ^Plan_Left_Join:
 		node.kind = .Left_Join
 		node.input = build_node(e, v.left)
 		node.right = build_node(e, v.right)
 		node.conditions = v.conditions[:]
-		node.saved = make([]store.Term_ID, e.width, e.allocator)
+		node.saved = make([]record.Term_ID, e.width, e.allocator)
 	case ^Plan_Minus:
 		node.kind = .Minus
 		node.input = build_node(e, v.left)
@@ -534,7 +592,7 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.kind = .Join
 		node.input = build_node(e, v.left)
 		node.right = build_node(e, v.right)
-		node.saved = make([]store.Term_ID, e.width, e.allocator)
+		node.saved = make([]record.Term_ID, e.width, e.allocator)
 	case ^Plan_Extend:
 		node.kind = .Extend
 		node.input = build_node(e, v.input)
@@ -564,7 +622,7 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.kind = .Materialized
 		node.input = build_node(e, v.input)
 		node.recollect = v.correlated
-		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.rows = make([dynamic][]record.Term_ID, e.allocator)
 		node.set_slots = make([dynamic]int, e.allocator)
 	case ^Plan_Group:
 		node.kind = .Group
@@ -572,27 +630,27 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 		node.input = build_node(e, v.input)
 		node.groups = make([dynamic]Group_State, e.allocator)
 		node.group_index = make(map[string]int, e.allocator)
-		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.rows = make([dynamic][]record.Term_ID, e.allocator)
 		node.key_builder = strings.builder_make(e.allocator)
 		node.key_values = make([]Value, len(v.keys), e.allocator)
-		node.key_direct = make([]store.Term_ID, len(v.keys), e.allocator)
+		node.key_direct = make([]record.Term_ID, len(v.keys), e.allocator)
 		// The bindings in force when the group starts collecting. A
 		// group's own solution is its keys and its aggregates; everything
 		// else in the answer is whatever was already bound around it, and
 		// snapshotting is how that survives an input that binds and
 		// unbinds its way through a million solutions.
-		node.saved = make([]store.Term_ID, e.width, e.allocator)
+		node.saved = make([]record.Term_ID, e.width, e.allocator)
 	case ^Plan_Order:
 		node.kind = .Order
 		node.order = v
 		node.input = build_node(e, v.input)
-		node.rows = make([dynamic][]store.Term_ID, e.allocator)
+		node.rows = make([dynamic][]record.Term_ID, e.allocator)
 		node.sort_keys = make([dynamic][]Sort_Key, e.allocator)
 	case ^Plan_Graph_Scan:
 		node.kind = .Graph_Scan
 		node.graph_slot = v.slot
-		node.graph_seen = make(map[store.Term_ID]bool, e.allocator)
-		node.iters = make([]It, 1, e.allocator)
+		node.graph_seen = make(map[record.Term_ID]bool, e.allocator)
+		node.iters = make([]record.Scan, 1, e.allocator)
 		node.iter_open = make([]bool, 1, e.allocator)
 		node.bound_count = make([]int, 1, e.allocator)
 		bind_bound_slots(e, &node, 1, 4)
@@ -613,7 +671,7 @@ build_node :: proc(e: ^Exec($D, $It), plan: Plan) -> int {
 // operator bound: one row of `width` slot indices per depth, in one
 // backing array so releasing a depth is a walk over contiguous memory.
 @(private = "file")
-bind_bound_slots :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, width: int) {
+bind_bound_slots :: proc(e: ^Exec, node: ^Exec_Node, depth: int, width: int) {
 	node.bound_backing = make([]int, depth * width, e.allocator)
 	node.bound_slots = make([][]int, depth, e.allocator)
 	for d in 0 ..< depth {
@@ -623,19 +681,16 @@ bind_bound_slots :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, wi
 
 // exec_next yields the next solution, or ok=false when the plan is
 // exhausted. The returned row is indexed by variable slot, holds
-// store.UNBOUND where a variable is unbound, and is valid only until the
+// UNBOUND where a variable is unbound, and is valid only until the
 // next call — a consumer that keeps a solution copies it.
 exec_next :: proc(
-	e: ^Exec($D, $It),
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
+	e: ^Exec,
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
-	collect_all(e, MATCH, NEXT, DESTROY)
-	return run(e, e.root, MATCH, NEXT, DESTROY)
+	collect_all(e)
+	return run(e, e.root)
 }
 
 // collect_all runs the sub-plans whose solutions must be gathered before
@@ -648,10 +703,7 @@ exec_next :: proc(
 // first, and nothing here ever re-enters the driver it is called from.
 @(private = "file")
 collect_all :: proc(
-	e: ^Exec($D, $It),
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
+	e: ^Exec,
 ) {
 	for i in 0 ..< len(e.nodes) {
 		if e.nodes[i].kind != .Materialized || e.nodes[i].collected || e.nodes[i].recollect {
@@ -659,24 +711,24 @@ collect_all :: proc(
 		}
 		e.nodes[i].collected = true
 		for &slot in e.work {
-			slot = store.UNBOUND
+			slot = UNBOUND
 		}
 		for {
-			produced, more := run(e, e.nodes[i].input, MATCH, NEXT, DESTROY)
+			produced, more := run(e, e.nodes[i].input)
 			if !more {
 				break
 			}
 			append(&e.nodes[i].rows, slice_clone(produced, e.allocator))
 		}
 		for &slot in e.work {
-			slot = store.UNBOUND
+			slot = UNBOUND
 		}
 	}
 }
 
 @(private = "file")
-slice_clone :: proc(source: []store.Term_ID, allocator: runtime.Allocator) -> []store.Term_ID {
-	out := make([]store.Term_ID, len(source), allocator)
+slice_clone :: proc(source: []record.Term_ID, allocator: runtime.Allocator) -> []record.Term_ID {
+	out := make([]record.Term_ID, len(source), allocator)
 	copy(out, source)
 	return out
 }
@@ -694,13 +746,10 @@ slice_clone :: proc(source: []store.Term_ID, allocator: runtime.Allocator) -> []
 // the two-input operators expressible at all.
 @(private = "file")
 run :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	root: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	// The walk is re-entrant: an EXISTS evaluated mid-solution runs its
@@ -714,7 +763,7 @@ run :: proc(
 		if pulling {
 			child := start_child(e, at)
 			if child < 0 {
-				row, ok = source_next(e, at, MATCH, NEXT, DESTROY)
+				row, ok = source_next(e, at)
 				pulling = false
 				continue
 			}
@@ -728,7 +777,7 @@ run :: proc(
 		}
 		frame := pop(&e.stack)
 		parent, from := frame[0], frame[1]
-		next_row, next_ok, want := consume(e, parent, from, row, ok, MATCH, NEXT, DESTROY)
+		next_row, next_ok, want := consume(e, parent, from, row, ok)
 		if want >= 0 {
 			append(&e.stack, [2]int{parent, want})
 			at = want
@@ -743,7 +792,7 @@ run :: proc(
 // start_child says which input a node wants a solution from, or -1 when
 // it produces one itself.
 @(private = "file")
-start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
+start_child :: proc(e: ^Exec, at: int) -> int {
 	node := &e.nodes[at]
 	#partial switch node.kind {
 	case .Path:
@@ -821,13 +870,10 @@ start_child :: proc(e: ^Exec($D, $It), at: int) -> int {
 // sequence (VALUES, or a materialized sub-plan).
 @(private = "file")
 source_next :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	node := &e.nodes[at]
@@ -841,17 +887,17 @@ source_next :: proc(
 		node.produced_unit = true
 		return e.work, true
 	case .BGP:
-		return bgp_next(e, at, MATCH, NEXT, DESTROY)
+		return bgp_next(e, at)
 	case .NPS:
-		return nps_next(e, at, MATCH, NEXT, DESTROY)
+		return nps_next(e, at)
 	case .Path:
-		return path_next(e, at, MATCH, NEXT, DESTROY)
+		return path_next(e, at)
 	case .Table:
 		return table_next(e, at)
 	case .Materialized:
 		return stored_next(e, at)
 	case .Graph_Scan:
-		return graph_scan_next(e, at, MATCH, NEXT, DESTROY)
+		return graph_scan_next(e, at)
 	case .Group, .Order:
 		return replay_next(e, at)
 	}
@@ -863,7 +909,7 @@ source_next :: proc(
 // into it: a group's or a sorted sequence's solution is complete in
 // itself, and the row it was built from is gone.
 @(private = "file")
-replay_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bool) {
+replay_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
 	node := &e.nodes[at]
 	if node.row_at >= len(node.rows) {
 		return nil, false
@@ -878,30 +924,32 @@ replay_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bo
 // graphs it holds; the seen-set keeps the answer a set.
 @(private = "file")
 graph_scan_next :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	node := &e.nodes[at]
 	if !node.iter_open[0] {
-		node.iters[0] = MATCH(e.dataset, store.MATCH_ALL)
+		node.iters[0] = match_open(e, MATCH_ALL)
 		node.iter_open[0] = true
 	}
 	for {
 		release_set_slots(e, node)
-		quad, more := NEXT(&node.iters[0])
+		quad, more := match_next(&node.iters[0])
 		if !more {
-			DESTROY(&node.iters[0])
 			node.iter_open[0] = false
 			return nil, false
 		}
-		graph := quad[store.QUAD_G]
-		if graph == store.DEFAULT_GRAPH || graph in node.graph_seen {
+		graph := quad[QUAD_G]
+		// **A fact's G, not a pattern's**, so the default graph is the
+		// stored 0 and never DEFAULT_GRAPH (SPARQL-T-0031 par. 4). The
+		// same bits are also UNBOUND, which is why this is a named
+		// constant: skipping the default graph here is what keeps a row
+		// slot from being "bound" to the value that means unbound, and
+		// GRAPH ?g ranges over the named graphs alone in any case.
+		if graph == STORED_DEFAULT_GRAPH || graph in node.graph_seen {
 			continue
 		}
 		node.graph_seen[graph] = true
@@ -909,7 +957,7 @@ graph_scan_next :: proc(
 		// enclosing solution — in which case this graph only counts if it
 		// agrees.
 		current := e.work[node.graph_slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != graph {
 				continue
 			}
@@ -928,7 +976,7 @@ graph_scan_next :: proc(
 // join correctly with whatever is already bound rather than clobbering
 // it.
 @(private = "file")
-table_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bool) {
+table_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
 	node := &e.nodes[at]
 	for node.row_at < len(node.table.rows) {
 		release_set_slots(e, node)
@@ -943,7 +991,7 @@ table_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: boo
 }
 
 @(private = "file")
-merge_cells :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), cells: []Plan_Table_Cell) -> bool {
+merge_cells :: proc(e: ^Exec, node: ^Exec_Node, cells: []Plan_Table_Cell) -> bool {
 	for cell in cells {
 		if cell.absent {
 			// The cell names a term the store does not hold, so nothing
@@ -957,7 +1005,7 @@ merge_cells :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), cells: []Plan_Tab
 			continue
 		}
 		current := e.work[cell.slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != cell.id {
 				release_set_slots(e, node)
 				return false
@@ -971,7 +1019,7 @@ merge_cells :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), cells: []Plan_Tab
 }
 
 @(private = "file")
-stored_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bool) {
+stored_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
 	node := &e.nodes[at]
 	for node.row_at < len(node.rows) {
 		release_set_slots(e, node)
@@ -986,13 +1034,13 @@ stored_next :: proc(e: ^Exec($D, $It), at: int) -> (row: []store.Term_ID, ok: bo
 }
 
 @(private = "file")
-merge_row :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), stored: []store.Term_ID) -> bool {
+merge_row :: proc(e: ^Exec, node: ^Exec_Node, stored: []record.Term_ID) -> bool {
 	for value, slot in stored {
-		if value == store.UNBOUND {
+		if value == UNBOUND {
 			continue
 		}
 		current := e.work[slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != value {
 				release_set_slots(e, node)
 				return false
@@ -1006,9 +1054,9 @@ merge_row :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2), stored: []store.Ter
 }
 
 @(private = "file")
-release_set_slots :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2)) {
+release_set_slots :: proc(e: ^Exec, node: ^Exec_Node) {
 	for slot in node.set_slots {
-		e.work[slot] = store.UNBOUND
+		e.work[slot] = UNBOUND
 	}
 	clear(&node.set_slots)
 }
@@ -1019,16 +1067,13 @@ release_set_slots :: proc(e: ^Exec($D, $It), node: ^Exec_Node($It2)) {
 // from again.
 @(private = "file")
 consume :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
 	from: int,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	have: bool,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	out: []store.Term_ID,
+	out: []record.Term_ID,
 	ok: bool,
 	want: int,
 ) {
@@ -1039,7 +1084,7 @@ consume :: proc(
 			return nil, false, -1
 		}
 		for value, slot in row {
-			node.masked[slot] = value if node.keep[slot] else store.UNBOUND
+			node.masked[slot] = value if node.keep[slot] else UNBOUND
 		}
 		return node.masked, true, -1
 
@@ -1089,7 +1134,7 @@ consume :: proc(
 		for slot, i in node.bind_slots {
 			// Release the previous solution's value first: the slot
 			// belongs to this operator, so nothing below it will.
-			e.work[slot] = store.UNBOUND
+			e.work[slot] = UNBOUND
 			value := expr_eval(&e.expr, node.bind_exprs[i])
 			if id, bindable := bindable_id(e, value); bindable {
 				e.work[slot] = id
@@ -1117,18 +1162,18 @@ consume :: proc(
 			// union began with rather than on whatever the left branch
 			// left behind (see start_child).
 			node.phase = .Pull_Right
-			node_reset(e, node.input, DESTROY)
+			node_reset(e, node.input)
 			copy(e.work, node.saved)
-			node_reset(e, node.right, DESTROY)
+			node_reset(e, node.right)
 			return nil, false, node.right
 		}
 		return nil, false, -1
 
 	case .Left_Join:
-		return left_join_step(e, at, from, row, have, DESTROY)
+		return left_join_step(e, at, from, row, have)
 
 	case .Join:
-		return join_step(e, at, from, row, have, DESTROY)
+		return join_step(e, at, from, row, have)
 
 	case .Materialized:
 		// Only the correlated one reaches here; the ordinary one is a
@@ -1175,26 +1220,26 @@ consume :: proc(
 		if !have {
 			return nil, false, -1
 		}
-		if node.graph_outer != store.UNBOUND {
+		if node.graph_outer != UNBOUND {
 			// ?g came in bound, so the graph was pushed down and every
 			// solution the body produced is already in it.
 			return row, true, -1
 		}
 		graph := row[node.graph_slot]
 		found := row[node.graph_var]
-		if found == store.UNBOUND {
+		if found == UNBOUND {
 			// The body did not bind ?g, so the join binds it. A body that
 			// bound no graph either — a solution reached without matching
 			// a triple — leaves it unbound, which is what writing UNBOUND
 			// says.
 			row[node.graph_var] = graph
-			if graph != store.UNBOUND {
+			if graph != UNBOUND {
 				e.work[node.graph_var] = graph
 				append(&node.set_slots, node.graph_var)
 			}
 			return row, true, -1
 		}
-		if graph != store.UNBOUND && found != graph {
+		if graph != UNBOUND && found != graph {
 			// The body bound ?g from a subject, predicate or object, and
 			// it is not the graph the solution was found in. Ω(?g→i) and
 			// the solution are incompatible, so there is no join.
@@ -1212,7 +1257,7 @@ consume :: proc(
 // written as the RDF terms they would bind — see value_key for why term
 // identity and not value equality decides the partition.
 @(private = "file")
-group_accumulate :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
+group_accumulate :: proc(e: ^Exec, at: int, row: []record.Term_ID) {
 	node := &e.nodes[at]
 	plan := node.group
 	e.expr.row = row
@@ -1233,11 +1278,11 @@ group_accumulate :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
 	if !found {
 		index = len(node.groups)
 		state := Group_State {
-			key_ids = make([]store.Term_ID, len(plan.keys), e.allocator),
+			key_ids = make([]record.Term_ID, len(plan.keys), e.allocator),
 			accums  = make([]Agg_Accum, len(plan.aggregates), e.allocator),
 		}
 		for key, i in plan.keys {
-			state.key_ids[i] = store.UNBOUND
+			state.key_ids[i] = UNBOUND
 			if key.source >= 0 {
 				state.key_ids[i] = node.key_direct[i]
 			} else if id, bindable := bindable_id(e, node.key_values[i]); bindable {
@@ -1265,7 +1310,7 @@ group_accumulate :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
 // group_finish turns the accumulators into the solutions the operator
 // will hand out, and then releases them.
 @(private = "file")
-group_finish :: proc(e: ^Exec($D, $It), at: int) {
+group_finish :: proc(e: ^Exec, at: int) {
 	node := &e.nodes[at]
 	plan := node.group
 	if len(plan.keys) == 0 && len(node.groups) == 0 {
@@ -1274,7 +1319,7 @@ group_finish :: proc(e: ^Exec($D, $It), at: int) {
 		// when no solution was. COUNT over a pattern that matches nothing
 		// is 0, not no answer at all.
 		state := Group_State {
-			key_ids = make([]store.Term_ID, 0, e.allocator),
+			key_ids = make([]record.Term_ID, 0, e.allocator),
 			accums  = make([]Agg_Accum, len(plan.aggregates), e.allocator),
 		}
 		for aggregate, i in plan.aggregates {
@@ -1307,7 +1352,7 @@ group_finish :: proc(e: ^Exec($D, $It), at: int) {
 // have already been rendered into rows, and an accumulator holds copies
 // of terms that nothing needs once they have.
 @(private = "file")
-group_release :: proc(e: ^Exec($D, $It), at: int) {
+group_release :: proc(e: ^Exec, at: int) {
 	node := &e.nodes[at]
 	for &state in node.groups {
 		for &accum in state.accums {
@@ -1328,7 +1373,7 @@ group_release :: proc(e: ^Exec($D, $It), at: int) {
 // the comparator — a sort asks about a row O(log n) times, and an
 // expression evaluated that often would be the cost of the operator.
 @(private = "file")
-order_collect :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
+order_collect :: proc(e: ^Exec, at: int, row: []record.Term_ID) {
 	node := &e.nodes[at]
 	plan := node.order
 	append(&node.rows, slice_clone(row, e.allocator))
@@ -1347,7 +1392,7 @@ order_collect :: proc(e: ^Exec($D, $It), at: int, row: []store.Term_ID) {
 // one, and the sort holds every row's keys at once. An expression that
 // errored sorts with the unbound (see order.odin).
 @(private = "file")
-sort_key_of :: proc(e: ^Exec($D, $It), value: Value) -> Sort_Key {
+sort_key_of :: proc(e: ^Exec, value: Value) -> Sort_Key {
 	if value.kind == .Error || value.kind == .Unbound {
 		return Sort_Key{value = UNBOUND_VALUE}
 	}
@@ -1359,13 +1404,13 @@ sort_key_of :: proc(e: ^Exec($D, $It), value: Value) -> Sort_Key {
 }
 
 @(private = "file")
-order_finish :: proc(e: ^Exec($D, $It), at: int) {
+order_finish :: proc(e: ^Exec, at: int) {
 	node := &e.nodes[at]
 	count := len(node.rows)
 	if count > 1 {
 		perm := make([]int, count, e.allocator)
 		scratch := make([]int, count, e.allocator)
-		sorted := make([][]store.Term_ID, count, e.allocator)
+		sorted := make([][]record.Term_ID, count, e.allocator)
 		defer delete(perm, e.allocator)
 		defer delete(scratch, e.allocator)
 		defer delete(sorted, e.allocator)
@@ -1384,7 +1429,7 @@ order_finish :: proc(e: ^Exec($D, $It), at: int) {
 }
 
 @(private = "file")
-order_release_keys :: proc(e: ^Exec($D, $It), at: int) {
+order_release_keys :: proc(e: ^Exec, at: int) {
 	node := &e.nodes[at]
 	for keys in node.sort_keys {
 		for key in keys {
@@ -1402,7 +1447,7 @@ order_release_keys :: proc(e: ^Exec($D, $It), at: int) {
 // than replaying. It is the one thing node_reset does that Materialized
 // and Distinct deliberately do not get.
 @(private = "file")
-blocking_reset :: proc(e: ^Exec($D, $It), at: int) {
+blocking_reset :: proc(e: ^Exec, at: int) {
 	node := &e.nodes[at]
 	if node.kind != .Group && node.kind != .Order && !(node.kind == .Materialized && node.recollect) {
 		return
@@ -1428,14 +1473,13 @@ blocking_reset :: proc(e: ^Exec($D, $It), at: int) {
 // get OPTIONAL wrong.
 @(private = "file")
 left_join_step :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
 	from: int,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	have: bool,
-	$DESTROY: proc(it: ^It),
 ) -> (
-	out: []store.Term_ID,
+	out: []record.Term_ID,
 	ok: bool,
 	want: int,
 ) {
@@ -1447,7 +1491,7 @@ left_join_step :: proc(
 		copy(node.saved, e.work)
 		node.matched = false
 		node.phase = .Pull_Right
-		node_reset(e, node.right, DESTROY)
+		node_reset(e, node.right)
 		return nil, false, node.right
 	}
 	// from the right side
@@ -1470,14 +1514,13 @@ left_join_step :: proc(
 // solution, with the left's bindings in place.
 @(private = "file")
 join_step :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
 	from: int,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	have: bool,
-	$DESTROY: proc(it: ^It),
 ) -> (
-	out: []store.Term_ID,
+	out: []record.Term_ID,
 	ok: bool,
 	want: int,
 ) {
@@ -1488,7 +1531,7 @@ join_step :: proc(
 		}
 		copy(node.saved, e.work)
 		node.phase = .Pull_Right
-		node_reset(e, node.right, DESTROY)
+		node_reset(e, node.right)
 		return nil, false, node.right
 	}
 	if have {
@@ -1517,12 +1560,12 @@ join_step :: proc(
 // pattern blank nodes — are none of them in a solution's domain either,
 // and are excluded here for the same reason.
 @(private = "file")
-minus_excluded :: proc(e: ^Exec($D, $It), right: int, row: []store.Term_ID) -> bool {
+minus_excluded :: proc(e: ^Exec, right: int, row: []record.Term_ID) -> bool {
 	internal := e.expr.slots.internal[:]
 	for stored in e.nodes[right].rows {
 		shared, compatible := false, true
 		for value, slot in stored {
-			if value == store.UNBOUND || row[slot] == store.UNBOUND {
+			if value == UNBOUND || row[slot] == UNBOUND {
 				continue
 			}
 			if value != row[slot] {
@@ -1541,7 +1584,7 @@ minus_excluded :: proc(e: ^Exec($D, $It), right: int, row: []store.Term_ID) -> b
 }
 
 @(private = "file")
-conditions_hold :: proc(e: ^Exec($D, $It), conditions: []Expr, row: []store.Term_ID) -> bool {
+conditions_hold :: proc(e: ^Exec, conditions: []Expr, row: []record.Term_ID) -> bool {
 	if len(conditions) == 0 {
 		return true
 	}
@@ -1564,16 +1607,16 @@ conditions_hold :: proc(e: ^Exec($D, $It), conditions: []Expr, row: []store.Term
 // expr_eval.odin). An error or an unbound result binds nothing, which is
 // what §18.5's Extend asks for.
 @(private = "file")
-bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: bool) {
+bindable_id :: proc(e: ^Exec, value: Value) -> (id: record.Term_ID, ok: bool) {
 	if value.kind == .Error || value.kind == .Unbound {
-		return store.UNBOUND, false
+		return UNBOUND, false
 	}
 	if value.has_source {
 		return value.source, true
 	}
 	term, rendered := value_to_term(value, e.allocator)
 	if !rendered {
-		return store.UNBOUND, false
+		return UNBOUND, false
 	}
 	// A blank node the query made is by definition not one the store
 	// holds (§17.4.2.2), so it must not be looked up: a label collision
@@ -1586,7 +1629,7 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 	// a later pattern can match on it — `BIND(?o+1 AS ?z) . ?s ?p ?z` is
 	// a real query shape, and a synthetic ID would match nothing. Only a
 	// term the data does not contain needs a name of the engine's own.
-	if stored, found := e.find(e.find_data, term); found {
+	if stored, found := exec_resolve(e.snapshot, term); found {
 		rdf.destroy_term(term, e.allocator)
 		return stored, true
 	}
@@ -1597,7 +1640,7 @@ bindable_id :: proc(e: ^Exec($D, $It), value: Value) -> (id: store.Term_ID, ok: 
 // it. The same term always gets the same name — see Exec.computed_index
 // for why that is load-bearing rather than tidy.
 @(private = "file")
-computed_id :: proc(e: ^Exec($D, $It), term: rdf.Term) -> store.Term_ID {
+computed_id :: proc(e: ^Exec, term: rdf.Term) -> record.Term_ID {
 	strings.builder_reset(&e.computed_key)
 	term_key(&e.computed_key, term)
 	if index, found := e.computed_index[strings.to_string(e.computed_key)]; found {
@@ -1619,19 +1662,16 @@ computed_id :: proc(e: ^Exec($D, $It), term: rdf.Term) -> store.Term_ID {
 // bind must not leak into the answer (§17.4.1.2's substitution
 // semantics, read as "the pattern is evaluated, not joined").
 exec_exists :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	index: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> bool {
 	if index < 0 || index >= len(e.exists_roots) {
 		return false
 	}
 	root := e.exists_roots[index]
-	node_reset(e, root, DESTROY)
-	_, found := run(e, root, MATCH, NEXT, DESTROY)
-	node_reset(e, root, DESTROY)
+	node_reset(e, root)
+	_, found := run(e, root)
+	node_reset(e, root)
 	return found
 }
 
@@ -1644,14 +1684,10 @@ exec_exists :: proc(
 // answers about resources, not about solutions, so the pattern's answers
 // name the subjects and the store supplies the triples.
 exec_describe :: proc(
-	e: ^Exec($D, $It),
-	targets: []store.Term_ID,
+	e: ^Exec,
+	targets: []record.Term_ID,
 	graph: ^Result_Graph,
-	resolve: Term_Resolver,
-	resolve_data: rawptr,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
+	q: ^Query,
 ) {
 	for subject in targets {
 		// A term the engine named itself is not in the data, and its ID is
@@ -1659,18 +1695,18 @@ exec_describe :: proc(
 		if is_synthetic(subject) {
 			continue
 		}
-		pattern := store.Match_Pattern{subject, store.WILDCARD, store.WILDCARD, store.DEFAULT_GRAPH}
-		it := MATCH(e.dataset, pattern)
-		defer DESTROY(&it)
+		// A pattern, so the default graph is the pattern-side constant.
+		pattern := Match_Pattern{subject, WILDCARD, WILDCARD, DEFAULT_GRAPH}
+		it := match_open(e, pattern)
 		for {
-			quad, more := NEXT(&it)
+			quad, more := match_next(&it)
 			if !more {
 				break
 			}
 			triple := rdf.Triple {
-				subject   = resolve(resolve_data, quad[store.QUAD_S]),
-				predicate = resolve(resolve_data, quad[store.QUAD_P]),
-				object    = resolve(resolve_data, quad[store.QUAD_O]),
+				subject   = query_term(q, quad[QUAD_S]),
+				predicate = query_term(q, quad[QUAD_P]),
+				object    = query_term(q, quad[QUAD_O]),
 			}
 			result_graph_add(graph, triple)
 		}
@@ -1680,7 +1716,7 @@ exec_describe :: proc(
 // exec_computed_term resolves a synthetic ID to the term it names. A
 // consumer materializing a solution asks here before it asks the store,
 // because the store has never heard of these terms.
-exec_computed_term :: proc(e: ^Exec($D, $It), id: store.Term_ID) -> (term: rdf.Term, ok: bool) {
+exec_computed_term :: proc(e: ^Exec, id: record.Term_ID) -> (term: rdf.Term, ok: bool) {
 	if !is_synthetic(id) {
 		return nil, false
 	}
@@ -1696,18 +1732,15 @@ exec_computed_term :: proc(e: ^Exec($D, $It), id: store.Term_ID) -> (term: rdf.T
 // subtree is a contiguous index range because children are built before
 // their parents, so this is a loop and not a recursion.
 @(private = "file")
-node_reset :: proc(e: ^Exec($D, $It), at: int, $DESTROY: proc(it: ^It)) {
+node_reset :: proc(e: ^Exec, at: int) {
 	for i in e.nodes[at].subtree_start ..= at {
 		node := &e.nodes[i]
-		for open, d in node.iter_open {
-			if open {
-				DESTROY(&node.iters[d])
-			}
+		for d in 0 ..< len(node.iter_open) {
 			node.iter_open[d] = false
 		}
 		for d in 0 ..< len(node.bound_count) {
 			for j in 0 ..< node.bound_count[d] {
-				e.work[node.bound_slots[d][j]] = store.UNBOUND
+				e.work[node.bound_slots[d][j]] = UNBOUND
 			}
 			node.bound_count[d] = 0
 		}
@@ -1745,13 +1778,10 @@ node_reset :: proc(e: ^Exec($D, $It), at: int, $DESTROY: proc(it: ^It)) {
 // iterator for its next quad — not restarting the search.
 @(private = "file")
 bgp_next :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	node := &e.nodes[at]
@@ -1776,16 +1806,15 @@ bgp_next :: proc(
 	for node.depth >= 0 {
 		depth := node.depth
 		if !node.iter_open[depth] {
-			node.iters[depth] = MATCH(e.dataset, probe_pattern(e, node, depth))
+			node.iters[depth] = match_open(e, probe_pattern(e, node, depth))
 			node.iter_open[depth] = true
 			node.bound_count[depth] = 0
 		}
 		// Release what this depth bound for its previous quad before
 		// asking for the next one.
 		unbind_depth(e, node, depth)
-		quad, more := NEXT(&node.iters[depth])
+		quad, more := match_next(&node.iters[depth])
 		if !more {
-			DESTROY(&node.iters[depth])
 			node.iter_open[depth] = false
 			node.depth -= 1
 			continue
@@ -1812,47 +1841,43 @@ bgp_next :: proc(
 // bound-slot bookkeeping and lets node_reset clean up after it.
 @(private = "file")
 nps_next :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	node := &e.nodes[at]
 	plan := node.nps
-	subject_position := store.QUAD_O if plan.inverse else store.QUAD_S
-	object_position := store.QUAD_S if plan.inverse else store.QUAD_O
+	subject_position := QUAD_O if plan.inverse else QUAD_S
+	object_position := QUAD_S if plan.inverse else QUAD_O
 
 	if !node.iter_open[0] {
-		pattern: store.Match_Pattern
-		pattern[store.QUAD_P] = store.WILDCARD
+		pattern: Match_Pattern
+		pattern[QUAD_P] = WILDCARD
 		pattern[subject_position] = probe_id(e, plan.subject)
 		pattern[object_position] = probe_id(e, plan.object)
-		pattern[store.QUAD_G] = probe_id(e, plan.graph)
+		pattern[QUAD_G] = probe_id(e, plan.graph)
 		assert(
-			pattern[0] != store.UNBOUND &&
-			pattern[1] != store.UNBOUND &&
-			pattern[2] != store.UNBOUND &&
-			pattern[3] != store.UNBOUND,
+			pattern[0] != UNBOUND &&
+			pattern[1] != UNBOUND &&
+			pattern[2] != UNBOUND &&
+			pattern[3] != UNBOUND,
 			"UNBOUND leaked into a match pattern",
 		)
-		node.iters[0] = MATCH(e.dataset, pattern)
+		node.iters[0] = match_open(e, pattern)
 		node.iter_open[0] = true
 		node.bound_count[0] = 0
 	}
 
 	for {
 		unbind_depth(e, node, 0)
-		quad, more := NEXT(&node.iters[0])
+		quad, more := match_next(&node.iters[0])
 		if !more {
-			DESTROY(&node.iters[0])
 			node.iter_open[0] = false
 			return nil, false
 		}
-		if id_excluded(plan.excluded[:], quad[store.QUAD_P]) {
+		if id_excluded(plan.excluded[:], quad[QUAD_P]) {
 			continue
 		}
 		if !nps_unify(e, node, quad, subject_position, object_position) {
@@ -1863,7 +1888,7 @@ nps_next :: proc(
 }
 
 @(private = "file")
-id_excluded :: proc(excluded: []store.Term_ID, id: store.Term_ID) -> bool {
+id_excluded :: proc(excluded: []record.Term_ID, id: record.Term_ID) -> bool {
 	for candidate in excluded {
 		if candidate == id {
 			return true
@@ -1875,19 +1900,22 @@ id_excluded :: proc(excluded: []store.Term_ID, id: store.Term_ID) -> bool {
 // probe_id is a plan reference as a match-pattern position: a ground ID,
 // the value a bound slot holds, or a wildcard.
 @(private = "file")
-probe_id :: proc(e: ^Exec($D, $It), ref: Plan_Ref) -> store.Term_ID {
+probe_id :: proc(e: ^Exec, ref: Plan_Ref) -> record.Term_ID {
 	if !plan_ref_is_var(ref) {
 		return ref.id
 	}
+	// An unbound slot is a wildcard, and on record that substitution is
+	// the identity: both are 0. Written out rather than returned bare
+	// because the two meanings are still two — see ids.odin.
 	value := e.work[ref.slot]
-	return store.WILDCARD if value == store.UNBOUND else value
+	return WILDCARD if value == UNBOUND else value
 }
 
 @(private = "file")
 nps_unify :: proc(
-	e: ^Exec($D, $It),
-	node: ^Exec_Node($It2),
-	quad: store.Encoded_Quad,
+	e: ^Exec,
+	node: ^Exec_Node,
+	quad: Encoded_Quad,
 	subject_position, object_position: int,
 ) -> bool {
 	plan := node.nps
@@ -1895,7 +1923,7 @@ nps_unify :: proc(
 	pairs := [3][2]int {
 		{subject_position, 0},
 		{object_position, 1},
-		{store.QUAD_G, 2},
+		{QUAD_G, 2},
 	}
 	refs := [3]Plan_Ref{plan.subject, plan.object, plan.graph}
 	for pair in pairs {
@@ -1905,10 +1933,10 @@ nps_unify :: proc(
 		}
 		value := quad[pair[0]]
 		current := e.work[ref.slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != value {
 				for i in 0 ..< count {
-					e.work[node.bound_slots[0][i]] = store.UNBOUND
+					e.work[node.bound_slots[0][i]] = UNBOUND
 				}
 				node.bound_count[0] = 0
 				return false
@@ -1932,19 +1960,16 @@ nps_unify :: proc(
 // handed out one solution per call.
 @(private = "file")
 path_next :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) -> (
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	ok: bool,
 ) {
 	node := &e.nodes[at]
 	if !node.started {
 		node.started = true
-		path_setup(e, at, MATCH, NEXT, DESTROY)
+		path_setup(e, at)
 	}
 	for {
 		release_set_slots(e, node)
@@ -1954,7 +1979,7 @@ path_next :: proc(
 			}
 			node.path_start = node.path_starts[node.start_at]
 			node.start_at += 1
-			path_closure(e, at, MATCH, NEXT, DESTROY)
+			path_closure(e, at)
 			node.path_at = 0
 			continue
 		}
@@ -1977,18 +2002,11 @@ path_next :: proc(
 // `VALUES ?v { 1 } . ?v :p? ?v` over a graph without 1 answers nothing.
 @(private = "file")
 path_setup :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) {
 	node := &e.nodes[at]
 	plan := node.path
-	// An execution that can be handed a property path has to have been
-	// given the way back into itself. Failing here names the omission;
-	// failing at the call site would not.
-	assert(e.expand != nil, "a property path ran in an execution with no path expander")
 	clear(&node.path_starts)
 	clear(&node.path_result)
 	node.path_at = 0
@@ -2012,20 +2030,20 @@ path_setup :: proc(
 	// graph's nodes. Every start is then in nodes(G) by construction, so
 	// the zero-length restriction needs no test of its own.
 	node.check_nodes = false
-	path_collect_nodes(e, at, MATCH, NEXT, DESTROY)
+	path_collect_nodes(e, at)
 }
 
 // path_end_value is the term an endpoint is pinned to, if any: a ground
 // term, or whatever an enclosing solution has already bound the variable
 // to.
 @(private = "file")
-path_end_value :: proc(e: ^Exec($D, $It), end: Plan_Path_End) -> (id: store.Term_ID, fixed: bool) {
+path_end_value :: proc(e: ^Exec, end: Plan_Path_End) -> (id: record.Term_ID, fixed: bool) {
 	if end.slot < 0 {
 		return end.id, true
 	}
 	value := e.work[end.slot]
-	if value == store.UNBOUND {
-		return store.UNBOUND, false
+	if value == UNBOUND {
+		return UNBOUND, false
 	}
 	return value, true
 }
@@ -2041,28 +2059,24 @@ path_end_value :: proc(e: ^Exec($D, $It), end: Plan_Path_End) -> (id: store.Term
 // store evidence for SPARQL-T-0019.
 @(private = "file")
 path_collect_nodes :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) {
 	node := &e.nodes[at]
 	clear(&node.path_nodes)
-	pattern := store.Match_Pattern {
-		store.WILDCARD,
-		store.WILDCARD,
-		store.WILDCARD,
+	pattern := Match_Pattern {
+		WILDCARD,
+		WILDCARD,
+		WILDCARD,
 		path_graph_id(e, node.path.graph),
 	}
-	it := MATCH(e.dataset, pattern)
-	defer DESTROY(&it)
+	it := match_open(e, pattern)
 	for {
-		quad, more := NEXT(&it)
+		quad, more := match_next(&it)
 		if !more {
 			return
 		}
-		for position in ([2]int{store.QUAD_S, store.QUAD_O}) {
+		for position in ([2]int{QUAD_S, QUAD_O}) {
 			id := quad[position]
 			if id in node.path_nodes {
 				continue
@@ -2076,12 +2090,9 @@ path_collect_nodes :: proc(
 // path_in_nodes reports whether a term is a node of the active graph.
 @(private = "file")
 path_in_nodes :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	id: store.Term_ID,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
+	id: record.Term_ID,
 ) -> bool {
 	// A term the engine named itself is by construction not in the data,
 	// and its ID is in a space the store must never be shown.
@@ -2089,12 +2100,11 @@ path_in_nodes :: proc(
 		return false
 	}
 	graph := path_graph_id(e, e.nodes[at].path.graph)
-	for position in ([2]int{store.QUAD_S, store.QUAD_O}) {
-		pattern := store.Match_Pattern{store.WILDCARD, store.WILDCARD, store.WILDCARD, graph}
+	for position in ([2]int{QUAD_S, QUAD_O}) {
+		pattern := Match_Pattern{WILDCARD, WILDCARD, WILDCARD, graph}
 		pattern[position] = id
-		it := MATCH(e.dataset, pattern)
-		_, found := NEXT(&it)
-		DESTROY(&it)
+		it := match_open(e, pattern)
+		_, found := match_next(&it)
 		if found {
 			return true
 		}
@@ -2106,12 +2116,16 @@ path_in_nodes :: proc(
 // always bound by the time a path runs: plan building puts a graph scan
 // above any GRAPH ?g body that holds one (see plan_has_path).
 @(private = "file")
-path_graph_id :: proc(e: ^Exec($D, $It), ref: Plan_Ref) -> store.Term_ID {
+path_graph_id :: proc(e: ^Exec, ref: Plan_Ref) -> record.Term_ID {
 	if !plan_ref_is_var(ref) {
 		return ref.id
 	}
 	value := e.work[ref.slot]
-	assert(value != store.UNBOUND, "a property path ran with its graph variable unbound")
+	// Still exact on record, where UNBOUND is 0 and so is a fact's
+	// default graph: a graph *variable* is bound by graph_scan_next,
+	// which skips the default graph precisely because it has no name to
+	// bind. So 0 here means unbound and nothing else.
+	assert(value != UNBOUND, "a property path ran with its graph variable unbound")
 	return value
 }
 
@@ -2123,11 +2137,8 @@ path_graph_id :: proc(e: ^Exec($D, $It), ref: Plan_Ref) -> store.Term_ID {
 // by the graph and a chain of any depth costs stack depth of zero.
 @(private = "file")
 path_closure :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
 ) {
 	node := &e.nodes[at]
 	plan := node.path
@@ -2139,7 +2150,7 @@ path_closure :: proc(
 	start := node.path_start
 
 	if plan.include_start {
-		if !node.check_nodes || path_in_nodes(e, at, start, MATCH, NEXT, DESTROY) {
+		if !node.check_nodes || path_in_nodes(e, at, start) {
 			node.path_seen[start] = true
 			append(&node.path_result, start)
 		}
@@ -2159,7 +2170,7 @@ path_closure :: proc(
 			continue
 		}
 		clear(&node.path_step_out)
-		e.expand(e.expand_data, at, from, node.backward, &node.path_step_out)
+		exec_path_expand(e, at, from, node.backward, &node.path_step_out)
 		for reached in node.path_step_out {
 			if !(reached in node.path_seen) {
 				node.path_seen[reached] = true
@@ -2176,7 +2187,7 @@ path_closure :: proc(
 // path_emit binds one (start, reached) pair into the solution row, or
 // reports that the row already says otherwise.
 @(private = "file")
-path_emit :: proc(e: ^Exec($D, $It), at: int, start, reached: store.Term_ID) -> bool {
+path_emit :: proc(e: ^Exec, at: int, start, reached: record.Term_ID) -> bool {
 	node := &e.nodes[at]
 	plan := node.path
 	subject_value := reached if node.backward else start
@@ -2197,16 +2208,16 @@ path_emit :: proc(e: ^Exec($D, $It), at: int, start, reached: store.Term_ID) -> 
 
 @(private = "file")
 path_bind :: proc(
-	e: ^Exec($D, $It),
-	node: ^Exec_Node($It2),
+	e: ^Exec,
+	node: ^Exec_Node,
 	end: Plan_Path_End,
-	value: store.Term_ID,
+	value: record.Term_ID,
 ) -> bool {
 	if end.slot < 0 {
 		return end.id == value
 	}
 	current := e.work[end.slot]
-	if current != store.UNBOUND {
+	if current != UNBOUND {
 		return current == value
 	}
 	e.work[end.slot] = value
@@ -2223,14 +2234,11 @@ path_bind :: proc(
 // reset before and after, and the two slots are restored, so a traversal
 // leaves nothing of itself in the row.
 exec_path_expand :: proc(
-	e: ^Exec($D, $It),
+	e: ^Exec,
 	at: int,
-	from: store.Term_ID,
+	from: record.Term_ID,
 	backward: bool,
-	out: ^[dynamic]store.Term_ID,
-	$MATCH: proc(dataset: ^D, pattern: store.Match_Pattern) -> It,
-	$NEXT: proc(it: ^It) -> (store.Encoded_Quad, bool),
-	$DESTROY: proc(it: ^It),
+	out: ^[dynamic]record.Term_ID,
 ) {
 	plan := e.nodes[at].path
 	step := e.nodes[at].input
@@ -2239,20 +2247,20 @@ exec_path_expand :: proc(
 
 	saved_entry := e.work[entry]
 	saved_exit := e.work[exit]
-	node_reset(e, step, DESTROY)
+	node_reset(e, step)
 	e.work[entry] = from
-	e.work[exit] = store.UNBOUND
+	e.work[exit] = UNBOUND
 	for {
-		_, more := run(e, step, MATCH, NEXT, DESTROY)
+		_, more := run(e, step)
 		if !more {
 			break
 		}
 		reached := e.work[exit]
-		if reached != store.UNBOUND {
+		if reached != UNBOUND {
 			append(out, reached)
 		}
 	}
-	node_reset(e, step, DESTROY)
+	node_reset(e, step)
 	e.work[entry] = saved_entry
 	e.work[exit] = saved_exit
 }
@@ -2262,27 +2270,28 @@ exec_path_expand :: proc(
 // narrows the match to exactly its value, which is what makes this an
 // index probe rather than a scan and a filter.
 @(private = "file")
-probe_pattern :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) -> store.Match_Pattern {
+probe_pattern :: proc(e: ^Exec, node: ^Exec_Node, depth: int) -> Match_Pattern {
 	triple := node.bgp.triples[node.bgp.order[depth]]
-	pattern: store.Match_Pattern
+	pattern: Match_Pattern
 	for position, i in triple {
 		if !plan_ref_is_var(position) {
 			pattern[i] = position.id
 			continue
 		}
 		value := e.work[position.slot]
-		pattern[i] = store.WILDCARD if value == store.UNBOUND else value
+		pattern[i] = WILDCARD if value == UNBOUND else value
 	}
-	// UNBOUND is valid in a solution row and in nothing else. One that
-	// reached a match pattern would silently become a full scan, so it
-	// is an assertion rather than a tolerated case.
-	assert(
-		pattern[0] != store.UNBOUND &&
-		pattern[1] != store.UNBOUND &&
-		pattern[2] != store.UNBOUND &&
-		pattern[3] != store.UNBOUND,
-		"UNBOUND leaked into a match pattern",
-	)
+	// **The assert that stood here is gone, not moved** (SPARQL-T-0031).
+	// It read "UNBOUND leaked into a match pattern", and against
+	// odin-rdf-store it was a real check: UNBOUND was its own sentinel,
+	// distinct from WILDCARD, and one reaching a pattern would silently
+	// widen a probe into a full scan. On record the two are the same
+	// value by design — an unbound position *is* the wildcard — so the
+	// same text would assert that 0 != 0 and fail every probe over an
+	// unbound variable. There is nothing left to check here: the
+	// substitution above is total, and a synthetic id (the one value that
+	// must never reach the store) is caught where it is made rather than
+	// where it is used.
 	return pattern
 }
 
@@ -2292,7 +2301,7 @@ probe_pattern :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) -> st
 // matched a wildcard in both positions, and the second occurrence sees
 // the value the first bound.
 @(private = "file")
-unify_quad :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, quad: store.Encoded_Quad) -> bool {
+unify_quad :: proc(e: ^Exec, node: ^Exec_Node, depth: int, quad: Encoded_Quad) -> bool {
 	pattern := node.bgp.order[depth]
 	triple := node.bgp.triples[pattern]
 	count := 0
@@ -2300,25 +2309,30 @@ unify_quad :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, quad: st
 		if !plan_ref_is_var(position) {
 			continue
 		}
-		if i == store.QUAD_G && quad[i] == store.DEFAULT_GRAPH {
+		if i == QUAD_G && quad[i] == STORED_DEFAULT_GRAPH {
 			// A variable in the graph position comes only from GRAPH ?g,
 			// which ranges over the *named* graphs — the default graph is
-			// not one of them and has no name to bind. The match interface
-			// cannot say "any named graph" (its wildcard spans both), so
-			// the exclusion happens here. Recorded as store evidence for
-			// SPARQL-T-0019: an engine that wants named-graph-only
-			// matching currently has to over-fetch and filter.
+			// not one of them and has no name to bind. record's pattern
+			// cannot say "any named graph" either (an unbound G spans
+			// both, and Filter.graphs takes a set of names rather than a
+			// class), so the exclusion happens here, over-fetching and
+			// filtering. That is the same gap SPARQL-T-0019 recorded
+			// against odin-rdf-store, carried across the port unchanged.
+			//
+			// The test is on the *stored* default graph — 0 — and not on
+			// DEFAULT_GRAPH, which is a pattern value record's facts never
+			// carry.
 			for j in 0 ..< count {
-				e.work[node.bound_slots[depth][j]] = store.UNBOUND
+				e.work[node.bound_slots[depth][j]] = UNBOUND
 			}
 			node.bound_count[depth] = 0
 			return false
 		}
 		current := e.work[position.slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != quad[i] {
 				for j in 0 ..< count {
-					e.work[node.bound_slots[depth][j]] = store.UNBOUND
+					e.work[node.bound_slots[depth][j]] = UNBOUND
 				}
 				node.bound_count[depth] = 0
 				return false
@@ -2352,16 +2366,21 @@ unify_quad :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, quad: st
 // bind-or-compare unification unify_quad does for a quad's positions,
 // over a term the store handed back whole.
 @(private = "file")
-unify_shape :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, at: int) -> bool {
+unify_shape :: proc(e: ^Exec, node: ^Exec_Node, depth: int, at: int) -> bool {
 	shape := node.bgp.shapes[at]
 	id := e.work[shape.slot]
-	if store.id_kind(id) != .Triple {
+	// An unbound slot names no term, and record's snapshot_kind asserts
+	// on an id that is not one of the snapshot's rather than answering.
+	if id == UNBOUND {
+		return false
+	}
+	if record.snapshot_kind(e.snapshot, id) != .Triple {
 		// The position matched something that is not a triple term at
 		// all — an IRI, a literal. Not an error: the pattern simply does
 		// not hold here.
 		return false
 	}
-	parts, read := e.read_triple(e.read_triple_data, id)
+	parts, read := exec_triple_parts(e.snapshot, id)
 	if !read {
 		return false
 	}
@@ -2373,7 +2392,7 @@ unify_shape :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, at: int
 			continue
 		}
 		current := e.work[part.slot]
-		if current != store.UNBOUND {
+		if current != UNBOUND {
 			if current != parts[i] {
 				return false
 			}
@@ -2387,9 +2406,9 @@ unify_shape :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int, at: int
 }
 
 @(private = "file")
-unbind_depth :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) {
+unbind_depth :: proc(e: ^Exec, node: ^Exec_Node, depth: int) {
 	for i in 0 ..< node.bound_count[depth] {
-		e.work[node.bound_slots[depth][i]] = store.UNBOUND
+		e.work[node.bound_slots[depth][i]] = UNBOUND
 	}
 	node.bound_count[depth] = 0
 }
@@ -2400,7 +2419,7 @@ unbind_depth :: proc(e: ^Exec($D, $It), node: ^Exec_Node(It), depth: int) {
 // the row's bytes rather than a rendering of its terms, because that is
 // what evaluating over IDs buys.
 @(private)
-row_key :: proc(row: []store.Term_ID, allocator: runtime.Allocator) -> string {
-	bytes := transmute([]u8)runtime.Raw_Slice{data = raw_data(row), len = len(row) * size_of(store.Term_ID)}
+row_key :: proc(row: []record.Term_ID, allocator: runtime.Allocator) -> string {
+	bytes := transmute([]u8)runtime.Raw_Slice{data = raw_data(row), len = len(row) * size_of(record.Term_ID)}
 	return strings.clone(string(bytes), allocator)
 }

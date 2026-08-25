@@ -558,7 +558,7 @@ var_in_scope_of_elements :: proc(p: ^Parser, elements: []Pattern, name: string) 
 // (or subquery) has fully parsed: AS-variable freshness in the SELECT
 // clause and the grouped-query projection restriction.
 @(private)
-check_query_scopes :: proc(p: ^Parser, q: ^Query) {
+check_query_scopes :: proc(p: ^Parser, q: ^Parsed_Query) {
 	if p.err.kind != .None {
 		return
 	}
@@ -627,7 +627,7 @@ check_query_scopes :: proc(p: ^Parser, q: ^Query) {
 // in the projection or HAVING), variables may only be used inside
 // aggregates or if they are grouped.
 @(private = "file")
-check_grouping :: proc(p: ^Parser, q: ^Query) {
+check_grouping :: proc(p: ^Parser, q: ^Parsed_Query) {
 	grouped := len(q.group_by) > 0
 	uses_aggregate := len(q.having) > 0
 	for projection in q.projection {

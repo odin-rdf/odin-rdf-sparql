@@ -6,10 +6,6 @@
 			"path": "../odin-rdf-parser"
 		},
 		{
-			"name": "store",
-			"path": "../odin-rdf-store"
-		},
-		{
 			"name": "record",
 			"path": "../odin-rdf-record"
 		}

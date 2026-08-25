@@ -10,12 +10,13 @@
 // **Ownership.** A Result_Graph owns every term it holds, deep-copied
 // into the allocator it was made with, and `result_graph_destroy` frees
 // all of it. That is deliberate and it is what the family's borrowing
-// convention forces: memstore's materialized terms borrow its dictionary
-// and kvstore's are owned by the query, so a graph that borrowed either
-// would outlive its source in one backend and double-free in the other.
-// Copying once, at the boundary, makes the answer independent of the
-// store it came from — which is what a caller wants from a query result
-// anyway.
+// convention forces: the terms `query_term` hands out are the query's
+// bookkeeping, and record's are a mixture — some borrow the dictionary
+// arena, some own what they built — so a graph that borrowed them would
+// be freed out from under its holder by `query_destroy`, and by
+// `store_close` after that. Copying once, at the boundary, makes the
+// answer independent of the store it came from — which is what a caller
+// wants from a query result anyway.
 //
 // **The graph is a set.** §16.2 says so, and it is not a detail: a
 // template with fewer variables than the pattern instantiates the same
@@ -31,19 +32,7 @@ import "core:strconv"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
-
-// Term_Resolver materializes one of a solution's Term_IDs into the RDF
-// term it names.
-//
-// It is a procedure value rather than a compile-time constant because
-// resolving is exactly where the two backends differ — one borrows its
-// dictionary's storage, the other builds a term from the database's bytes
-// — and because instantiating a template is not a hot path: it runs once
-// per template triple per solution, and it allocates a graph entry
-// anyway. The term it returns belongs to the resolver; a graph copies
-// what it keeps.
-Term_Resolver :: #type proc(data: rawptr, id: store.Term_ID) -> rdf.Term
+import record "record:record"
 
 // Result_Graph is the answer of a CONSTRUCT or a DESCRIBE: a set of
 // triples, owning every term in it.
@@ -331,12 +320,11 @@ template_blank :: proc(t: ^Template, label: string) -> int {
 construct_solution :: proc(
 	graph: ^Result_Graph,
 	template: ^Template,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	solution: int,
-	resolve: Term_Resolver,
-	resolve_data: rawptr,
+	q: ^Query,
 ) {
-	template_build_terms(template, row, solution, resolve, resolve_data)
+	template_build_terms(template, row, solution, q)
 	for source in template.triples {
 		triple: rdf.Triple
 		complete := true
@@ -347,7 +335,7 @@ construct_solution :: proc(
 			// Sharing a buffer would leave the subject reading the
 			// object's label — which the CONSTRUCT-list test catches and
 			// nothing else does.
-			term, ok := template_value(template, source[i], row, solution, resolve, resolve_data, i)
+			term, ok := template_value(template, source[i], row, solution, q, i)
 			if !ok {
 				complete = false
 				break
@@ -368,10 +356,9 @@ construct_solution :: proc(
 @(private = "file")
 template_build_terms :: proc(
 	t: ^Template,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	solution: int,
-	resolve: Term_Resolver,
-	resolve_data: rawptr,
+	q: ^Query,
 ) {
 	#reverse for source, index in t.terms {
 		t.built[index] = nil
@@ -379,7 +366,7 @@ template_build_terms :: proc(
 		node^ = {}
 		complete := true
 		for i in 0 ..< 3 {
-			term, ok := template_value(t, source[i], row, solution, resolve, resolve_data, 3 + 3 * index + i)
+			term, ok := template_value(t, source[i], row, solution, q, 3 + 3 * index + i)
 			if !ok {
 				complete = false
 				break
@@ -404,10 +391,9 @@ template_build_terms :: proc(
 template_value :: proc(
 	t: ^Template,
 	node: Template_Node,
-	row: []store.Term_ID,
+	row: []record.Term_ID,
 	solution: int,
-	resolve: Term_Resolver,
-	resolve_data: rawptr,
+	q: ^Query,
 	buffer: int,
 ) -> (
 	term: rdf.Term,
@@ -418,10 +404,12 @@ template_value :: proc(
 		return rdf.Blank_Node(blank_label(t.buffers[buffer][:], solution, node.blank)), true
 	case node.slot >= 0:
 		id := row[node.slot]
-		if id == store.UNBOUND {
+		if id == UNBOUND {
 			return nil, false
 		}
-		return resolve(resolve_data, id), true
+		// The term is the prepared query's and lives until
+		// query_destroy; a graph copies what it keeps.
+		return query_term(q, id), true
 	case node.triple >= 0:
 		built := t.built[node.triple]
 		return built, built != nil
@@ -488,29 +476,28 @@ blank_label :: proc(buffer: []byte, solution: int, index: int) -> string {
 // failing.
 Describe_Targets :: struct {
 	slots:     [dynamic]int,
-	ids:       [dynamic]store.Term_ID,
+	ids:       [dynamic]record.Term_ID,
 	allocator: runtime.Allocator,
 }
 
-// describe_build compiles a query's DESCRIBE clause. find resolves the
-// IRIs it names against the store's dictionary without interning them,
-// exactly as plan building resolves a pattern's ground terms; an IRI the
-// store has never seen describes nothing.
+// describe_build compiles a query's DESCRIBE clause. The IRIs it names
+// are resolved against the snapshot without interning them, exactly as
+// plan building resolves a pattern's ground terms; an IRI the store has
+// never seen describes nothing.
 //
 // `DESCRIBE *` names every variable in scope, which after plan building
 // is every non-internal slot — a pattern blank node is not a variable a
 // query can describe any more than it is one a query can project.
 describe_build :: proc(
 	d: ^Describe_Targets,
-	q: ^Query,
+	q: ^Parsed_Query,
 	slots: ^Var_Slots,
-	find: Term_Finder,
-	data: rawptr,
+	snapshot: record.Snapshot,
 	allocator := context.allocator,
 ) {
 	d.allocator = allocator
 	d.slots = make([dynamic]int, allocator)
-	d.ids = make([dynamic]store.Term_ID, allocator)
+	d.ids = make([dynamic]record.Term_ID, allocator)
 	if q.select_star {
 		for internal, slot in slots.internal {
 			if !internal {
@@ -526,7 +513,7 @@ describe_build :: proc(
 				append(&d.slots, slot)
 			}
 		case rdf.IRI:
-			if id, found := find(data, v); found {
+			if id, found := exec_resolve(snapshot, v); found {
 				append(&d.ids, id)
 			}
 		}
@@ -546,13 +533,13 @@ describe_destroy :: proc(d: ^Describe_Targets) {
 // solutions name it.
 describe_collect :: proc(
 	d: ^Describe_Targets,
-	row: []store.Term_ID,
-	out: ^[dynamic]store.Term_ID,
-	seen: ^map[store.Term_ID]bool,
+	row: []record.Term_ID,
+	out: ^[dynamic]record.Term_ID,
+	seen: ^map[record.Term_ID]bool,
 ) {
 	for slot in d.slots {
 		id := row[slot]
-		if id == store.UNBOUND || id in seen^ {
+		if id == UNBOUND || id in seen^ {
 			continue
 		}
 		seen^[id] = true
@@ -563,7 +550,7 @@ describe_collect :: proc(
 // describe_ground adds the IRIs the clause named outright. They do not
 // depend on a solution — `DESCRIBE <x>` with no WHERE describes <x> — so
 // they are added once, whether or not the pattern had any answers.
-describe_ground :: proc(d: ^Describe_Targets, out: ^[dynamic]store.Term_ID, seen: ^map[store.Term_ID]bool) {
+describe_ground :: proc(d: ^Describe_Targets, out: ^[dynamic]record.Term_ID, seen: ^map[record.Term_ID]bool) {
 	for id in d.ids {
 		if id in seen^ {
 			continue

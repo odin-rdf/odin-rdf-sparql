@@ -1,12 +1,13 @@
-package sparql_kvstore
+package sparql
 
 // Read counting for the benchmark (SPARQL-T-0040) — and nothing else.
 //
 // `bench/` reports how many times evaluating a query asks the store a
-// question. The tally lives here rather than in `bench/` because the
-// adapters it counts are `@(private)` to this package: they are the seam
-// the core reads through, and a benchmark outside the package cannot
-// wrap them without re-implementing the instantiation.
+// question. The tally lives here rather than in `bench/` because what it
+// counts is `@(private)` to this package: the read seam is
+// `match_open`/`match_next`/`exec_resolve`/`exec_triple_parts` and the
+// term load in `expr_eval.odin`, and a benchmark outside the package
+// cannot wrap them without re-implementing the engine.
 //
 //	-define:SPARQL_COUNT_READS=true
 //
@@ -20,37 +21,43 @@ package sparql_kvstore
 // runs queries serially, resets before a measured run and reads after,
 // and that is the only caller this is for. It is not an API.
 //
+// *(Moved here from `sparql/kvstore/counting.odin` by SPARQL-T-0031,
+// with the seam it counted. The verbs and their meanings are unchanged
+// on purpose — SPARQL-T-0036 compares the port against SPARQL-T-0040's
+// pinned numbers, and a renamed or re-scoped counter would make that
+// comparison worthless.)*
+//
 // # Why the two halves of the tally are different questions
 //
 // `match`/`next`/`load`/`find`/`triple` count **how often the engine
-// asks** — one tick per adapter entry. That is the number
-// `SPARQL-T-0036` compares across the port, and the one expected to hold
-// to the integer: the adapters are one-for-one with the direct calls
-// that replace them, so a changed count means the engine's control flow
+// asks** — one tick per question. That is the number `SPARQL-T-0036`
+// compares across the port, and the one expected to hold to the integer:
+// the kvstore adapters were one-for-one with the direct calls that
+// replaced them, so a changed count means the engine's control flow
 // moved when only its store was supposed to.
 //
 // `store_ops` counts **what the store was actually made to do** — one
-// tick per round trip into kvstore, wherever it happens, including the
-// ones inside `triple_adapter` and at the answer boundary that no
-// adapter tick covers. It is *not* expected to hold: taking a triple
-// term apart is four round trips here (one `lookup_term_txn`, three
-// `find_term_txn`) against one `snapshot_triple_parts` after the port,
-// which is the `SPARQL-T-0019` evidence stated as a measurement rather
-// than as arithmetic. Netting the two into one number would hide exactly
-// the difference the port is trying to make.
+// tick per round trip into the backend, wherever it happens, including
+// the ones at the answer boundary that no other verb covers. It is *not*
+// expected to hold: taking a triple term apart was four round trips
+// against kvstore (one `lookup_term_txn`, three `find_term_txn`) and is
+// one `snapshot_triple_parts` here, which is the `SPARQL-T-0019`
+// evidence stated as a measurement rather than as arithmetic. Netting
+// the two into one number would hide exactly the difference the port is
+// trying to make.
 SPARQL_COUNT_READS :: #config(SPARQL_COUNT_READS, false)
 
 // Read_Counts is the tally, kept per verb because a change that trades
 // one kind of read for another is worth seeing rather than netting out
 // to zero.
 Read_Counts :: struct {
-	// One tick per adapter entry — the questions the engine asks.
-	match:     int, // a match iterator opened for one pattern at one depth
-	next:      int, // one step of one iterator
+	// One tick per question the engine asks.
+	match:     int, // a scan opened for one pattern at one depth
+	next:      int, // one step of one scan
 	load:      int, // a result id materialized during expression evaluation
 	find:      int, // a ground term of the query bound to an id
 	triple:    int, // a stored triple term taken apart
-	// Every round trip into kvstore, wherever it is made.
+	// Every round trip into the store, wherever it is made.
 	store_ops: int,
 }
 
@@ -60,8 +67,8 @@ when SPARQL_COUNT_READS {
 
 	// read_counts_reset zeroes the tally. Call it immediately before the
 	// run to be counted — preparing a query binds its ground terms
-	// through the same adapters, so a reset after `query_init` and a
-	// reset before it are answering different questions.
+	// through the same seam, so a reset after `query_init` and a reset
+	// before it are answering different questions.
 	read_counts_reset :: proc() {
 		read_counts = {}
 	}

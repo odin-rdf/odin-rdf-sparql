@@ -42,7 +42,7 @@ translate :: proc(p: ^Parser) -> (a: Algebra, ok: bool) {
 // on top of the translated pattern. Used for the main query and for
 // subqueries.
 @(private = "file")
-translate_query :: proc(p: ^Parser, q: ^Query) -> Algebra {
+translate_query :: proc(p: ^Parser, q: ^Parsed_Query) -> Algebra {
 	g: Algebra
 	if q.construct_where {
 		// The CONSTRUCT WHERE shorthand: the template is the pattern.
@@ -173,7 +173,7 @@ group_has_own_filter :: proc(g: ^Group_Pattern) -> bool {
 // uses_grouping reports whether §18.2.4.1 applies: explicit GROUP BY,
 // or an aggregate anywhere aggregates may appear.
 @(private = "file")
-uses_grouping :: proc(q: ^Query) -> bool {
+uses_grouping :: proc(q: ^Parsed_Query) -> bool {
 	if len(q.group_by) > 0 || len(q.having) > 0 {
 		return true
 	}

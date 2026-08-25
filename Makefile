@@ -2,48 +2,56 @@ NAME  := sparql-bench
 BENCH := bench
 OUT   := build/$(NAME)
 
-# Odin source collections. The parser, the store and the record store are
-# sibling checkouts rather than vendored copies, so they are reached through
-# collections instead of relative paths -- `import "rdf:rdf"` for the data model
-# and `rdf:rdf/turtle` and friends for the four format packages,
-# `import "store:store"` for the match interface and `store:store/kvstore` for
-# the backend, `import "record:record"` for the system of record and
+# Odin source collections. The parser and the record store are sibling
+# checkouts rather than vendored copies, so they are reached through
+# collections instead of relative paths -- `import "rdf:rdf"` for the data
+# model and `rdf:rdf/turtle` and friends for the four format packages,
+# `import "record:record"` for the system of record and
 # `record:record/ingest` for its document loaders. `rdf:` is required even
-# where this project only names the store or the record: their own sources
-# import it, and a collection is resolved in the importing compilation, not the
-# imported checkout. ols.json declares the same set so the language server
-# resolves what the compiler does.
+# where this project only names the record: its own sources import it, and
+# a collection is resolved in the importing compilation, not the imported
+# checkout. ols.json declares the same set so the language server resolves
+# what the compiler does.
 #
-# `record:` arrives in SPARQL-T-0030 and adds only -- `store:` is still here
-# and still load-bearing until SPARQL-T-0031 collapses the seam, because a
-# task that both adds a backend and deletes one makes a red build ambiguous.
-COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store -collection:record=../odin-rdf-record
+# **`store:` is gone as of SPARQL-T-0031.** This engine was written
+# backend-independent over odin-rdf-store's match interface and
+# instantiated in `sparql/kvstore`; odin-rdf-record is the one and only
+# store from here on (owner, 2026-08-24), so the seam is retired rather
+# than re-pointed and nothing in this repository links LMDB.
+COLL := -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
 
 # Every package with Odin sources, pinned explicitly the way odin-rdf-store
 # does -- discovery cannot express intent about what belongs (SPARQL-T-0001).
-# sparql is the public engine package: parser, algebra, and the
-# backend-independent evaluator. sparql/kvstore is its instantiation over the
-# store's backend -- a separate package because the core names no backend
-# (SPARQL-T-0011). It was one of two until odin-rdf-store retired its in-memory
-# backend (STORE-A-0006); the split survives because the core/instantiation
-# boundary is what a future backend would use, not because two exist today.
-# tests/w3c/harness runs the vendored W3C suites; tests/guards holds the
-# allocation-guard tests; tests/readme compiles and asserts the README's
-# example (SPARQL-T-0009). tests/smoke is the record plumbing's only consumer
-# until SPARQL-T-0031 -- it names no backend abstraction and does not import
-# `sparql` at all, because a smoke test that needs the engine to compile is
-# testing the engine rather than the collection.
-PKGS     := sparql sparql/srj sparql/srx sparql/kvstore tests/guards tests/w3c/harness tests/readme tests/smoke
+# sparql is the engine: parser, algebra, evaluator, and -- since
+# SPARQL-T-0031 collapsed the instantiation seam -- the prepared-query API
+# that `sparql/kvstore` used to hold. sparql/srj and sparql/srx are the two
+# results serializations; they stay separate because they are output
+# formats, never instantiations.
+#
+# **PENDING is the port's red edge.** These three packages still name
+# `store:` and `sparql/kvstore`, and neither `make test` nor `make check`
+# can include them until they are ported: tests/guards and tests/readme at
+# SPARQL-T-0032, tests/w3c/harness at SPARQL-T-0033. They are listed rather
+# than deleted so that what is missing is visible in this file rather than
+# only in a task. tests/smoke is the record plumbing's own test and
+# tests/portcheck is the port's bridge coverage -- one query of every
+# operator shape, under the leak checker, because otherwise nothing in
+# this repository runs the engine for two tasks. Both go when the ported
+# suite makes them redundant (SPARQL-T-0032/T-0033).
+PKGS     := sparql sparql/srj sparql/srx tests/smoke tests/portcheck
+PENDING  := tests/guards tests/w3c/harness tests/readme
 # bench/ has an entry point, so it is vetted outside the PKGS loop rather
 # than inside it -- and both of its builds are, since a `when`-gated
 # branch that nothing compiles is a branch that rots (SPARQL-T-0040).
 SRC_DIRS := $(PKGS) $(BENCH)
 
-# STORE-A-0001 makes the store's Term_ID width a build-time choice, and this
-# project compiles the store's sources into its own binaries. Query code must
-# not assume 64-bit IDs, so the suite runs once per configuration rather than
-# once. This is what CI should invoke -- `make test`, the whole matrix.
-WIDTHS := 64 32
+# **There is no Term_ID width matrix any more** (SPARQL-T-0031). It existed
+# because STORE-A-0001 made odin-rdf-store's Term_ID width a build-time
+# choice and this project compiled the store's sources into its own
+# binaries. odin-rdf-record's widths are fixed by design -- its inline term
+# encoding was frozen at first write -- so there is one configuration and
+# `make test` runs once. odin-rdf-shacl became exempt the same way and for
+# the same reason (2026-08-20).
 
 .PHONY: all help test check bench build-bench clean
 
@@ -59,20 +67,19 @@ help: ## Show available targets
 # frees by default, which a passing build hides. Promote them to failures.
 TEST_FLAGS := -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true $(COLL)
 
-test: ## Run the full suite at both Term_ID widths
+test: ## Run the full suite
 	@if [ -z "$(PKGS)" ]; then echo "no packages yet"; exit 0; fi; \
-	for width in $(WIDTHS); do \
-		echo "== Term_ID $$width-bit =="; \
-		for pkg in $(PKGS); do \
-			echo "-- $$pkg --"; \
-			odin test $$pkg $(TEST_FLAGS) \
-				-define:RDF_STORE_TERM_ID_BITS=$$width || exit 1; \
-		done; \
+	for pkg in $(PKGS); do \
+		echo "-- $$pkg --"; \
+		odin test $$pkg $(TEST_FLAGS) || exit 1; \
 	done
+	@if [ -n "$(PENDING)" ]; then \
+		echo "-- not yet ported (SPARQL-T-0032/T-0033): $(PENDING) --"; \
+	fi
 
 # Vets every package including the ones with no tests, so a package the suite
 # never instantiates still has to compile clean.
-check: ## Vet every package at the default Term_ID width
+check: ## Vet every package
 	@if [ -z "$(SRC_DIRS)" ]; then echo "no packages yet"; exit 0; fi; \
 	for pkg in $(filter-out $(BENCH),$(SRC_DIRS)); do \
 		echo "-- $$pkg --"; \
@@ -81,14 +88,14 @@ check: ## Vet every package at the default Term_ID width
 	@echo "-- $(BENCH) --"
 	@odin check $(BENCH) -vet -strict-style $(COLL) || exit 1
 	@odin check $(BENCH) -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
-	@echo "-- sparql/kvstore (instrumented) --"
-	@odin check sparql/kvstore -no-entry-point -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
+	@echo "-- sparql (instrumented) --"
+	@odin check sparql -no-entry-point -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
 
 # Benchmarks measure the engine, and a debug build measures the compiler
 # instead, so they get the release flags.
 #
 # **Two builds, not one** (SPARQL-T-0040). Read counting lives behind
-# `-define:SPARQL_COUNT_READS` in `sparql/kvstore/counting.odin`, and a
+# `-define:SPARQL_COUNT_READS` in `sparql/counting.odin`, and a
 # counter inside the timed binary would be measuring itself, so the timed
 # run carries no counter at all -- `when SPARQL_COUNT_READS` compiles to
 # nothing. The instrumented run takes no timings and is where the pinned

@@ -38,7 +38,7 @@ import "core:strconv"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
+import record "record:record"
 
 // The XSD datatypes this engine interprets — the ones with a value, as
 // opposed to the ones it can only compare as terms. A literal of any
@@ -116,7 +116,7 @@ Value :: struct {
 	// The store ID this value was read from, when it was read from one.
 	// A solution row holds IDs, so binding a variable to an expression
 	// result needs the ID back — see bindable_id in exec.odin.
-	source:     store.Term_ID,
+	source:     record.Term_ID,
 	has_source: bool,
 	numeric:  Numeric_Kind,
 	term:     rdf.Term, // the RDF term this came from, where there is one
@@ -864,7 +864,7 @@ value_negate :: proc(v: Value) -> Value {
 	// The negated value is a different value from the one that was read,
 	// so it must not keep the ID that one came from — carrying it would
 	// bind a variable to the un-negated term.
-	out.source = store.UNBOUND
+	out.source = UNBOUND
 	out.has_source = false
 	out.integer = -v.integer
 	out.number = -v.number

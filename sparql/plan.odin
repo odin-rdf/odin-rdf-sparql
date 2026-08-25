@@ -5,7 +5,7 @@
 //
 // **Variables become slots.** Every variable and every blank node in the
 // pattern is assigned a dense integer slot, and a solution is a flat
-// `[]store.Term_ID` indexed by slot — not a map. Joining and
+// `[]record.Term_ID` indexed by slot — not a map. Joining and
 // deduplicating solutions is then integer comparison, which is the whole
 // point of evaluating over Term_IDs. Blank nodes get slots too: in a
 // pattern a blank node *is* a variable, just one the query cannot name
@@ -31,7 +31,7 @@ import "base:runtime"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
+import record "record:record"
 
 // Var_Slots is a query's variable-slot table: the mapping from the
 // names in the query text to the columns of a solution row.
@@ -139,7 +139,7 @@ slot_for :: proc(vs: ^Var_Slots, sigil: string, name: string, internal: bool) ->
 // slot to unify against, or a term ID to match exactly.
 Plan_Ref :: struct {
 	slot: int, // >= 0: a variable slot; < 0: ground, use id
-	id:   store.Term_ID,
+	id:   record.Term_ID,
 }
 
 // plan_ref_is_var distinguishes the two: a slot to unify against, or a
@@ -149,8 +149,8 @@ plan_ref_is_var :: proc(r: Plan_Ref) -> bool {
 }
 
 // Plan_Triple is a quad pattern over slots and IDs, indexed by
-// store.QUAD_S/P/O/G. The graph position is filled from the plan's
-// active graph — store.DEFAULT_GRAPH outside a GRAPH clause.
+// QUAD_S/P/O/G. The graph position is filled from the plan's
+// active graph — DEFAULT_GRAPH outside a GRAPH clause.
 Plan_Triple :: distinct [4]Plan_Ref
 
 // Plan_Term_Shape is a triple-term pattern that is not ground: what a
@@ -279,7 +279,7 @@ Plan_Extend :: struct {
 // the whole row unmatchable.
 Plan_Table_Cell :: struct {
 	slot:   int,
-	id:     store.Term_ID,
+	id:     record.Term_ID,
 	bound:  bool,
 	absent: bool,
 	// The term the cell was written with, kept for the absent case: a
@@ -458,7 +458,7 @@ Plan_Materialized :: struct {
 // is.
 Plan_Path_End :: struct {
 	slot:   int, // >= 0: a variable slot; < 0: ground, use id
-	id:     store.Term_ID,
+	id:     record.Term_ID,
 	// A ground term the store does not hold. id is filled in at exec
 	// setup; term borrows the query's parse, which outlives the plan.
 	absent: bool,
@@ -480,7 +480,7 @@ Plan_NPS :: struct {
 	subject:  Plan_Ref,
 	object:   Plan_Ref,
 	graph:    Plan_Ref,
-	excluded: [dynamic]store.Term_ID,
+	excluded: [dynamic]record.Term_ID,
 	// inverse swaps which quad position each end matches: the subject end
 	// against the object position and back.
 	inverse:  bool,
@@ -543,13 +543,9 @@ Plan :: union {
 	^Plan_Order,
 }
 
-// Term_Finder resolves a ground term to its store ID without interning
-// it. found=false means the store does not hold the term.
-Term_Finder :: #type proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool)
-
 // Plan_Builder carries what plan construction needs: the slot table
-// being filled, the store's non-interning lookup, and the graph that
-// triple patterns match in.
+// being filled, the snapshot ground terms resolve against, and the graph
+// that triple patterns match in.
 //
 // unsupported names the first algebra operator this task's evaluator
 // does not implement. It is a string rather than a flag so a caller can
@@ -558,8 +554,10 @@ Term_Finder :: #type proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, f
 // look like a query with no answers.
 Plan_Builder :: struct {
 	slots:       ^Var_Slots,
-	find:        Term_Finder,
-	data:        rawptr,
+	// The dataset a ground term is resolved against — the same snapshot
+	// the execution will read, so a term the plan resolved is a term the
+	// run can find. Resolving never interns: a query is not a write.
+	snapshot:    record.Snapshot,
 	// The graph triple patterns match in. Outside a GRAPH clause it is
 	// the default graph; inside one it is that clause's IRI or, for
 	// GRAPH ?g, the variable's slot — which is how ?g comes back bound
@@ -581,22 +579,22 @@ Plan_Builder :: struct {
 	allocator:   runtime.Allocator,
 }
 
-// plan_builder_init prepares a builder against a slot table and a store.
-// find is the store's non-interning lookup and data is what it is called
-// with; both must outlive the plans the builder produces. The builder
-// itself must outlive them too — a plan can borrow a triple term the
-// builder materialized — so destroy it after plan_destroy.
+// plan_builder_init prepares a builder against a slot table and a
+// snapshot. The snapshot must outlive the plans the builder produces,
+// and the builder itself must outlive them too — a plan can borrow a
+// triple term the builder materialized — so destroy it after
+// plan_destroy.
 plan_builder_init :: proc(
 	b: ^Plan_Builder,
 	slots: ^Var_Slots,
-	find: Term_Finder,
-	data: rawptr,
+	snapshot: record.Snapshot,
 	allocator := context.allocator,
 ) {
 	b.slots = slots
-	b.find = find
-	b.data = data
-	b.graph = Plan_Ref{slot = -1, id = store.DEFAULT_GRAPH}
+	b.snapshot = snapshot
+	// A pattern's graph position, so this is the pattern-side constant
+	// (record.MATCH_DEFAULT_GRAPH) and never the 0 a fact carries.
+	b.graph = Plan_Ref{slot = -1, id = DEFAULT_GRAPH}
 	b.exists_nodes = make([dynamic]^Exists_Expr, allocator)
 	b.exists_plans = make([dynamic]Plan, allocator)
 	b.terms = make([dynamic]rdf.Term, allocator)
@@ -799,7 +797,7 @@ plan_build :: proc(b: ^Plan_Builder, a: Algebra) -> (p: Plan, ok: bool) {
 		// on the way out. See Plan_Graph_Bind for the two entries that
 		// pin the difference.
 		inner_slot := fresh_internal_slot(b.slots)
-		b.graph = Plan_Ref{slot = inner_slot, id = store.UNBOUND}
+		b.graph = Plan_Ref{slot = inner_slot, id = UNBOUND}
 		inner := plan_build(b, v.input) or_return
 		body := inner
 		if !plan_matches_triples(inner) {
@@ -992,7 +990,7 @@ path_end :: proc(b: ^Plan_Builder, node: Pattern_Node) -> (end: Plan_Path_End, o
 
 @(private = "file")
 ground_end :: proc(b: ^Plan_Builder, term: rdf.Term) -> Plan_Path_End {
-	id, found := b.find(b.data, term)
+	id, found := exec_resolve(b.snapshot, term)
 	if !found {
 		return Plan_Path_End{slot = -1, absent = true, term = term}
 	}
@@ -1131,10 +1129,10 @@ build_path_link :: proc(
 	plan.shapes = make([dynamic]Plan_Term_Shape, b.allocator)
 	plan.shape_range = make([dynamic][2]int, b.allocator)
 	triple: Plan_Triple
-	triple[store.QUAD_S] = subject_ref
-	triple[store.QUAD_P] = predicate_ref
-	triple[store.QUAD_O] = object_ref
-	triple[store.QUAD_G] = b.graph
+	triple[QUAD_S] = subject_ref
+	triple[QUAD_P] = predicate_ref
+	triple[QUAD_O] = object_ref
+	triple[QUAD_G] = b.graph
 	append(&plan.triples, triple)
 	// No triple term can occur in a path step — a path endpoint that is
 	// one is ground, and its predicate is an IRI — but the range still
@@ -1163,8 +1161,8 @@ build_path_negated :: proc(
 	if !subject_present || !object_present {
 		return new(Plan_Nothing, b.allocator), true
 	}
-	forward := make([dynamic]store.Term_ID, b.allocator)
-	inverse := make([dynamic]store.Term_ID, b.allocator)
+	forward := make([dynamic]record.Term_ID, b.allocator)
+	inverse := make([dynamic]record.Term_ID, b.allocator)
 	inverse_members := false
 	for member in path.children {
 		target := &forward
@@ -1182,7 +1180,7 @@ build_path_negated :: proc(
 		}
 		// A member the store never saw excludes nothing, so it is dropped
 		// rather than kept as an ID that could not match anyway.
-		if id, found := b.find(b.data, iri_node.iri); found {
+		if id, found := exec_resolve(b.snapshot, iri_node.iri); found {
 			append(target, id)
 		}
 	}
@@ -1698,7 +1696,7 @@ build_table :: proc(b: ^Plan_Builder, t: ^Alg_Table) -> (p: Plan, ok: bool) {
 }
 
 @(private = "file")
-ground_ref_id :: proc(b: ^Plan_Builder, term: rdf.Term) -> (id: store.Term_ID, ok: bool, present: bool) {
+ground_ref_id :: proc(b: ^Plan_Builder, term: rdf.Term) -> (id: record.Term_ID, ok: bool, present: bool) {
 	ref, ref_ok, ref_present := ground_ref(b, term)
 	return ref.id, ref_ok, ref_present
 }
@@ -1729,7 +1727,7 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 			}
 			t[i] = ref
 		}
-		t[store.QUAD_G] = b.graph
+		t[QUAD_G] = b.graph
 		append(&plan.triples, t)
 		append(&plan.shape_range, [2]int{start, len(plan.shapes)})
 	}
@@ -1801,8 +1799,8 @@ plan_ref :: proc(
 // store hands back whatever triple term sits there, and the components
 // are checked afterwards against the shape — the same
 // bind-or-compare unification a repeated variable within one pattern
-// gets. Taking the matched term apart is what Triple_Reader is for
-// (exec.odin).
+// gets. Taking the matched term apart is exec_triple_parts, one read
+// out of record's encoding (exec.odin).
 
 // triple_term_ref resolves a triple term in a pattern position.
 @(private = "file")
@@ -1933,14 +1931,19 @@ triple_term_free :: proc(term: rdf.Term, allocator: runtime.Allocator) {
 
 @(private = "file")
 ground_ref :: proc(b: ^Plan_Builder, term: rdf.Term) -> (ref: Plan_Ref, ok: bool, present: bool) {
-	id, found := b.find(b.data, term)
+	id, found := exec_resolve(b.snapshot, term)
 	if !found {
 		return {}, true, false
 	}
-	// A dictionary never assigns a Sentinel-tagged ID, so a ground term
-	// resolving to one would mean the sentinel space had leaked into the
-	// dictionary — a bug worth failing on rather than matching against.
-	assert(store.id_kind(id) != .Sentinel, "find_term returned a reserved sentinel ID")
+	// The property odin-rdf-store stated as "never a Sentinel-tagged ID"
+	// survives the port with a different spelling, because record has no
+	// sentinel kind: snapshot_resolve answers with a dictionary id or an
+	// inlined literal, never with one of the values reserved for a
+	// consumer's own computed terms. A ground term resolving into that
+	// range would mean the two spaces had met, which is the collision
+	// SPARQL-T-0019 recorded and record's reservation exists to prevent —
+	// worth failing on rather than matching against.
+	assert(!is_synthetic(id), "the store resolved a ground term into the consumer id range")
 	return Plan_Ref{slot = -1, id = id}, true, true
 }
 

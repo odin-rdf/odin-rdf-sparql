@@ -51,7 +51,9 @@ eval_text :: proc(t: ^testing.T, text: string, loc := #caller_location) -> (rend
 	}
 
 	ctx: Expr_Context
-	expr_context_init(&ctx, &slots, nil, nil, &computed)
+	// A zero snapshot: these expressions name no variable, so nothing is
+	// ever read out of a dataset.
+	expr_context_init(&ctx, &slots, {}, &computed)
 	defer expr_context_destroy(&ctx)
 	expr_context_set_base(&ctx, parser_base(&p))
 

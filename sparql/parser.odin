@@ -34,7 +34,7 @@ Parser :: struct {
 	tok:         Token,
 	has_tok:     bool,
 	err:         Error,
-	query:       ^Query, // owned; freed by parser_destroy
+	query:       ^Parsed_Query, // owned; freed by parser_destroy
 	intern:      rdf.Intern_Table,
 	prefixes:    map[string]string, // prefix (borrowed) -> expansion (interned)
 	base:        string, // interned; "" when no base established
@@ -117,7 +117,7 @@ parser_base :: proc(p: ^Parser) -> string {
 // parse consumes the whole query. ok is false on error, with p.err
 // positioned at the violation; the partial tree is owned by the parser
 // either way. Calling parse twice is not supported.
-parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
+parse :: proc(p: ^Parser) -> (q: ^Parsed_Query, ok: bool) {
 	advance(p)
 	if p.err.kind != .None {
 		return nil, false
@@ -201,7 +201,7 @@ parse :: proc(p: ^Parser) -> (q: ^Query, ok: bool) {
 // whose braced triples serve as both template and pattern
 // (construct_where marks it for the algebra translation).
 @(private = "file")
-parse_construct_head :: proc(p: ^Parser, q: ^Query) {
+parse_construct_head :: proc(p: ^Parser, q: ^Parsed_Query) {
 	if at(p, .L_Brace) {
 		q.template = parse_template(p)
 		if p.err.kind != .None {
@@ -255,7 +255,7 @@ parse_template :: proc(p: ^Parser) -> ^Basic_Pattern {
 
 // parse_describe_head parses DESCRIBE ('*' | VarOrIri+) DatasetClause*.
 @(private = "file")
-parse_describe_head :: proc(p: ^Parser, q: ^Query) {
+parse_describe_head :: proc(p: ^Parser, q: ^Parsed_Query) {
 	q.describe = make([dynamic]Pattern_Node, p.allocator)
 	if at(p, .Star) {
 		q.select_star = true
@@ -340,7 +340,7 @@ token_pos :: proc(tok: Token) -> Position {
 // --- Prologue -------------------------------------------------------
 
 @(private = "file")
-parse_prologue :: proc(p: ^Parser, q: ^Query) {
+parse_prologue :: proc(p: ^Parser, q: ^Parsed_Query) {
 	for p.err.kind == .None {
 		switch {
 		case at_keyword(p, .Version):
@@ -414,7 +414,7 @@ pname_is_ns :: proc(text: string) -> bool {
 // --- SELECT / datasets / modifiers ---------------------------------
 
 @(private = "file")
-parse_select_clause :: proc(p: ^Parser, q: ^Query) {
+parse_select_clause :: proc(p: ^Parser, q: ^Parsed_Query) {
 	advance(p) // SELECT
 	if at_keyword(p, .Distinct) {
 		q.select_modifier = .Distinct
@@ -471,7 +471,7 @@ parse_select_clause :: proc(p: ^Parser, q: ^Query) {
 }
 
 @(private = "file")
-parse_dataset_clauses :: proc(p: ^Parser, q: ^Query) {
+parse_dataset_clauses :: proc(p: ^Parser, q: ^Parsed_Query) {
 	for p.err.kind == .None && at_keyword(p, .From) {
 		pos := token_pos(p.tok)
 		advance(p)
@@ -489,7 +489,7 @@ parse_dataset_clauses :: proc(p: ^Parser, q: ^Query) {
 }
 
 @(private = "file")
-parse_solution_modifiers :: proc(p: ^Parser, q: ^Query) {
+parse_solution_modifiers :: proc(p: ^Parser, q: ^Parsed_Query) {
 	if at_keyword(p, .Group) {
 		advance(p)
 		if !at_keyword(p, .By) {
@@ -809,8 +809,8 @@ parse_group :: proc(p: ^Parser) -> ^Group_Pattern {
 }
 
 @(private = "file")
-new_query :: proc(p: ^Parser) -> ^Query {
-	q := new(Query, p.allocator)
+new_query :: proc(p: ^Parser) -> ^Parsed_Query {
+	q := new(Parsed_Query, p.allocator)
 	q.limit = -1
 	q.offset = -1
 	q.projection = make([dynamic]Projection, p.allocator)
@@ -824,7 +824,7 @@ new_query :: proc(p: ^Parser) -> ^Query {
 // parse_sub_select parses SubSelect: SelectClause WhereClause
 // SolutionModifier ValuesClause, with SELECT as the current token.
 @(private = "file")
-parse_sub_select :: proc(p: ^Parser) -> ^Query {
+parse_sub_select :: proc(p: ^Parser) -> ^Parsed_Query {
 	sq := new_query(p)
 	sq.form = .Select
 	parse_select_clause(p, sq)

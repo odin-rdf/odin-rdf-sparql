@@ -152,7 +152,7 @@ Values_Pattern :: struct {
 
 // Sub_Select is a subquery: '{' SELECT … '}' as a group graph pattern.
 Sub_Select :: struct {
-	query: ^Query,
+	query: ^Parsed_Query,
 	pos:   Position,
 }
 
@@ -222,9 +222,19 @@ Group_Condition :: struct {
 	has_var: bool,
 }
 
-// Query is a parsed SPARQL query (or SubSelect, which reuses the type
-// with only the SELECT-relevant fields populated).
-Query :: struct {
+// Parsed_Query is a parsed SPARQL query (or SubSelect, which reuses the
+// type with only the SELECT-relevant fields populated) — the grammar's
+// `Query` production as a tree, which `translate` turns into algebra.
+//
+// **It was called `Query` until SPARQL-T-0031**, when the prepared query
+// moved into this package from `sparql/kvstore` and the two names met.
+// The prepared query took the shorter one: `sparql.Query` beside
+// `sparql.query_init` and `sparql.query_next` is what a consumer holds
+// and steps, and a `query_init` that initialized something other than a
+// `Query` would read as a mistake. This type is named by consumers
+// rarely — `parse` returns it and `translate` consumes it, both by
+// inference — which is what makes it the one that moves.
+Parsed_Query :: struct {
 	version:         string, // the VERSION declaration's string; "" when absent
 	form:            Query_Form,
 	select_modifier: Select_Modifier,
@@ -246,7 +256,7 @@ Query :: struct {
 // destroy_query frees a query tree's nodes and arrays. Strings are not
 // touched: they are either borrowed from the source or owned by the
 // parser's intern table (freed with it). Called by parser_destroy.
-destroy_query :: proc(q: ^Query, allocator := context.allocator) {
+destroy_query :: proc(q: ^Parsed_Query, allocator := context.allocator) {
 	if q == nil {
 		return
 	}

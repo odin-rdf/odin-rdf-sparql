@@ -62,7 +62,7 @@ import "core:strings"
 import "core:time"
 
 import "../sparql"
-import sparql_kvstore "../sparql/kvstore"
+import "record:record"
 
 // Best of REPS, after a discarded warm-up. Best rather than mean: the
 // question is what the engine costs when nothing else is happening, and
@@ -92,7 +92,7 @@ fail :: proc(format: string, args: ..any) {
 }
 
 main :: proc() {
-	when sparql_kvstore.SPARQL_COUNT_READS {
+	when sparql.SPARQL_COUNT_READS {
 		fmt.println(
 			"odin-rdf-sparql bench — instrumented: store reads and assertions. No timings.",
 		)
@@ -110,7 +110,7 @@ main :: proc() {
 	// allocator arena and cold pages that every later one then found
 	// warm. A benchmark whose answer depends on the order of its own
 	// list is worse than none.
-	when !sparql_kvstore.SPARQL_COUNT_READS {
+	when !sparql.SPARQL_COUNT_READS {
 		warm_up()
 	}
 
@@ -134,10 +134,10 @@ warm_up :: proc() {
 	corpus := generate(CONFIGS[0])
 	defer corpus_destroy(&corpus)
 	s := store_load(corpus)
-	defer store_close(&s)
+	defer store_close(s)
 	for _ in 0 ..< 2 {
 		for k in CASES {
-			_, _ = run_once(&s, k)
+			_, _ = run_once(s, k)
 		}
 	}
 }
@@ -160,7 +160,7 @@ run_config :: proc(c: Config) {
 
 	load_start := time.tick_now()
 	s := store_load(corpus)
-	defer store_close(&s)
+	defer store_close(s)
 	load_ms := time.duration_milliseconds(time.tick_since(load_start))
 
 	fmt.printfln("\n== %s ==", c.name)
@@ -175,7 +175,7 @@ run_config :: proc(c: Config) {
 		ms(load_ms),
 	)
 
-	when sparql_kvstore.SPARQL_COUNT_READS {
+	when sparql.SPARQL_COUNT_READS {
 		fmt.printfln(
 			"   %-12s %10s %9s %9s %9s %7s %7s %11s",
 			"case",
@@ -192,16 +192,16 @@ run_config :: proc(c: Config) {
 	}
 
 	for k in CASES {
-		run_case(c, &s, k)
+		run_case(c, s, k)
 		free_all(context.temp_allocator)
 	}
 }
 
 run_case :: proc(c: Config, s: ^Bench_Store, k: Case) {
-	when sparql_kvstore.SPARQL_COUNT_READS {
-		sparql_kvstore.read_counts_reset()
+	when sparql.SPARQL_COUNT_READS {
+		sparql.read_counts_reset()
 		solutions, ok := run_once(s, k)
-		counts := sparql_kvstore.read_counts_get()
+		counts := sparql.read_counts_get()
 		if !ok {
 			fail("%s/%s: the query did not run", c.name, k.name)
 			return
@@ -269,23 +269,25 @@ run_once :: proc(s: ^Bench_Store, k: Case) -> (solutions: int, ok: bool) {
 		return 0, false
 	}
 
-	q: sparql_kvstore.Query
-	defer sparql_kvstore.query_destroy(&q)
-	if !sparql_kvstore.query_init(&q, algebra, s.db, sparql.parser_base(&p)) {
+	// One snapshot per query, acquired and released around it, where the
+	// kvstore benchmark opened and ended a read transaction. Both say the
+	// same thing: a query answers about one dataset.
+	snap := store_snapshot(s)
+	defer record.snapshot_release(&snap)
+
+	q: sparql.Query
+	defer sparql.query_destroy(&q)
+	if !sparql.query_init(&q, algebra, snap, sparql.parser_base(&p)) {
 		fail("%s: unsupported: %s", k.name, q.unsupported)
 		return 0, false
 	}
 
 	for {
-		_, more := sparql_kvstore.query_next(&q)
+		_, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
 		solutions += 1
-	}
-	if err := sparql_kvstore.query_error(&q); err != nil {
-		fail("%s: store error during evaluation: %v", k.name, err)
-		return 0, false
 	}
 	return solutions, true
 }
@@ -294,7 +296,7 @@ run_once :: proc(s: ^Bench_Store, k: Case) -> (solutions: int, ok: bool) {
 // and prints a paste-ready line for a pin that is missing or has moved —
 // so that re-pinning is a deliberate copy rather than a hand-transcribed
 // integer.
-check_pin :: proc(c: Config, k: Case, solutions: int, counts: sparql_kvstore.Read_Counts) {
+check_pin :: proc(c: Config, k: Case, solutions: int, counts: sparql.Read_Counts) {
 	// `{` and `}` are verbs to Odin's fmt and must be doubled; an
 	// unescaped one is written into the output as
 	// `%!(MISSING CLOSE BRACE)` rather than reported at the call.
