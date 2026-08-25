@@ -126,3 +126,39 @@ still on a path the engine takes.
 ## Status Updates
 
 *To be added during implementation*
+
+
+## Status Updates
+
+### 2026-08-25 — handed forward from SPARQL-T-0031
+
+**The public type is `sparql.Query` and the AST node is now
+`sparql.Parsed_Query`.** The two collided when the prepared query moved
+into this package; the prepared query took the shorter name and the
+parse tree was renamed. `tests/readme` and the README are written
+against `sparql_kvstore.Query` and both change: the import goes, the
+type is `sparql.Query`, and `query_init` takes a `record.Snapshot`.
+
+**`query_init` does not take ownership of the snapshot.** The criterion
+in SPARQL-T-0031 said `query_destroy` releases it; it does not, because
+a `Validator`'s candidate is a borrowed handle record releases itself.
+The call shape is `store_latest` / `defer snapshot_release` /
+`query_init` / `defer query_destroy`. See that task's Status.
+
+**`query_error` does not exist.** A read on record cannot fail, so every
+call site that checked it is deleted rather than adapted.
+
+**The Makefile has a `PENDING` variable** listing `tests/guards`,
+`tests/w3c/harness` and `tests/readme`. Move each into `PKGS` as it is
+ported, and delete the variable and its comment when the list empties at
+SPARQL-T-0033.
+
+**Two bridge packages are deleted at SPARQL-T-0033, not here**, unless
+this task's ports make them redundant sooner: `tests/smoke` (the record
+plumbing's own test) and `tests/portcheck` (one query of every operator
+shape under the leak checker, written because SPARQL-T-0031 left the
+repository with nothing that ran the engine). Whoever deletes
+`tests/smoke` owns the `ci.yml` edit its Status flagged — already done
+at SPARQL-T-0031, so there is nothing left there.
+
+**There is no `Term_ID` width matrix.** `make test` runs once.

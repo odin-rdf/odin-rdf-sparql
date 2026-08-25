@@ -132,3 +132,43 @@ becomes a backlog item.
 ## Status Updates
 
 *To be added during implementation*
+
+
+## Status Updates
+
+### 2026-08-25 — handed forward from SPARQL-T-0031: bench already builds and runs, and two pins already moved
+
+**`bench/` was ported at SPARQL-T-0031, not here.** `bench` is vetted by
+`make check`, and that task's green boundary is "check vets every
+surviving package", so it could not be left naming the deleted
+instantiation. `bench/store.odin` is `Mem_FS` + `store_open` + `ingest` +
+`apply`, `Bench_Store` is heap-allocated and passed by pointer (record's
+writer holds a pointer to the `Mem_FS` inside it), `run_once` acquires
+and releases a snapshot per query, and `counting.odin` moved to
+`sparql/` with its verbs and meanings unchanged. **This task's job is
+what its title says: run it and compare.**
+
+**What SPARQL-T-0031's own run already found**, so that it is not
+rediscovered: every solution count is identical to SPARQL-T-0040's
+baseline (all sixteen, both configurations), and **fourteen of the
+sixteen read-count pins hold to the integer**. Two moved, both `group`,
+both by exactly the number of groups — `load` 4000 -> 4012 (small),
+40000 -> 40012 (large), `store_ops` following.
+
+The cause is understood and is a term-identity difference rather than a
+control-flow regression. `bindable_id` resolves an aggregate's result
+against the store so a computed term the data already holds gets the
+store's own id. `COUNT(?s)` produces a small canonical integer, which
+odin-rdf-store had never interned and which record **inlines** — it
+resolves without ever having been stored. The id is therefore real
+rather than synthetic, and reading it back in the projection is a load
+where it used to be a lookup in the engine's own computed table.
+`AVG(?r)` is a decimal, is not inlineable, and did not move; `find` is
+26 in both.
+
+**The pins were deliberately left at the odin-rdf-store baseline**, so
+`make bench` fails its assertion step until this task re-pins them. That
+is the comparison this task exists to make; re-pinning earlier would
+have destroyed it. Timings were taken on the ported engine and are in
+SPARQL-T-0031's run output but were not recorded as a measurement — the
+machine was busy compiling, and a proper best-of-5 belongs here.
