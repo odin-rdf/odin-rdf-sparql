@@ -58,6 +58,13 @@ two that are ticked are satisfied by the operators being left alone.*
       key, **never from the data**.
 - [ ] **`ORDER BY … LIMIT n` stops after n** when the input is ordered —
       the top-N case, which today sorts everything to return ten rows.
+      *(Corrected 2026-08-25: retired here for the right reason and **the
+      underlying want is not blocked**. Stopping after n when the input is
+      ordered needs record's order to be SPARQL's, and it is not. But
+      top-N does not need an ordered input at all — a bounded heap over
+      `value_order` gives O(n log k) and O(k) memory with no store
+      involvement. Filed as `SPARQL-T-0041`. This criterion stays retired;
+      what was wrong was filing the whole idea behind an ordered read.)*
 - [ ] **Ordering by term is not ordering by value, and the plan knows
       it.** record's own warning (api.md §12.8): dictionary ids are in
       first-appearance order and §5.3 rejected an order-preserving
@@ -279,3 +286,31 @@ it stated — it notes that "numeric ordering is nearly free while string
 ordering is not", and the measurement is that **numeric ordering is not
 free either**, because three ordinary ways of writing a number leave the
 inlined range. That correction is the note's most useful sentence.
+
+### 2026-08-25 (later the same day) — one of the three was not blocked after all
+
+The finding stands and nothing about record's id order has changed. But
+the owner asked what performance the closure leaves on the table, and
+answering it separated something this task had run together.
+
+Of the three operators here, two are blocked as described — a streaming
+`ORDER BY`, permanently, and a one-read `MIN`/`MAX`. **The third,
+`ORDER BY … LIMIT n`, is not.** This task framed it as "stops after n
+*when the input is ordered*", which is one implementation of top-N and
+the only one that needs a store's order. A **bounded heap** — keep the n
+best seen so far by `value_order`, discard the rest — is another, needs
+nothing from record, and captures most of the win whenever n is much
+smaller than the solution count.
+
+`bench/`'s `order-limit` is 7.017 ms against `bgp2`'s 3.167 for the same
+pattern unsorted, so about 4 ms of it is materialize-and-sort to return
+ten rows. The memory side is sharper and unmeasured: `Plan_Order` keeps a
+`Sort_Key` per solution and each carries a copied term, so a top-ten over
+a million solutions materializes a million terms.
+
+Filed as `SPARQL-T-0041`, at P2 — above everything this task closed.
+`sparql/plan.odin`'s `Plan_Order` comment, `bench/queries.odin`'s
+`order-limit` note and `SPARQL-T-0029` all carried the same misreading and
+are corrected. The lesson is small and worth keeping: *an ordered read
+would serve top-N* is true, and *top-N needs an ordered read* does not
+follow from it.

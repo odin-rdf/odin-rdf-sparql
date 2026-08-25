@@ -98,9 +98,17 @@ CASES := []Case {
 	},
 
 	// The same sort with a small LIMIT. Today this materializes and sorts
-	// everything and then discards all but ten; SPARQL-T-0038's
+	// everything and then discards all but ten; ~~SPARQL-T-0038's
 	// streaming-order consumer is what makes it stop at ten, so this pair
-	// is that task's before-and-after in one line each.
+	// is that task's before-and-after in one line each.~~
+	//
+	// **Re-aimed 2026-08-25 at `SPARQL-T-0041`.** SPARQL-T-0038 is closed
+	// as evidence — record's id order is not SPARQL's, so a *streaming*
+	// sort is blocked permanently. Stopping at ten never needed the store:
+	// a bounded heap over the same comparator does it, and this line is
+	// that task's before-and-after. The pair with `order` is what makes it
+	// readable — they are within noise of each other today, which is the
+	// finding.
 	{
 		name = "order-limit",
 		about = "ORDER BY ... LIMIT 10 -- sorts everything today",

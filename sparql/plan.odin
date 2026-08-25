@@ -431,9 +431,25 @@ Plan_Group :: struct {
 // sort first.
 //
 // The slice above it is a separate operator, exactly as §18.2.5 layers
-// them. A LIMIT does not shorten the sort — correctness first; the
+// them. A LIMIT does not shorten the sort — correctness first; ~~the
 // evidence log records that an ordered store iterator would let a
-// top-N query stream (SPARQL-T-0019).
+// top-N query stream (SPARQL-T-0019).~~
+//
+// **That last clause was a wrong diagnosis and stood for twenty days**
+// (corrected 2026-08-25, `SPARQL-T-0041`). An ordered store read *would*
+// serve a top-N query — it would let this operator stop *reading* after
+// n — and it does not follow that top-N needs one. Keeping the n best
+// solutions seen so far in a **bounded heap**, by the same `value_order`
+// the full sort already calls, needs nothing from any store: O(n log k)
+// time and O(k) memory instead of O(n log n) and O(n).
+//
+// The distinction matters because the store-shaped version is genuinely
+// blocked — record's id order is not SPARQL's `ORDER BY` order and no
+// plan can establish when they agree (`SPARQL-T-0038`) — so filing top-N
+// behind it left the largest unblocked win in this engine sitting in an
+// evidence log for a capability that turned out to be unusable. **A
+// streaming sort still waits on that and always will; a bounded top-N
+// never did.**
 Plan_Order :: struct {
 	conditions: [dynamic]Order_Condition,
 	input:      Plan,

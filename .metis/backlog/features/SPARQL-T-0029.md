@@ -25,11 +25,20 @@ initiative_id: NULL
 
 **Rewritten 2026-08-25.** This item was filed against odin-rdf-store's
 `match_order`/`match_orderable`/`match_ordered` and asked for four things.
-Three of them are dead: `MIN`/`MAX` in one read, a streaming `ORDER BY`,
-and an `ORDER BY … LIMIT n` that stops all need odin-rdf-record's id order
-to agree with SPARQL's, and `SPARQL-T-0038` proved it does not and that no
-plan can tell when it might. That half is closed and stays closed — see
-the 2026-08-25 Status entries below, both of them.
+Three of them are dead **as this item specified them**: `MIN`/`MAX` in one
+read, a streaming `ORDER BY`, and an `ORDER BY … LIMIT n` that stops all
+need odin-rdf-record's id order to agree with SPARQL's, and
+`SPARQL-T-0038` proved it does not and that no plan can tell when it
+might. That half is closed and stays closed — see the Status entries
+below.
+
+**One correction, added 2026-08-25 after the rewrite:** of those three,
+`ORDER BY … LIMIT n` is dead only in the form written here. This item
+asked for it to stop *because the input is ordered*; **top-N does not need
+an ordered input**. A bounded heap over `value_order` — keep the n best,
+discard the rest — asks nothing of any store and is now `SPARQL-T-0041`,
+at P2. A streaming *sort* is still blocked permanently. Nothing in that
+moves this item, whose live half is and remains the merge join.
 
 **The fourth thing is alive, and closing this item on the third was a
 mistake.** The original parked merge joins under "Deliberately out of
