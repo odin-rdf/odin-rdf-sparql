@@ -443,7 +443,20 @@ scan_long_string :: proc(s: ^Scanner, tok: ^Token, quote: byte) -> (Token, bool)
 	content_start := s.pos
 	for {
 		if s.pos >= len(s.source) {
-			set_error(s, .Unterminated_Long_String, start)
+			// Report the opener, not where the scanner stopped. A long
+			// string may cross newlines, and every one of them moves
+			// `line_start` past `start` — so `set_error`'s generic
+			// `offset - line_start` column comes out negative and `line`
+			// names the last line rather than the one the literal opened
+			// on (SPARQL-T-0042; odin-rdf-parser's RDF-T-0025 is the same
+			// defect in the same shape). The token already carries the
+			// opener's coordinates, computed in scanner_next.
+			s.err = Error {
+				kind   = .Unterminated_Long_String,
+				offset = start,
+				line   = tok.line,
+				column = tok.column,
+			}
 			return {}, false
 		}
 		c := s.source[s.pos]

@@ -132,6 +132,44 @@ test_error_positions :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.err.column, 1)
 }
 
+// An unterminated long string reports where it opened, and the literal's
+// own newlines must not move that. The scanner counts them as it walks —
+// which is right for every error found *inside* the literal — so by the
+// time it reaches end of input, `line` names the last line and
+// `line_start` sits past the opener, making the generic
+// `offset - line_start` column negative. odin-rdf-parser had the same
+// defect in the same shape (`RDF-T-0025`); this is its copy
+// (SPARQL-T-0042).
+@(test)
+test_unterminated_long_string_position :: proc(t: ^testing.T) {
+	s: Scanner
+	buf: [8]Token
+
+	// One line: the coordinates were never wrong here, which is how the
+	// defect stayed hidden.
+	scan_all(&s, `SELECT ?x { ?x ?p """abc`, buf[:])
+	testing.expect_value(t, s.err.kind, Error_Kind.Unterminated_Long_String)
+	testing.expect_value(t, s.err.offset, 18)
+	testing.expect_value(t, s.err.line, 1)
+	testing.expect_value(t, s.err.column, 19)
+
+	// Three lines inside the literal: the opener is on line 2 at column
+	// 3, and stays there however far the scanner walks.
+	scan_all(&s, "SELECT ?x\n  '''abc\ndef\nghi", buf[:])
+	testing.expect_value(t, s.err.kind, Error_Kind.Unterminated_Long_String)
+	testing.expect_value(t, s.err.offset, 12)
+	testing.expect_value(t, s.err.line, 2)
+	testing.expect_value(t, s.err.column, 3)
+
+	// A trailing quote run of one, so the literal is still open and the
+	// scanner has walked past a newline to find that out.
+	scan_all(&s, "\"\"\"a\nb\"", buf[:])
+	testing.expect_value(t, s.err.kind, Error_Kind.Unterminated_Long_String)
+	testing.expect_value(t, s.err.offset, 0)
+	testing.expect_value(t, s.err.line, 1)
+	testing.expect_value(t, s.err.column, 1)
+}
+
 @(test)
 test_strings_and_escapes :: proc(t: ^testing.T) {
 	s: Scanner
