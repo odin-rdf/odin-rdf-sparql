@@ -4,14 +4,14 @@ level: task
 title: "Plumbing: the record checkout, the collections, and a store that opens"
 short_code: "SPARQL-T-0030"
 created_at: 2026-08-24T20:42:25.718435+00:00
-updated_at: 2026-08-25T09:28:17.773508+00:00
+updated_at: 2026-08-25T09:38:35.406923+00:00
 parent: SPARQL-I-0003
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -61,20 +61,19 @@ mixing the two would make a red build ambiguous.
       snapshot before `store_close`. It asserts nothing about SPARQL —
       it asserts that the collection resolves, the library links, and the
       lifetime discipline is understood.
-- [ ] **The smoke test runs on all three CI runners.** This is the real
+- [x] **The smoke test runs on all three CI runners.** This is the real
       point of the task: record has no Windows `File_Ops` and its POSIX
       file is `#+build linux, darwin`, so a Windows leg compiles record
       only if the suite never names `posix_file_ops`. Proving that now,
       on a 30-line test, is much cheaper than discovering it during
       SPARQL-T-0033 with the whole harness in flight.
-      **Open, and it cannot be closed from here** — a CI run needs a
-      push, and nothing in this family pushes without the owner. What
-      *is* checked locally: nothing in this repository names
-      `posix_file_ops` (grep over `sparql/` and `tests/`), and record's
-      `record/writer_posix.odin` carries `#+build linux, darwin` on its
-      first line, so the Windows compilation never sees it. That is the
-      whole mechanism the criterion is about; what remains is the
-      observation.
+      **Green on all three, run 32832865466.** Read from the Windows
+      job's own log rather than from the run's colour: it checked out
+      `odin-rdf-record` at `435c2b3`, vetted `tests/smoke`, and ran
+      `Finished 2 tests … successful` **twice**, once per width. No link
+      error, no missing `File_Ops` — the `#+build linux, darwin` line on
+      `record/writer_posix.odin` does the whole job, and nothing here
+      names `posix_file_ops`.
 - [x] `make test` still green at both widths, 512/512 — nothing removed
       yet.
 
@@ -203,7 +202,33 @@ source commit `77982ce` on purpose: `v0.3.0` was cut one commit early
 and missed `RECORD-T-0020`'s Status, which that task's own title records
 as a regret.
 
-**Neither the tag nor record's last commit is pushed** — no push without
-the owner, family-wide — so the `v0.4.0` ref in `ci.yml` does not
-resolve on GitHub yet and CI cannot be green before it does. That is the
-one thing standing between this task and its last criterion.
+### 2026-08-25 — pushed, and green on all three runners
+
+Run
+[32832865466](https://github.com/odin-rdf/odin-rdf-sparql/actions/runs/32832865466):
+ubuntu, macOS and **windows** all `success`. The Windows leg is the one
+this task existed to prove, and it was checked in its own log rather
+than taken from the run's conclusion — record checked out at `435c2b3`,
+`tests/smoke` vetted, and both tests run at both widths. The task is
+complete.
+
+**A finding from pushing, and it is a process one worth keeping.**
+record's `main` and the `v0.4.0` tag were *already on GitHub* when the
+push was attempted — the tag at `435c2b3`, which is this session's
+record-side commit before it was amended. The amend had added one more
+paragraph (RECORD-I-0004's closing Status) to an object that was already
+published, so the push was correctly rejected as non-fast-forward. It
+was resolved by **re-landing the amended paragraph as a new commit and
+leaving the tag alone**, not by forcing: a published tag is not moved,
+and the consequence — that `v0.4.0` holds every source and document
+change of RECORD-I-0004 but not the paragraph announcing its completion
+— is recorded in that initiative rather than repaired. The general rule
+this ran into: **amend only what is provably unpushed, and re-check
+immediately before the amend rather than relying on a check from
+earlier in the session.**
+
+**Also observed, and not acted on:** odin-rdf-record still has no CI of
+its own, and it now has a consumer pinning a tag of it. Every claim
+about that release having been proven on three platforms is a claim this
+repository's CI makes, not record's. Worth someone's attention; it is
+not this task's scope and not this initiative's.

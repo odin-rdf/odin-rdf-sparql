@@ -630,13 +630,31 @@ sit above the consumer range's floor and `is_synthetic`'s `>=` threshold
 test would misclassify it. The bounded range check §5 specified now has a
 failing test waiting for it rather than a paragraph.
 
-**Where the board stands.** `SPARQL-T-0030` is done except its CI-runner
-criterion, which cannot be closed from here — a CI run needs a push, and
-record's `v0.4.0` tag and last commit are local. It stays `active` for
-that reason; nothing is waiting on it, since `SPARQL-T-0031` is blocked on
-`SPARQL-T-0040` as well and that has not started. **`SPARQL-T-0040` is
-the actionable task**, and it is the one that must run before the seam
-collapses.
+**Where the board stands.** `SPARQL-T-0030` is **complete**: pushed, and
+green on all three runners (run 32832865466), the Windows leg verified
+from its own log rather than from the run's colour. record's `v0.4.0` is
+published and `ci.yml` resolves it. **`SPARQL-T-0040` is the actionable
+task**, and it is the one that must run before the seam collapses —
+`SPARQL-T-0031` is blocked on it as well as on `-T-0030`.
+
+**One thing to carry, learned in the push and not in the code.**
+record's tag and commit turned out to be published already when this
+session tried to push an amended version of that commit. It was resolved
+by re-landing the amendment as a new commit and leaving the tag where it
+was — a published tag is not moved. Two consequences for the rest of
+this initiative: `v0.4.0` holds every source and document change of
+`RECORD-I-0004` but not the paragraph announcing its completion, which
+is recorded there rather than repaired; and **amend only what is
+provably unpushed, re-checked immediately before the amend** rather than
+from a check taken earlier in the session. This initiative will cut at
+least one more tag's worth of cross-repository coordination at
+`SPARQL-T-0039`.
+
+**And one observation, filed rather than acted on**: odin-rdf-record has
+no CI of its own, and now has a consumer pinning a tag of it. Every
+claim that `v0.4.0` builds on three platforms is a claim *this*
+repository's CI makes. That belongs in the `SPARQL-T-0039` sweep or on
+record's backlog, not here.
 
 **2026-08-24, later still — four open questions walked through with the owner
 and closed.** Three of them changed the plan:
