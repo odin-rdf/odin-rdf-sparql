@@ -582,6 +582,62 @@ runners; odin-rdf-store's retirement unblocked.
 
 ## Status
 
+**2026-08-25 — the record-side gate is closed, `v0.4.0` is cut, and step 1
+is half done.** `RECORD-I-0004` was built in full while this initiative
+sat: `RECORD-T-0021`…`-T-0025`, two ADRs ([[RECORD-A-0007]] the format
+moves to version 2, [[RECORD-A-0008]] how a recursive term is decoded and
+who owns it), and everything §6 asked for. It was deliberately left
+untagged, because `RECORD-T-0025`'s risk note says not to tag before a
+consumer has compiled against it. **`SPARQL-T-0030` is that consumer**,
+and the tag followed it.
+
+Three consequences for this document:
+
+1. **§6's gate is answered, and better than asked.** Triple terms are
+   permitted in *every* position, not only the object position the corpus
+   needs; `snapshot_triple_parts(snap, id) -> ([3]Term_ID, bool)` is the
+   named entry point §6 wanted — a tag check and three arena reads, no
+   allocation, no decode — so `Triple_Reader` binds to one call and
+   `triple_adapter`'s two round trips (`SPARQL-T-0019`) are gone rather
+   than reduced. `Term_Kind.Triple` replaces `store.id_kind(id) ==
+   .Triple`. Base-direction literals came in the same motion as planned,
+   and as §6 predicted they unlock no evaluation directory.
+2. **One new obligation the port must carry: `snapshot_term_destroy`.**
+   A decoded triple term is *wholly owned*, and a split IRI has always
+   owned its joined string — `snapshot_term` is now paired with a
+   destroy verb that takes the id, and it must be called on everything
+   `snapshot_term` returns. It is a no-op for the borrowing kinds. This
+   is new since the initiative was written and is `SPARQL-T-0031`'s to
+   thread through `Term_Loader`'s replacement.
+3. **The pin moved to `v0.4.0` at step 1 rather than at step 5**
+   (owner's call, 2026-08-25). The Implementation Plan's step 0 said
+   everything through step 4 proceeds against `v0.3.0`; that is no longer
+   the cheaper path, because the local checkout is at record's head
+   either way and a four-task gap between local and CI would have made
+   `SPARQL-T-0033`'s planned refusal-count pin right on CI and wrong on
+   the machine it was written on. **`SPARQL-T-0035` inherits the
+   change**: its "pin the record release" criterion is already satisfied,
+   and what remains there is enabling the directory, restoring 512/512
+   and replacing `triple_adapter`'s note. Whether its "restore 512" and
+   `SPARQL-T-0033`'s "474 of 474 across 36 directories" should now
+   collapse into one green boundary is a live question for when
+   `SPARQL-T-0033` starts — nothing forces the two-step any more, since
+   against `v0.4.0` the triple-term documents load.
+
+**§5 stopped being a prediction.** `tests/smoke` asserts that an inlined
+literal's id is `>= record.CONSUMER_ID_FIRST`, so an ordinary term does
+sit above the consumer range's floor and `is_synthetic`'s `>=` threshold
+test would misclassify it. The bounded range check §5 specified now has a
+failing test waiting for it rather than a paragraph.
+
+**Where the board stands.** `SPARQL-T-0030` is done except its CI-runner
+criterion, which cannot be closed from here — a CI run needs a push, and
+record's `v0.4.0` tag and last commit are local. It stays `active` for
+that reason; nothing is waiting on it, since `SPARQL-T-0031` is blocked on
+`SPARQL-T-0040` as well and that has not started. **`SPARQL-T-0040` is
+the actionable task**, and it is the one that must run before the seam
+collapses.
+
 **2026-08-24, later still — four open questions walked through with the owner
 and closed.** Three of them changed the plan:
 

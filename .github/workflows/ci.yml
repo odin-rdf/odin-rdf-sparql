@@ -1,7 +1,7 @@
-# Same shape as the store's workflow, with one more sibling checkout: this
-# project reaches both the parser and the store through collections, and a
-# collection resolves in the importing compilation, so the store's own
-# `rdf:` imports need the parser present here too.
+# Same shape as the store's workflow, with two more sibling checkouts: this
+# project reaches the parser, the store and the record store through
+# collections, and a collection resolves in the importing compilation, so their
+# own `rdf:` imports need the parser present here too.
 name: CI
 
 on:
@@ -40,7 +40,7 @@ jobs:
         with:
           path: odin-rdf-sparql
 
-      # Both are pinned to released tags rather than tracking main, matching
+      # All three are pinned to released tags rather than tracking main, matching
       # odin-rdf-shacl's workflow. Until SPARQL-T-0023 this job checked out
       # whatever was on the upstream default branches, which meant an unrelated
       # upstream commit could turn this repository's CI red and there was no way
@@ -91,11 +91,12 @@ jobs:
       # job failed intermittently on ~58 of them (STORE-T-0042) before that fix,
       # so this one is exposed to the same transient and must stay above it.
       #
-      # To bump either: change the ref, run `make test` and `make check` locally
-      # against the new checkout, and commit them together — a collection is
-      # resolved in the *importing* compilation, so the store's sources are built
-      # against whichever parser this file names, and moving one without the
-      # other is how two versions of the data model end up in one binary.
+      # To bump any of them: change the ref, run `make test` and `make check`
+      # locally against the new checkout, and commit them together — a collection
+      # is resolved in the *importing* compilation, so the store's and the record
+      # store's sources are built against whichever parser this file names, and
+      # moving one without the other is how two versions of the data model end up
+      # in one binary.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-parser
@@ -107,6 +108,46 @@ jobs:
           repository: odin-rdf/odin-rdf-store
           ref: v0.6.0
           path: odin-rdf-store
+
+      # **odin-rdf-record `v0.4.0` is a floor, and it is the only pin here
+      # that was cut *for* this repository** (SPARQL-T-0030). The port off
+      # odin-rdf-store onto the record store is SPARQL-I-0003; this checkout
+      # arrives before anything store-side is deleted, so for the length of
+      # that initiative all three siblings are present at once and `store:`
+      # above is still load-bearing.
+      #
+      # The floor is `v0.4.0` and not `v0.3.0`, which is what SPARQL-T-0030
+      # was filed asking for, because the gate this port was blocked on landed
+      # in between. `v0.3.0` is a floor in its own right for odin-rdf-shacl —
+      # `v0.2.0` for `ingest` emitting a document's *set* (RECORD-T-0019),
+      # `v0.3.0` for the distinct `Term_ID`/`Fact_ID`/`Epoch` types
+      # (RECORD-T-0020), without which an engine holding raw `u32` ids does
+      # not compile. Above both, `v0.4.0` is RECORD-I-0004: RDF 1.2 triple
+      # terms and base-direction literals, which `apply` refused outright
+      # before it. `tests/smoke` names `snapshot_triple_parts`,
+      # `Term_Kind.Triple` and `snapshot_term_destroy`, none of which exist
+      # below `v0.4.0`, so this cannot pin lower while that package is in the
+      # suite — and the 38 evaluated entries of `sparql12-eval-triple-terms`
+      # are unreachable below it in any case (SPARQL-I-0003 §6).
+      #
+      # `v0.4.0` is also a **format** break: format version 2 does not read a
+      # version 1 log and refuses with `.Bad_Version`. That costs this
+      # repository nothing — every store the suite makes is fresh over
+      # `Mem_FS` — but it is the reason the bump is a minor rather than a
+      # patch, the same reasoning as odin-rdf-store's `v0.5.0` above.
+      #
+      # No `python3` step is needed: the cross-implementation verifier is
+      # record's own test-suite dependency, not a consumer's. The Windows
+      # runner compiles record without its POSIX `File_Ops` — that file is
+      # `#+build linux, darwin` — which works only for as long as nothing
+      # here names `posix_file_ops`. `tests/smoke` opens over `mem_file_ops`,
+      # which is platform-free, and every ported harness call site must do
+      # the same.
+      - uses: actions/checkout@v5
+        with:
+          repository: odin-rdf/odin-rdf-record
+          ref: v0.4.0
+          path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2
         with:

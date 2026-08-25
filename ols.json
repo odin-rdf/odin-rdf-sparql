@@ -8,6 +8,10 @@
 		{
 			"name": "store",
 			"path": "../odin-rdf-store"
+		},
+		{
+			"name": "record",
+			"path": "../odin-rdf-record"
 		}
 	],
 	"enable_document_symbols": true,

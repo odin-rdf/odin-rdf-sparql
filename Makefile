@@ -2,16 +2,22 @@ NAME  := sparql-bench
 BENCH := bench
 OUT   := build/$(NAME)
 
-# Odin source collections. The parser and the store are sibling checkouts
-# rather than vendored copies, so they are reached through collections instead
-# of relative paths -- `import "rdf:rdf"` for the data model and `rdf:rdf/turtle`
-# and friends for the four format packages, `import "store:store"` for the match
-# interface and `store:store/kvstore` for the backend. Both collections are
-# required even where this project only names the
-# store: the store's own sources import `rdf:`, and a collection is resolved in
-# the importing compilation, not the imported checkout. ols.json declares the
-# same pair so the language server resolves what the compiler does.
-COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
+# Odin source collections. The parser, the store and the record store are
+# sibling checkouts rather than vendored copies, so they are reached through
+# collections instead of relative paths -- `import "rdf:rdf"` for the data model
+# and `rdf:rdf/turtle` and friends for the four format packages,
+# `import "store:store"` for the match interface and `store:store/kvstore` for
+# the backend, `import "record:record"` for the system of record and
+# `record:record/ingest` for its document loaders. `rdf:` is required even
+# where this project only names the store or the record: their own sources
+# import it, and a collection is resolved in the importing compilation, not the
+# imported checkout. ols.json declares the same set so the language server
+# resolves what the compiler does.
+#
+# `record:` arrives in SPARQL-T-0030 and adds only -- `store:` is still here
+# and still load-bearing until SPARQL-T-0031 collapses the seam, because a
+# task that both adds a backend and deletes one makes a red build ambiguous.
+COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store -collection:record=../odin-rdf-record
 
 # Every package with Odin sources, pinned explicitly the way odin-rdf-store
 # does -- discovery cannot express intent about what belongs (SPARQL-T-0001).
@@ -23,8 +29,11 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
 # boundary is what a future backend would use, not because two exist today.
 # tests/w3c/harness runs the vendored W3C suites; tests/guards holds the
 # allocation-guard tests; tests/readme compiles and asserts the README's
-# example (SPARQL-T-0009).
-PKGS     := sparql sparql/srj sparql/srx sparql/kvstore tests/guards tests/w3c/harness tests/readme
+# example (SPARQL-T-0009). tests/smoke is the record plumbing's only consumer
+# until SPARQL-T-0031 -- it names no backend abstraction and does not import
+# `sparql` at all, because a smoke test that needs the engine to compile is
+# testing the engine rather than the collection.
+PKGS     := sparql sparql/srj sparql/srx sparql/kvstore tests/guards tests/w3c/harness tests/readme tests/smoke
 SRC_DIRS := $(PKGS)
 
 # STORE-A-0001 makes the store's Term_ID width a build-time choice, and this

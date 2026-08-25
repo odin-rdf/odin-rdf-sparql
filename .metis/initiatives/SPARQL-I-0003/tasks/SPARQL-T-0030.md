@@ -4,19 +4,20 @@ level: task
 title: "Plumbing: the record checkout, the collections, and a store that opens"
 short_code: "SPARQL-T-0030"
 created_at: 2026-08-24T20:42:25.718435+00:00
-updated_at: 2026-08-24T20:42:25.718435+00:00
+updated_at: 2026-08-25T09:28:17.773508+00:00
 parent: SPARQL-I-0003
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/active"
 
 
 exit_criteria_met: false
 initiative_id: SPARQL-I-0003
 ---
+
 # Plumbing: the record checkout, the collections, and a store that opens
 
 ## Parent Initiative
@@ -34,20 +35,27 @@ mixing the two would make a red build ambiguous.
 
 ## Acceptance Criteria
 
-- [ ] **`Makefile`**: `COLL` gains `-collection:record=../odin-rdf-record`
+- [x] **`Makefile`**: `COLL` gains `-collection:record=../odin-rdf-record`
       alongside the existing `rdf:` and `store:`. `rdf:` stays for good —
       record's own sources import it, and a collection resolves in the
       importing compilation, not the imported checkout.
-- [ ] **`ols.json`** mirrors the collection set, so the language server
+- [x] **`ols.json`** mirrors the collection set, so the language server
       resolves what the compiler does.
-- [ ] **`ci.yml`** checks out `odin-rdf/odin-rdf-record` as a sibling
+- [x] **`ci.yml`** checks out `odin-rdf/odin-rdf-record` as a sibling
       directory (`actions/checkout@v5`, `repository:`/`ref:`/`path:`) at
-      **`v0.3.0`**, beside the existing parser and store checkouts. The
-      pin gets a comment in the style of odin-rdf-shacl's store-floor
-      history, recording *why* `v0.3.0` is the floor: `v0.2.0` for
-      `ingest`'s set semantics (RECORD-T-0019), `v0.3.0` for the distinct
-      `Term_ID`/`Fact_ID`/`Epoch` types (RECORD-T-0020).
-- [ ] **A smoke test** in a new package: open a store over `Mem_FS` +
+      ~~**`v0.3.0`**~~ **`v0.4.0`**, beside the existing parser and store
+      checkouts. The pin gets a comment in the style of odin-rdf-shacl's
+      store-floor history, recording *why* `v0.3.0` is the floor:
+      `v0.2.0` for `ingest`'s set semantics (RECORD-T-0019), `v0.3.0` for
+      the distinct `Term_ID`/`Fact_ID`/`Epoch` types (RECORD-T-0020).
+      **Amended 2026-08-25, owner's call**: the floor is `v0.4.0`,
+      because `RECORD-I-0004` — the §6 gate this whole initiative was
+      blocked on — landed between this task being filed and being worked.
+      Both older reasons are kept in the comment, since they are still
+      true and still the reason a lower pin is impossible; `v0.4.0` sits
+      above them. See the Status below for why the pin did not stay at
+      `v0.3.0` for four more tasks.
+- [x] **A smoke test** in a new package: open a store over `Mem_FS` +
       `mem_file_ops`, `ingest.turtle` a two-triple document, `apply` it,
       take `store_latest`, answer one `snapshot_match` and release the
       snapshot before `store_close`. It asserts nothing about SPARQL —
@@ -59,7 +67,15 @@ mixing the two would make a red build ambiguous.
       only if the suite never names `posix_file_ops`. Proving that now,
       on a 30-line test, is much cheaper than discovering it during
       SPARQL-T-0033 with the whole harness in flight.
-- [ ] `make test` still green at both widths, 512/512 — nothing removed
+      **Open, and it cannot be closed from here** — a CI run needs a
+      push, and nothing in this family pushes without the owner. What
+      *is* checked locally: nothing in this repository names
+      `posix_file_ops` (grep over `sparql/` and `tests/`), and record's
+      `record/writer_posix.odin` carries `#+build linux, darwin` on its
+      first line, so the Windows compilation never sees it. That is the
+      whole mechanism the criterion is about; what remains is the
+      observation.
+- [x] `make test` still green at both widths, 512/512 — nothing removed
       yet.
 
 ## Implementation Notes
@@ -103,4 +119,91 @@ that does not finish rather than a repository that does not build.
 
 ## Status Updates
 
-*To be added during implementation*
+### 2026-08-25 — the plumbing is in, and the pin came out a release higher than filed
+
+`Makefile`, `ols.json` and `ci.yml` carry `record:`; `tests/smoke` is a
+new package in `PKGS`; `make check` is clean and `make test` is green at
+**both widths, 512/512 across 37 directories**, counted from the run
+rather than recalled. Nothing store-side was touched — `store:`,
+`sparql/kvstore` and `WIDTHS` are all still standing, which is what
+this task's "adds only" discipline is for.
+
+**The pin is `v0.4.0`, not the `v0.3.0` this task was filed asking
+for, and the reason is that the gate moved while the task sat.** When
+SPARQL-I-0003 was decomposed, `RECORD-I-0004` was unbuilt and the plan
+was to pin `v0.3.0` now and bump at SPARQL-T-0035. record then built the
+whole thing — `RECORD-T-0021`…`-T-0025`, two ADRs, format version 2 —
+and left exactly one thing undone: the tag, deliberately withheld
+because `RECORD-T-0025`'s own risk note says *do not tag before a
+consumer has built against it*. This task is that consumer. Walked
+through with the owner, who chose to tag now and pin the tag rather than
+pin a SHA or hold at `v0.3.0` for four more tasks.
+
+Holding at `v0.3.0` was the option with the hidden cost, and it is worth
+writing down: the local checkout is at record's head either way, so for
+four tasks a new-API call would compile here and fail on CI — and worse,
+SPARQL-T-0033's plan to pin *a named refusal count* for the vendored
+documents `apply` rejects would have been correct against CI and wrong
+against the machine it was written on. That trap is now gone: against
+`v0.4.0` the refusal count is zero.
+
+### What this repository verified before the tag was cut
+
+`tests/smoke` is two tests, and the second is deliberately more than the
+criterion asked for, because it is this repository's **acceptance of
+RECORD-I-0004** and a nominal approval would have been worth nothing.
+
+- `record_round_trip` — the plumbing. `Mem_FS` + `store_open`, an
+  `ingest.turtle` document, `apply`, `store_latest`, one
+  `snapshot_match`, release before close. It also pins **`ingest` emits
+  a document's set**: the fixture states one triple twice and yields two
+  ops, not three (RECORD-T-0019), which is the fact a harness gets
+  bitten by rather than a purist.
+- `triple_terms_from_the_corpus` — the gate. It reads
+  `tests/w3c/sparql12-eval-triple-terms/data-0-tripleterms.ttl`, **this
+  repository's own vendored data file and not a fixture written for the
+  occasion**, ingests and applies it (`Apply_Error{}` where the same
+  call returned `{.Unsupported_Term, 0}` before), then walks
+  `snapshot_triple_parts` down through the nested triple term to the
+  inlined `123` at the bottom. That walk is exactly the `Triple_Reader`
+  binding SPARQL-T-0031 will make, and it allocates nothing — the
+  `triple_adapter` it replaces materialized the whole term and
+  re-resolved each component (`SPARQL-T-0019`).
+
+**One finding, and it is the §5 hazard confirmed rather than
+predicted.** The innermost component of that nested triple term is an
+inlined `"123"^^xsd:integer`, and the test now asserts that its id is
+**`>= record.CONSUMER_ID_FIRST`**. So an ordinary term — not a
+consumer-space one — sits above the consumer range's floor, which means
+`is_synthetic`'s current `id >= SYNTHETIC_FIRST` threshold test would
+call it synthetic. SPARQL-I-0003 §5 wrote that down before it happened;
+it is now a passing assertion in the suite rather than a paragraph, and
+SPARQL-T-0031 inherits a test that fails if the range check is written
+as a threshold.
+
+### Two smaller things, recorded so nobody re-derives them
+
+- **`make test` warns once per width** that
+  `-define:RDF_STORE_TERM_ID_BITS is unused` when it reaches
+  `tests/smoke`. That is correct and not worth silencing: the package
+  names no store, so the store's width define has nothing to bind to. It
+  disappears with `WIDTHS` at SPARQL-T-0033.
+- **`os.read_entire_file` needs its allocator argument** in this Odin
+  version — the one-argument form no longer resolves, and the second
+  return is an `os.Error` rather than a `bool`. The W3C harness already
+  calls it the right way; a new file copying the older shape does not
+  compile.
+
+### The tag, cut
+
+`v0.4.0` is an annotated tag at record's `3692aac`, with
+`RECORD-T-0025`'s prepared body plus a line recording that this
+repository built against it first. It is at HEAD rather than at the
+source commit `77982ce` on purpose: `v0.3.0` was cut one commit early
+and missed `RECORD-T-0020`'s Status, which that task's own title records
+as a regret.
+
+**Neither the tag nor record's last commit is pushed** — no push without
+the owner, family-wide — so the `v0.4.0` ref in `ci.yml` does not
+resolve on GitHub yet and CI cannot be green before it does. That is the
+one thing standing between this task and its last criterion.
