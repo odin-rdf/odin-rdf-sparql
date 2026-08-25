@@ -23,8 +23,12 @@ PREFIX :: "PREFIX b: <" + NS + ">\n"
 CASES := []Case {
 	// Two patterns over the same subject: the simplest join, and the one
 	// whose cost is dominated by how many candidates the first pattern
-	// produces. This is what SPARQL-T-0037's cardinality ordering will
-	// change the plan of, so its "before" number matters twice.
+	// produces. ~~This is what SPARQL-T-0037's cardinality ordering will
+	// change the plan of, so its "before" number matters twice.~~
+	// **It changed nothing** (SPARQL-T-0037): both patterns have one
+	// candidate per entity, so the counts tie and stability keeps the
+	// written order. Its value now is the opposite one — it is where a
+	// plan-time pricing cost would have shown up, and it does not.
 	{
 		name = "bgp2",
 		about = "two-pattern BGP join on a shared subject",
@@ -33,9 +37,18 @@ CASES := []Case {
 
 	// Three patterns with a shared variable in the middle: a real join
 	// ordering problem, since the selective pattern is not written first.
-	// Written deliberately worst-first — `a b:Entity` matches every
+	// ~~Written deliberately worst-first — `a b:Entity` matches every
 	// entity — so that a planner which reorders has something to gain and
-	// one which does not is visibly paying for it.
+	// one which does not is visibly paying for it.~~
+	//
+	// **That was wrong, and SPARQL-T-0037 measured it.** `a b:Entity` is
+	// 20,000 candidates, `b:knows` is 80,000 and `b:name` is 20,000, and
+	// as written this is the *optimal* left-deep plan: 100,001 scans for
+	// 80,000 solutions, which is the floor. There was nothing here to
+	// gain. Worse, ordering on cost alone would pick 0, 2, 1 and pair
+	// every entity with every name — the case that made connectivity the
+	// first level of the rule rather than the second. `bgp3-selective-
+	// last` below is the badly-ordered case this one was believed to be.
 	{
 		name = "bgp3",
 		about = "three-pattern BGP, selective pattern written last",
@@ -92,6 +105,27 @@ CASES := []Case {
 		name = "order-limit",
 		about = "ORDER BY ... LIMIT 10 -- sorts everything today",
 		text = PREFIX + `SELECT ?s ?name WHERE { ?s b:name ?name } ORDER BY ?name LIMIT 10`,
+	},
+
+	// **The case `bgp3` was supposed to be, and is not.** Added by
+	// SPARQL-T-0037, whose measurement found every existing case here
+	// already optimally ordered — `bgp3` included, despite its comment.
+	// Three patterns on one subject, the selective one written last:
+	// `a b:Entity` and `b:name` are one per entity, `b:dept b:d0` is one
+	// in `depts`. Written order probes twenty thousand rows through two
+	// patterns to reach the ~1,700 that a planner reaches by starting
+	// with the third.
+	//
+	// It is a fair case rather than a rigged one: the shape — filter the
+	// population by a low-cardinality attribute, then project two more —
+	// is what a consumer's dashboard query looks like, and writing the
+	// filter last is what a person does when they think of the filter
+	// last.
+	{
+		name = "bgp3-selective-last",
+		about = "three patterns, the selective one written last -- SPARQL-T-0037's case",
+		text = PREFIX +
+		`SELECT ?s ?name WHERE { ?s a b:Entity . ?s b:name ?name . ?s b:dept b:d0 }`,
 	},
 
 	// A property path from one fixed start node. Fixed rather than

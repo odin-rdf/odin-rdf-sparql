@@ -13,18 +13,27 @@
 //
 // **Ground terms become IDs.** Every IRI and literal written in the
 // query is resolved against the target store's dictionary, once. This
-// goes through the store's non-interning `find_term` (STORE-T-0014), so
-// a query never assigns an ID and never turns a read into a write — on a
+// goes through record's non-interning `snapshot_resolve`, so a query
+// never assigns an ID and never turns a read into a write — on a
 // persistent backend, asking about a term the store has never seen must
 // not make it a term the store has seen. A ground term the store does
 // not hold makes its triple pattern unsatisfiable, and the plan collapses
 // to Plan_Nothing rather than scanning for something that cannot be
 // there.
 //
-// The resolver is a procedure pointer. That is a deliberate exception to
-// the no-dynamic-dispatch rule and a safe one: it is called a handful of
-// times per query, at setup, never per solution. The hot path — matching
-// — is bound at compile time instead; see exec.odin.
+// ~~The resolver is a procedure pointer. That is a deliberate exception
+// to the no-dynamic-dispatch rule and a safe one: it is called a handful
+// of times per query, at setup, never per solution. The hot path —
+// matching — is bound at compile time instead; see exec.odin.~~
+// **`Term_Finder` is gone** (`SPARQL-T-0031`): the builder holds the
+// snapshot the evaluation will read and calls record directly. There is
+// no procedure pointer left here to make an exception for.
+//
+// **And a third thing happens, since `SPARQL-T-0037`: patterns are
+// priced.** `join_order` asks the same snapshot how many candidates each
+// of a BGP's patterns can have — exactly, in O(1) — and orders them
+// cheapest-first among those connected to what is already bound. That is
+// the only place the planner reads data rather than the query.
 package sparql
 
 import "base:runtime"
@@ -1138,7 +1147,7 @@ build_path_link :: proc(
 	// one is ground, and its predicate is an IRI — but the range still
 	// has to be there, because merging two patterns reads one per triple.
 	append(&plan.shape_range, [2]int{0, 0})
-	join_order(plan)
+	join_order(b, plan)
 	return plan, true
 }
 
@@ -1386,7 +1395,7 @@ join_plans :: proc(b: ^Plan_Builder, left, right: Plan) -> (p: Plan, ok: bool) {
 			append(&left_bgp.shape_range, [2]int{base + range[0], base + range[1]})
 		}
 		clear(&left_bgp.order)
-		join_order(left_bgp)
+		join_order(b, left_bgp)
 		// The right pattern's node has been absorbed, not kept.
 		discard_bgp(right_bgp, b.allocator)
 		return left_bgp, true
@@ -1731,7 +1740,7 @@ build_bgp :: proc(b: ^Plan_Builder, bgp: ^Alg_BGP) -> (p: Plan, ok: bool) {
 		append(&plan.triples, t)
 		append(&plan.shape_range, [2]int{start, len(plan.shapes)})
 	}
-	join_order(plan)
+	join_order(b, plan)
 	return plan, true
 }
 
@@ -1949,14 +1958,146 @@ ground_ref :: proc(b: ^Plan_Builder, term: rdf.Term) -> (ref: Plan_Ref, ok: bool
 
 // join_order fills a BGP's evaluation order. This is the planner seam:
 // the whole of the engine's join-ordering policy lives in this one
-// procedure, and today it is the order the patterns were written in.
-// Cost-based ordering waits for the store to be able to estimate
-// cardinality (an initiative-level upstream proposal); nothing above
-// here assumes the identity permutation.
+// procedure.
+//
+// ~~today it is the order the patterns were written in. Cost-based
+// ordering waits for the store to be able to estimate cardinality (an
+// initiative-level upstream proposal); nothing above here assumes the
+// identity permutation.~~ **The wait ended with the port**
+// (`SPARQL-T-0037`). record answers better than the estimate that was
+// asked for: `range_len` is an *exact* candidate count in O(1) —
+// arithmetic on a window whose binary searches `snapshot_match` already
+// paid — so there is no estimate, no error bar, and no case where the
+// store declines to answer.
+//
+// # Cheapest first, but connected first before that
+//
+// The rule is two-level, and the second level is not optional:
+//
+//  1. **A pattern that shares a variable with what is already bound
+//     wins**, whatever it costs, over one that does not.
+//  2. Within that class, ascending candidate count; ties keep the
+//     written order.
+//
+// Level 1 is the whole difference between a planner and a hazard. This
+// executor is a nested loop (`probe_pattern` in exec.odin): a pattern
+// evaluated at depth d is probed once per surviving row from depth
+// d-1, with the row's bindings substituted in. A pattern sharing no
+// variable with anything bound substitutes nothing, so every one of
+// those probes is the *same full scan*, and the join degenerates into a
+// cross product that a later pattern then filters.
+//
+// So ordering on cost alone — which is what this task was specified as,
+// and what a cardinality-ordered planner is usually described as doing
+// — makes plans arbitrarily worse rather than better, and the
+// benchmark's own `bgp3` is an example. `?s a b:Entity` (20,000
+// candidates), `?s b:knows ?o` (80,000), `?o b:name ?name` (20,000):
+// ascending cost is 0, 2, 1, which pairs every entity with every name
+// before `b:knows` filters — 4x10^8 intermediate rows for 80,000
+// answers. Connected-first gives 0, 1, 2, which is what the query
+// already said.
+//
+// # What the count is, exactly
+//
+// `range_len` counts every fact *generation* in the window, retracted
+// ones included, so on a heavily edited store it reads slightly high.
+// That is the right direction: it is an exact upper bound on visible
+// matches at this epoch, and an upper bound is what a planner prices
+// with. Not a correction to make.
+//
+// Costs are computed against **the builder's snapshot** — the one the
+// evaluation will read. A plan priced against a different dataset than
+// it runs on is a bug waiting for a concurrent writer.
+//
+// Cost: one `snapshot_match` per pattern, two binary searches per bound
+// prefix, once per query rather than once per row. Measured rather than
+// guessed at (`SPARQL-T-0037`): unmeasurable against every case of the
+// benchmark, including the two-pattern BGP where it was most likely to
+// show. No threshold, therefore, and no heuristic to skip small BGPs.
 @(private = "file")
-join_order :: proc(plan: ^Plan_BGP) {
-	for i in 0 ..< len(plan.triples) {
-		append(&plan.order, i)
+join_order :: proc(b: ^Plan_Builder, plan: ^Plan_BGP) {
+	n := len(plan.triples)
+	if n == 0 {
+		return
+	}
+	// One pattern has no ordering problem, and pricing it would be a
+	// store round trip that cannot change anything.
+	if n == 1 {
+		append(&plan.order, 0)
+		return
+	}
+
+	costs := make([]int, n, context.temp_allocator)
+	for t, i in plan.triples {
+		p: record.Pattern
+		// A variable is unbound *at plan time* whatever it becomes at
+		// run time, so the static cost of a pattern is the width of the
+		// window its ground terms alone can narrow to. That is what
+		// makes these numbers comparable across patterns.
+		p.s = 0 if plan_ref_is_var(t[QUAD_S]) else t[QUAD_S].id
+		p.p = 0 if plan_ref_is_var(t[QUAD_P]) else t[QUAD_P].id
+		p.o = 0 if plan_ref_is_var(t[QUAD_O]) else t[QUAD_O].id
+		p.g = 0 if plan_ref_is_var(t[QUAD_G]) else t[QUAD_G].id
+		// Priced at plan time, so it is a `store_ops` and nothing else:
+		// `counting.odin` promises that verb counts every round trip
+		// into the store wherever it is made, and this is a new place it
+		// is made. It is deliberately **not** a `match` — that verb
+		// means a scan opened for one pattern at one depth, which is an
+		// evaluation event, and inflating it would break the comparison
+		// `SPARQL-T-0036` pinned. Nor a `candidate`: nothing is scanned
+		// here, and the window priced is the static one rather than the
+		// probe's.
+		when SPARQL_COUNT_READS {
+			read_counts.store_ops += 1
+		}
+		costs[i] = record.range_len(record.snapshot_match(b.snapshot, p))
+	}
+
+	taken := make([]bool, n, context.temp_allocator)
+	// The slots bound by everything chosen so far. A pattern is
+	// "connected" when one of its own variable slots is in here.
+	bound := make(map[int]bool, 0, context.temp_allocator)
+	defer delete(bound)
+
+	for _ in 0 ..< n {
+		best := -1
+		best_connected := false
+		for i in 0 ..< n {
+			if taken[i] {
+				continue
+			}
+			connected := false
+			for position in plan.triples[i] {
+				if plan_ref_is_var(position) && position.slot in bound {
+					connected = true
+					break
+				}
+			}
+			if best < 0 {
+				best, best_connected = i, connected
+				continue
+			}
+			// Connectivity first, then cost. Neither comparison is `<=`:
+			// an equal candidate keeps the earlier one, which is where
+			// stability comes from — the written order still decides
+			// what the data does not.
+			if connected != best_connected {
+				if connected {
+					best, best_connected = i, connected
+				}
+				continue
+			}
+			if costs[i] < costs[best] {
+				best, best_connected = i, connected
+			}
+		}
+		append(&plan.order, best)
+		taken[best] = true
+		for position in plan.triples[best] {
+			if plan_ref_is_var(position) {
+				bound[position.slot] = true
+			}
+		}
 	}
 }
 

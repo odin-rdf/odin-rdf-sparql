@@ -152,6 +152,17 @@ Pin :: struct {
 // Arguably an improvement, since `BIND(?o+1 AS ?z) . ?s ?p ?z` now
 // matches for inlined values.
 //
+// **`bgp3-selective-last` is SPARQL-T-0037's row, and it is the only one
+// in this table whose numbers a *plan* decides.** Written worst-first,
+// it was 4001 match / 8181 next / 4680 candidates in `small` and 40001 /
+// 81611 / 42110 in `large` under the identity ordering these pins were
+// first taken with. Cost- and connectivity-ordered joins take it to 361
+// / 901 / 589 and 3221 / 8051 / 4879 — **12x fewer scans opened for the
+// same 1,610 solutions**, and 4.896 ms to 0.495 ms. Nothing else in the
+// table moved a single pinned count, which is the finding as much as the
+// case is: every other query here was already written in the order a
+// planner would choose. See SPARQL-T-0037's Status.
+//
 // **The `graph` row is still the one to read first, and it now says the
 // opposite of what it said.** Its `match` and `next` are unchanged and
 // still identical in `small` and `large` -- 1 and 4123 -- and on
@@ -172,6 +183,7 @@ PINS := []Pin {
 	{config = "small", case_name = "group", solutions = 12, match = 2001, next = 6001, load = 4012, find = 26, triple = 0, candidates = 4500},
 	{config = "small", case_name = "order", solutions = 2000, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
 	{config = "small", case_name = "order-limit", solutions = 10, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
+	{config = "small", case_name = "bgp3-selective-last", solutions = 180, match = 361, next = 901, load = 0, find = 5, triple = 0, candidates = 589},
 	{config = "small", case_name = "path", solutions = 1950, match = 1950, next = 9750, load = 0, find = 2, triple = 0, candidates = 7800},
 
 	{config = "large", case_name = "bgp2", solutions = 20000, match = 20001, next = 60001, load = 0, find = 3, triple = 0, candidates = 40500},
@@ -181,6 +193,7 @@ PINS := []Pin {
 	{config = "large", case_name = "group", solutions = 12, match = 20001, next = 60001, load = 40012, find = 26, triple = 0, candidates = 40500},
 	{config = "large", case_name = "order", solutions = 20000, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
 	{config = "large", case_name = "order-limit", solutions = 10, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
+	{config = "large", case_name = "bgp3-selective-last", solutions = 1610, match = 3221, next = 8051, load = 0, find = 5, triple = 0, candidates = 4879},
 	{config = "large", case_name = "path", solutions = 19612, match = 19612, next = 98060, load = 0, find = 2, triple = 0, candidates = 78448},
 }
 

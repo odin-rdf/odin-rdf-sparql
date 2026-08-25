@@ -11,11 +11,11 @@ archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
+  - "#phase/completed"
   - "#feature"
 
 
-exit_criteria_met: false
+exit_criteria_met: true
 initiative_id: NULL
 ---
 
@@ -139,3 +139,41 @@ neighbours and the note that this engine has no bench target at all.
   built**, so the capability's shape is validated by a consumer rather
   than assumed by its author. Blocked on the store's v0.6.0, which is also
   what SPARQL-T-0026 waits for.
+
+- **2026-08-25 — Superseded and closed by `SPARQL-T-0037`** (SPARQL-I-0003),
+  which built cost-based join ordering against odin-rdf-record. This item was
+  written against odin-rdf-store's `estimate`/`estimate_txn`, and those
+  procedures left with the store.
+
+  **Three of its criteria were retired rather than implemented, and the
+  reasons are the interesting part:**
+
+  - **"A declined estimate is handled explicitly"** — `store.ESTIMATE_UNKNOWN`,
+    `store.estimate_known`, and the conservative rule this item specified for
+    them. **record does not decline.** `range_len` is an *exact* candidate
+    count in O(1) — arithmetic over a window whose binary searches
+    `snapshot_match` already paid — so there is no unknown case to be
+    conservative about, no `estimate_known` test to write, and no fallback
+    path to keep warm. The criterion is not dropped silently: it is void
+    because the store it was about does not exist here.
+  - **"A `Cardinality_Estimator` procedure pointer plus `rawptr`, beside
+    `find: Term_Finder`"** — specified so that the core could go on naming no
+    backend. That constraint was retired by the owner on 2026-08-24
+    (SPARQL-I-0003, decision 1). `Plan_Builder` holds the snapshot and calls
+    `record.snapshot_match` + `record.range_len` directly; `Term_Finder`
+    collapsed the same way during the port.
+  - **"Worth a measurement before it is on by default"** — taken, and it says
+    no threshold is warranted. Pricing a BGP is one `snapshot_match` per
+    pattern once per query; it is unmeasurable against every case of
+    `bench/`, including the two-pattern BGPs where a plan-time cost was most
+    likely to show. Single-pattern BGPs skip pricing outright, so the common
+    case pays nothing at all. It is on unconditionally.
+
+  **What the item got right and what it did not.** Its warning that a
+  reordering must not change an *answer* was the right thing to be worried
+  about, and the corpus held: 537/537 across 38 directories, unchanged. Its
+  premise that ordering by estimated cardinality is the whole job was wrong,
+  and `SPARQL-T-0037` had to strengthen it — **cost alone makes plans worse**,
+  because this executor is a nested loop and a pattern sharing no variable
+  with what is bound re-scans instead of probing. Connectivity comes first,
+  cost second. See that task's Status.
