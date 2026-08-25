@@ -173,12 +173,38 @@ engine's `Encoded_Quad` (a `[4]Term_ID`) has no direct record equivalent
 either reads fields or builds the array; **measure before assuming the
 array is free**, since this is the hot path.
 
-**`snapshot_term` borrows** — the dictionary arena or a caller-provided
+~~**`snapshot_term` borrows** — the dictionary arena or a caller-provided
 `Term_Buf` bounded by `record.INLINE_LEXICAL_MAX`. The `Query`'s
 materialized-term table must clone what it keeps, and closing the store
 frees the arena, so anything outliving a store owns its terms. This is
 the same contract kvstore had for a different reason; do not assume the
-old ownership code is right just because it looks right.
+old ownership code is right just because it looks right.~~
+
+**Amended 2026-08-25 — the paragraph above was written against record
+`v0.3.0` and is wrong against `v0.4.0`, which is what this repository now
+pins.** `RECORD-A-0008` changed the contract: **`snapshot_term` sometimes
+owns.** A decoded triple term is owned *wholly*, every component
+allocated; a split IRI owns its joined string (it always did — there was
+simply nothing to free it with). The rule is now:
+
+- **Call `snapshot_term_destroy(snap, id, t, allocator)` on everything
+  `snapshot_term` returns**, without deciding which case it is. It is
+  total: a no-op for the borrowing kinds, `delete` for a split IRI's
+  string, `rdf.destroy_term` for a triple term's whole tree. It takes the
+  **id** because the term alone cannot tell a joined IRI from a borrowed
+  one.
+- It is safe on a term `snapshot_term` refused (a nil term frees
+  nothing), which is what lets a caller pair it with every call rather
+  than with some.
+- The borrowing half of the old paragraph still holds for the kinds that
+  borrow, and `INLINE_LEXICAL_MAX` is still the buffer floor.
+
+So the `Query`'s materialized-term table does **not** simply "clone what
+it keeps" — it must record the id alongside each term and destroy through
+that verb. The warning in the struck paragraph turns out to be the right
+warning aimed at the wrong contract: do not assume the old ownership code
+is right, because the contract moved under it between this task being
+written and being worked.
 
 ### Dependencies
 
@@ -210,4 +236,143 @@ more than the backend change explains, this copy is the first suspect.
 
 ## Status Updates
 
-*To be added during implementation*
+### 2026-08-25 — handoff into this task, written at the end of the session that finished SPARQL-T-0030 and -T-0040
+
+Everything below is what that session knew and the repository does not
+say on its own. Read the amended ownership note in Technical Approach
+first — it corrects a factual error in this task's own text.
+
+#### State of the tree
+
+`main` at `f3b01bd`, everything committed. Both blockers are **complete**:
+`SPARQL-T-0030` (plumbing, green on all three CI runners) and
+`SPARQL-T-0040` (`bench/`, sixteen pinned read counts). `make test` is
+green at both widths, **512/512 across 37 directories**, and `make check`
+is clean. odin-rdf-record `v0.4.0` is published and pinned.
+
+**This task is unblocked and is the actionable one.**
+
+#### The obligation this task inherited from SPARQL-T-0040, which its criteria do not mention
+
+**`bench/` imports `sparql/kvstore`, and this task deletes that package.**
+Concretely: `bench/store.odin:14` imports `store:store/kvstore`, and
+`bench/main.odin:65` imports `sparql/kvstore` for `Query`,
+`SPARQL_COUNT_READS` and `read_counts_get`. `make check` now vets `bench`
+**twice** (plain and instrumented) and `sparql/kvstore` instrumented as
+well — so this task's green boundary, "`make check` vets every surviving
+package", **is unreachable without dealing with bench.** That is a real
+plan defect created by T-0040 landing between this task being filed and
+being worked, not an oversight in the original decomposition.
+
+`SPARQL-T-0036` is the task that rebuilds bench against record, and it is
+blocked on `SPARQL-T-0033` — so bench cannot simply wait, or `make check`
+stays red across three tasks.
+
+**Recommended resolution, for the next session to confirm rather than
+assume** (it moves scope between two tasks, so it is the owner's call if
+there is any doubt): **this task ports `bench/store.odin` and rehomes the
+counting; `SPARQL-T-0036` runs and compares.** That is smaller than it
+sounds and is what `store.odin` was isolated for — it is ~80 lines,
+`open_ephemeral` + `load_turtle` + `load_trig` becoming `Mem_FS` +
+`store_open` + `ingest` + `apply`, and its own doc comment says it is the
+file T-0036 rewrites. It also matches T-0036's title, which says *"the
+same workload, and whether the read counts held"* — running and
+comparing, not building. The alternative is to drop `bench` from
+`SRC_DIRS` for three tasks and restore it at T-0036, which works but
+leaves a package nothing compiles, and a `when`-gated branch nothing
+compiles is a branch that rots.
+
+**And the counting has to move with the seam.**
+`sparql/kvstore/counting.odin` declares `SPARQL_COUNT_READS`,
+`Read_Counts`, `read_counts_reset` and `read_counts_get`, and the
+increments live in the five adapters in `eval.odin` — 36 lines, all
+inside `when`. When those adapters become direct calls, the counters go
+to the direct call sites in `sparql/` and the file moves there. This is
+exactly the shape odin-rdf-shacl ended up with (`shacl/counting.odin`)
+after its own seam collapsed, for the same reason, so that file is the
+model.
+
+**Keep the counter names and their meanings identical**, or T-0036's
+comparison is worthless: `match`/`next`/`load`/`find`/`triple` are *one
+tick per question the engine asks*, and `store_ops` is *every round trip
+into the store*. The first five are what should hold to the integer
+across the port; `store_ops` is what the port is expected to change and
+is deliberately not pinned.
+
+Three Makefile lines this task must update: `check`'s
+`-- sparql/kvstore (instrumented) --` step, and the two `bench` /
+`build-bench` recipes' `-define:SPARQL_COUNT_READS=true` builds (the
+define survives; only the package declaring it moves).
+
+#### record v0.4.0 API, as actually compiled against rather than as documented
+
+From `tests/smoke/smoke_test.odin`, which is a working call site for most
+of this — read it before writing new ones.
+
+- `store_open(&s, dir, ops, validator, target_size, allocator)` returns
+  **four** values: `(tear, err, load_err, write_err)`. Exactly one of the
+  error slots is set on failure; `tear` non-`.None` with `err == .None`
+  means a repair happened and the boot continued.
+- `snapshot_triple_parts(snap, id) -> ([3]Term_ID, bool)`. `false` for an
+  inlined id and for any term that is not a triple term. It **asserts**
+  on an id the snapshot does not know, like `snapshot_bytes` — so it is
+  not a safe way to ask "is this a term of this snapshot".
+- `snapshot_term(snap, id, buf, allocator) -> (rdf.Term, bool)`, `buf` at
+  least `record.INLINE_LEXICAL_MAX` bytes. Pair with
+  `snapshot_term_destroy` — see the amended Technical Approach note.
+- `snapshot_resolve(snap, term, allocator) -> (Term_ID, bool)`, and it
+  recurses: a component the snapshot has never seen makes the whole term
+  a miss in one probe.
+- `ingest.turtle(src, graph, allocator, kind, blank_prefix, base) ->
+  (ops, Error)` — `graph` is an `rdf.Graph_Label` (`nil` for the default
+  graph) and comes **second**, before the allocator. Check
+  `err.kind != .None`, not the value. `ops_destroy(ops, allocator)`.
+- `apply(&s, Changeset{ops = ops}) -> (Epoch, bool, Apply_Error)`;
+  success is `Apply_Error{}`, and the middle value is the validator's
+  verdict.
+- The store must not be copied or moved after `store_open` — the writer
+  holds a pointer to the `Mem_FS` inside it. Every snapshot must be
+  released before `store_close`; `store_destroy` asserts it.
+
+#### §5's hazard is confirmed, not predicted
+
+`tests/smoke` asserts that an inlined literal's id is
+**`>= record.CONSUMER_ID_FIRST`**. So an *ordinary term* does sit above
+the consumer range's floor, and this task's `is_synthetic` criterion is
+guarding against a bug that demonstrably exists rather than a theoretical
+one. Written from the corpus: the innermost component of
+`data-0-tripleterms.ttl`'s nested triple term is an inlined
+`"123"^^xsd:integer`.
+
+#### Two stale claims to fix when their subjects move
+
+- **`ci.yml`'s record-pin comment** argues the `v0.4.0` floor partly from
+  "`tests/smoke` names `snapshot_triple_parts`, `Term_Kind.Triple` and
+  `snapshot_term_destroy`". `tests/smoke` is deleted at
+  `SPARQL-T-0032`/`-T-0033`, at which point that sentence is false and the
+  floor argument has to move to the engine itself (which will name the
+  same procedures). Whoever deletes the package owns that edit.
+- **`SPARQL-T-0035`'s "pin the record release" criterion is already
+  satisfied** — the pin moved at T-0030 rather than at T-0035, by the
+  owner's call. What is left there is enabling the directory, restoring
+  512/512, and replacing `triple_adapter`'s two-round-trip note.
+
+#### Odin toolchain traps, all of which cost time this session
+
+This task writes a lot of new code, so: `os.read_entire_file` requires
+the allocator argument in this Odin version and returns `os.Error`, not a
+`bool`. In `core:fmt`, `{` and `}` are **verbs** — an unescaped `{` in a
+format string is written into the output as
+`%!(MISSING CLOSE BRACE)` with no error at the call, which surfaces
+arbitrarily far away; double them. And `%10d` **zero-pads** integers
+while `%-10d` pads on the *right* with zeros; render the number with
+`%d` and pad the resulting string with `%10s`.
+
+#### What the baseline says about this task's own risk
+
+`SPARQL-T-0040`'s numbers are in its Status. The one that bears directly
+here is the **scan-boundary copy** this task decided on: the pinned read
+counts are what will show whether the port's timings moved more than the
+backend change explains. `bgp3` at 36.6 ms over 164,933 triples and
+`path` at 13.3 ms are the cases where a per-fact 16-byte copy would show
+first — 380,006 and 117,674 store operations respectively.
