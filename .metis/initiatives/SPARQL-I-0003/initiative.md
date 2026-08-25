@@ -488,6 +488,44 @@ leaves with the store, and its problem takes a different shape on record, where
 that has a name" is not expressible as a prefix at all. Its backlog entry is
 closed with a dated note rather than left reading as open.
 
+**Answered 2026-08-25 (`SPARQL-T-0036`). Both halves exist and the note T-0039
+files is written.** Same query, same named graph — 4,122 triples, byte-identical
+in both configurations — while the default graph around it grows tenfold:
+
+| | odin-rdf-store (T-0040) | odin-rdf-record (T-0036) |
+|---|---|---|
+| `GRAPH b:g1 { ?s ?p ?o }`, small corpus | 0.100 ms | 0.078 ms |
+| the same query, 10x the *unnamed* data | **0.101 ms** | **0.244 ms** |
+| candidates considered, small | — | 20,617 |
+| candidates considered, large | — | **169,055** |
+
+**169,055 candidates for 4,122 answers**, and 169,055 is the whole store. The
+predicted shape is confirmed exactly: naming a graph costs you the data you did
+not name, and it costs you all of it.
+
+Two things the prediction did not contain, and both belong in the note:
+
+- **It is invisible in wall clock at the smaller size, because the port's own
+  speedup covers it.** 0.078 ms against the store's 0.100 — scanning 20,617
+  resident facts still beats seeking 4,122 through LMDB, and only at the larger
+  corpus does the scan overtake the win. `graph` is nonetheless **the only case
+  of the sixteen that got slower**, which is what makes it evidence rather than
+  noise.
+- **The engine's read counts cannot see it at all**, and that is structural
+  rather than an oversight: `record.scan_next` filters the residual pattern
+  inside its own loop, so a skipped candidate ticks nothing, and `graph` reports
+  the same 1 `match` / 4123 `next` at both sizes — bit-identical to
+  odin-rdf-store's, which is where the store's half of this finding lived.
+  T-0036 added a sixth verb, `candidates` (`record.range_len` summed over every
+  window opened), for exactly this. **A consumer of record that instruments only
+  its own calls will not find this regression**; that is worth telling record as
+  much as the numbers are.
+
+Magnitude, stated honestly for the note: 0.244 ms is not a number a user
+notices, `sparql10-graph` is 17/17, and the whole harness runs in 1.7 s. The
+argument to record is the 41x over-scan and the fact that it grows with the
+store rather than with the answer — not a wall-clock complaint.
+
 ## Alternatives Considered **[REQUIRED]**
 
 - **Keeping the parapoly seam and adding `sparql/record` beside

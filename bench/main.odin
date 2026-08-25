@@ -180,7 +180,7 @@ run_config :: proc(c: Config) {
 
 	when sparql.SPARQL_COUNT_READS {
 		fmt.printfln(
-			"   %-12s %10s %9s %9s %9s %7s %7s %11s",
+			"   %-12s %10s %9s %9s %9s %7s %7s %11s %11s",
 			"case",
 			"solutions",
 			"match",
@@ -189,6 +189,7 @@ run_config :: proc(c: Config) {
 			"find",
 			"triple",
 			"store_ops",
+			"candidates",
 		)
 	} else {
 		fmt.printfln("   %-12s %10s %12s   %s", "case", "solutions", "best ms", "about")
@@ -210,7 +211,7 @@ run_case :: proc(c: Config, s: ^Bench_Store, k: Case) {
 			return
 		}
 		fmt.printfln(
-			"   %-12s %10s %9s %9s %9s %7s %7s %11s",
+			"   %-12s %10s %9s %9s %9s %7s %7s %11s %11s",
 			k.name,
 			num(solutions),
 			num(counts.match),
@@ -219,6 +220,7 @@ run_case :: proc(c: Config, s: ^Bench_Store, k: Case) {
 			num(counts.find),
 			num(counts.triple),
 			num(counts.store_ops),
+			num(counts.candidates),
 		)
 		check_pin(c, k, solutions, counts)
 	} else {
@@ -304,7 +306,7 @@ check_pin :: proc(c: Config, k: Case, solutions: int, counts: sparql.Read_Counts
 	// unescaped one is written into the output as
 	// `%!(MISSING CLOSE BRACE)` rather than reported at the call.
 	suggestion := fmt.tprintf(
-		"\t{{config = %q, case_name = %q, solutions = %d, match = %d, next = %d, load = %d, find = %d, triple = %d}},",
+		"\t{{config = %q, case_name = %q, solutions = %d, match = %d, next = %d, load = %d, find = %d, triple = %d, candidates = %d}},",
 		c.name,
 		k.name,
 		solutions,
@@ -313,6 +315,7 @@ check_pin :: proc(c: Config, k: Case, solutions: int, counts: sparql.Read_Counts
 		counts.load,
 		counts.find,
 		counts.triple,
+		counts.candidates,
 	)
 
 	p, found := pin_for(c.name, k.name)
@@ -339,6 +342,9 @@ check_pin :: proc(c: Config, k: Case, solutions: int, counts: sparql.Read_Counts
 	}
 	if p.triple != counts.triple {
 		fmt.sbprintf(&b, " triple %d->%d", p.triple, counts.triple)
+	}
+	if p.candidates != counts.candidates {
+		fmt.sbprintf(&b, " candidates %d->%d", p.candidates, counts.candidates)
 	}
 	if moved := strings.to_string(b); moved != "" {
 		fail("%s/%s: pin moved:%s\n   replace with:\n%s", c.name, k.name, moved, suggestion)

@@ -253,19 +253,27 @@ Exec_Node :: struct {
 // `range_iter` binds the filters. Origin has no default in record
 // (api.md par. 12.5): a query answers about what the dataset says,
 // asserted and entailed alike, so `.Any` is stated here once.
+//
+// The `Range` is named rather than passed straight through so that the
+// instrumented build can price it: `range_len` is the window the
+// pattern's prefix could narrow to, and what the scan then filters
+// residually is invisible from this side of the seam. The plain build
+// compiles the two forms identically — see `counting.odin`.
 @(private = "file")
 match_open :: proc(e: ^Exec, pattern: Match_Pattern) -> record.Scan {
-	when SPARQL_COUNT_READS {
-		read_counts.match += 1
-		read_counts.store_ops += 1
-	}
 	p := record.Pattern {
 		s = pattern[QUAD_S],
 		p = pattern[QUAD_P],
 		o = pattern[QUAD_O],
 		g = pattern[QUAD_G],
 	}
-	return record.range_iter(record.snapshot_match(e.snapshot, p), record.Filter{origin = .Any})
+	r := record.snapshot_match(e.snapshot, p)
+	when SPARQL_COUNT_READS {
+		read_counts.match += 1
+		read_counts.store_ops += 1
+		read_counts.candidates += record.range_len(r)
+	}
+	return record.range_iter(r, record.Filter{origin = .Any})
 }
 
 // match_next yields the next matching fact as the engine's own quad.

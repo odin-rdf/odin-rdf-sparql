@@ -45,6 +45,36 @@ package sparql
 // evidence stated as a measurement rather than as arithmetic. Netting
 // the two into one number would hide exactly the difference the port is
 // trying to make.
+//
+//
+// # `candidates`, and why counting questions stopped being enough
+//
+// The five verbs above count questions the engine asks, and against
+// odin-rdf-store that was very nearly the same thing as work the store
+// did: one `next` was one cursor step on a key that already carried
+// every bound component, because every index there is graph-first
+// (`STORE-A-0001`).
+//
+// **On record it is not.** `snapshot_match` narrows to a prefix of one
+// permutation and hands back whatever the prefix could not express as a
+// *residual* pattern, which `scan_next` filters inside its own loop -- a
+// skipped candidate never reaches the engine and ticks nothing. A bound
+// graph is always residual here (`RECORD-A-0004`: G is a tiebreaker,
+// never a prefix), so `GRAPH <g> { ?s ?p ?o }` opens a window over the
+// whole permutation while the tally reports the same 1 `match` and 4123
+// `next` whether the store around it holds twenty thousand facts or a
+// hundred and seventy thousand. **The counter was blind to the exact
+// regression SPARQL-I-0003 par. 12 exists to measure**, which is not a
+// flaw in how it was written -- it is what changes when the store
+// underneath it stops answering from a prefix.
+//
+// `candidates` is `range_len` -- exact, O(1), no scan -- summed over
+// every window opened. It is what the store was *handed*, where `next`
+// is what it gave back, and the gap between them is the residual
+// filtering. Added by SPARQL-T-0036, which could otherwise say nothing
+// about par. 12 that wall clock alone had not; it is also the number
+// `SPARQL-T-0037` exists to reduce, which is why it is pinned rather
+// than merely reported.
 SPARQL_COUNT_READS :: #config(SPARQL_COUNT_READS, false)
 
 // Read_Counts is the tally, kept per verb because a change that trades
@@ -52,13 +82,17 @@ SPARQL_COUNT_READS :: #config(SPARQL_COUNT_READS, false)
 // to zero.
 Read_Counts :: struct {
 	// One tick per question the engine asks.
-	match:     int, // a scan opened for one pattern at one depth
-	next:      int, // one step of one scan
-	load:      int, // a result id materialized during expression evaluation
-	find:      int, // a ground term of the query bound to an id
-	triple:    int, // a stored triple term taken apart
+	match:      int, // a scan opened for one pattern at one depth
+	next:       int, // one step of one scan
+	load:       int, // a result id materialized during expression evaluation
+	find:       int, // a ground term of the query bound to an id
+	triple:     int, // a stored triple term taken apart
 	// Every round trip into the store, wherever it is made.
-	store_ops: int,
+	store_ops:  int,
+	// The width of every window the engine was handed: `range_len`
+	// summed over each `match_open`. The one verb here with no
+	// odin-rdf-store counterpart -- see the note below.
+	candidates: int,
 }
 
 when SPARQL_COUNT_READS {
