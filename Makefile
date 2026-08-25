@@ -34,7 +34,10 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store -
 # `sparql` at all, because a smoke test that needs the engine to compile is
 # testing the engine rather than the collection.
 PKGS     := sparql sparql/srj sparql/srx sparql/kvstore tests/guards tests/w3c/harness tests/readme tests/smoke
-SRC_DIRS := $(PKGS)
+# bench/ has an entry point, so it is vetted outside the PKGS loop rather
+# than inside it -- and both of its builds are, since a `when`-gated
+# branch that nothing compiles is a branch that rots (SPARQL-T-0040).
+SRC_DIRS := $(PKGS) $(BENCH)
 
 # STORE-A-0001 makes the store's Term_ID width a build-time choice, and this
 # project compiles the store's sources into its own binaries. Query code must
@@ -71,21 +74,39 @@ test: ## Run the full suite at both Term_ID widths
 # never instantiates still has to compile clean.
 check: ## Vet every package at the default Term_ID width
 	@if [ -z "$(SRC_DIRS)" ]; then echo "no packages yet"; exit 0; fi; \
-	for pkg in $(filter-out ./$(BENCH),$(SRC_DIRS)); do \
+	for pkg in $(filter-out $(BENCH),$(SRC_DIRS)); do \
 		echo "-- $$pkg --"; \
 		odin check $$pkg -no-entry-point -vet -strict-style $(COLL) || exit 1; \
 	done
-	@test -d $(BENCH) && odin check $(BENCH) -vet -strict-style $(COLL) || true
+	@echo "-- $(BENCH) --"
+	@odin check $(BENCH) -vet -strict-style $(COLL) || exit 1
+	@odin check $(BENCH) -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
+	@echo "-- sparql/kvstore (instrumented) --"
+	@odin check sparql/kvstore -no-entry-point -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
 
 # Benchmarks measure the engine, and a debug build measures the compiler
 # instead, so they get the release flags.
-bench: ## Build and run the benchmarks with release flags
+#
+# **Two builds, not one** (SPARQL-T-0040). Read counting lives behind
+# `-define:SPARQL_COUNT_READS` in `sparql/kvstore/counting.odin`, and a
+# counter inside the timed binary would be measuring itself, so the timed
+# run carries no counter at all -- `when SPARQL_COUNT_READS` compiles to
+# nothing. The instrumented run takes no timings and is where the pinned
+# counts are asserted; it is also the one that fails the target when a
+# count moves. odin-rdf-shacl's `make bench` has the same shape and for
+# the same reason.
+bench: ## Build and run the benchmarks with release flags (timing, then instrumented)
 	@test -d $(BENCH) || { echo "no $(BENCH)/ package yet"; exit 0; }; \
-	mkdir -p build && odin run $(BENCH) -out:$(OUT) -o:speed -no-bounds-check $(COLL)
+	mkdir -p build
+	@odin run $(BENCH) -out:$(OUT) -o:speed -no-bounds-check $(COLL) || exit 1
+	@echo
+	@odin run $(BENCH) -out:$(OUT)-counted -o:speed -no-bounds-check $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
 
-build-bench: ## Build the benchmark binary without running it
+build-bench: ## Build both benchmark binaries without running them
 	@test -d $(BENCH) || { echo "no $(BENCH)/ package yet"; exit 0; }; \
-	mkdir -p build && odin build $(BENCH) -out:$(OUT) -o:speed -no-bounds-check $(COLL)
+	mkdir -p build
+	@odin build $(BENCH) -out:$(OUT) -o:speed -no-bounds-check $(COLL) || exit 1
+	@odin build $(BENCH) -out:$(OUT)-counted -o:speed -no-bounds-check $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
 
 clean: ## Remove build/
 	rm -rf build

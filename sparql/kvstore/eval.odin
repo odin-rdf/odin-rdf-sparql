@@ -60,6 +60,10 @@ match_adapter :: proc(session: ^Session, pattern: store.Match_Pattern) -> kvstor
 	// cursor and leaves the transaction alone, so the executor's
 	// open-and-close per pattern per depth is unaffected. It just stops
 	// opening a fresh snapshot each time.
+	when SPARQL_COUNT_READS {
+		read_counts.match += 1
+		read_counts.store_ops += 1
+	}
 	it, err := kvstore.match_txn(session.txn, pattern)
 	if err != nil {
 		session.err = err
@@ -74,6 +78,10 @@ match_adapter :: proc(session: ^Session, pattern: store.Match_Pattern) -> kvstor
 
 @(private)
 next_adapter :: proc(it: ^kvstore.Match_Iterator) -> (store.Encoded_Quad, bool) {
+	when SPARQL_COUNT_READS {
+		read_counts.next += 1
+		read_counts.store_ops += 1
+	}
 	return kvstore.match_next(it)
 }
 
@@ -95,6 +103,10 @@ load_adapter :: proc(
 	owned: bool,
 ) {
 	session := cast(^Session)data
+	when SPARQL_COUNT_READS {
+		read_counts.load += 1
+		read_counts.store_ops += 1
+	}
 	loaded, err := kvstore.lookup_term_txn(session.txn, id, allocator)
 	if err != nil {
 		session.err = err
@@ -110,6 +122,10 @@ load_adapter :: proc(
 @(private)
 find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
 	session := cast(^Session)data
+	when SPARQL_COUNT_READS {
+		read_counts.find += 1
+		read_counts.store_ops += 1
+	}
 	resolved, present, err := kvstore.find_term_txn(session.txn, term)
 	if err != nil {
 		session.err = err
@@ -127,8 +143,14 @@ find_adapter :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found:
 @(private)
 triple_adapter :: proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term_ID, ok: bool) {
 	session := cast(^Session)data
+	when SPARQL_COUNT_READS {
+		read_counts.triple += 1
+	}
 	if store.id_kind(id) != .Triple {
 		return {}, false
+	}
+	when SPARQL_COUNT_READS {
+		read_counts.store_ops += 1
 	}
 	term, err := kvstore.lookup_term_txn(session.txn, id, context.allocator)
 	if err != nil {
@@ -141,6 +163,12 @@ triple_adapter :: proc(data: rawptr, id: store.Term_ID) -> (parts: [3]store.Term
 		return {}, false
 	}
 	for component, i in ([3]rdf.Term{triple.subject, triple.predicate, triple.object}) {
+		// Counted as a store round trip but not as a `find`: nothing in
+		// the query asked for this term, the encoding did. That
+		// distinction is the whole SPARQL-T-0019 evidence.
+		when SPARQL_COUNT_READS {
+			read_counts.store_ops += 1
+		}
 		resolved, present, find_err := kvstore.find_term_txn(session.txn, component)
 		if find_err != nil {
 			session.err = find_err
@@ -386,6 +414,14 @@ query_destroy :: proc(q: ^Query) {
 query_term :: proc(q: ^Query, id: store.Term_ID) -> rdf.Term {
 	if computed, is_computed := sparql.exec_computed_term(&q.exec, id); is_computed {
 		return computed
+	}
+	// The answer boundary, and it is a store round trip like any other.
+	// No adapter tick: nothing in the *evaluation* asked for this — the
+	// caller did, once it had a row in hand. Counting it as `load` would
+	// make the comparable half of the tally depend on whether the
+	// benchmark bothered to render its answers.
+	when SPARQL_COUNT_READS {
+		read_counts.store_ops += 1
 	}
 	term, err := kvstore.lookup_term_txn(q.session.txn, id, q.allocator)
 	if err != nil {

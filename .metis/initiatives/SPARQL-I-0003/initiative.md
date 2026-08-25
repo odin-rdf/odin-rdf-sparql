@@ -633,9 +633,37 @@ failing test waiting for it rather than a paragraph.
 **Where the board stands.** `SPARQL-T-0030` is **complete**: pushed, and
 green on all three runners (run 32832865466), the Windows leg verified
 from its own log rather than from the run's colour. record's `v0.4.0` is
-published and `ci.yml` resolves it. **`SPARQL-T-0040` is the actionable
-task**, and it is the one that must run before the seam collapses —
-`SPARQL-T-0031` is blocked on it as well as on `-T-0030`.
+published and `ci.yml` resolves it. **`SPARQL-T-0040` is complete too** —
+`bench/` exists, sixteen read counts are pinned, and the numbers are in
+its Status. **`SPARQL-T-0031` is now the actionable task**, and it is the
+large one: the seam collapses, `sparql/kvstore` is deleted, and every
+`store:` import goes.
+
+**§12's baseline half is measured, and it is unambiguous.** Holding the
+named graph at 4,122 triples while the default graph grows from 16,495 to
+164,933, `GRAPH b:g1 { ?s ?p ?o }` costs **0.100 ms against 0.101 ms** and
+reads **1 match and 4,123 next in both** — while `bgp2` over the same two
+stores moves by 11×, which is what says the corpus is large enough for the
+flatness to be a result rather than two numbers under the noise floor.
+odin-rdf-store answers a bound graph from a prefix range and never looks at
+the rest. `SPARQL-T-0036` measures the other half; this initiative should
+resist predicting it, and §12's prose already commits to that.
+
+**Two before-numbers the folded-in planner tasks now have.**
+`ORDER BY ?name LIMIT 10` is indistinguishable from the same query without
+the LIMIT — it sorts all 20,000 solutions and discards 19,990
+(`SPARQL-T-0038`). And `bgp3`, written worst-first, opens 100,001 match
+iterators for 80,000 solutions (`SPARQL-T-0037`). Both are pinned, so
+those two tasks can prove they changed what the engine *decides* rather
+than only that the suite stayed green — which was the objection to folding
+them in, answered.
+
+**One finding parked rather than chased**: aggregation resolves two terms
+per group through `find_adapter` (`find` = `2 + 2×groups`, probed by
+varying the group count). Not investigated and not touched — this task
+established a baseline, and tuning inside it would have destroyed the
+comparison it exists to enable. It is pinned, so it cannot move
+unnoticed.
 
 **One thing to carry, learned in the push and not in the code.**
 record's tag and commit turned out to be published already when this
