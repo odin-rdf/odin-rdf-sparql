@@ -5,12 +5,8 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 
-import rdf "rdf:rdf"
-import store "store:store"
-import kvstore "store:store/kvstore"
 
 import sparql "../../sparql"
-import sparql_kv "../../sparql/kvstore"
 
 // A representative query touching every token family: keywords, vars,
 // IRIs, prefixed names (incl. percent + escape), literals of every
@@ -213,9 +209,11 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	s, open_err := kvstore.open_ephemeral()
-	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
-	defer kvstore.close(s)
+	g: Guard_DB
+	defer guard_close(&g)
+	if !guard_open(t, &g, "streams") {
+		return
+	}
 
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
@@ -223,9 +221,13 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 		fmt.sbprintf(&b, "<http://e/s%d> <http://e/p> <http://e/m%d> .\n", i, i %% 50)
 		fmt.sbprintf(&b, "<http://e/m%d> <http://e/q> <http://e/o%d> .\n", i %% 50, i)
 	}
-	_, load_err, db_err := kvstore.load_triples(s, transmute([]byte)strings.to_string(b))
-	testing.expectf(t, db_err == nil, "the store should accept the load: %v", db_err)
-	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+	if !guard_load_ntriples(t, &g, strings.to_string(b)) {
+		return
+	}
+	snap, pinned := guard_snap(t, &g)
+	if !pinned {
+		return
+	}
 
 	p: sparql.Parser
 	sparql.parser_init(&p, transmute([]byte)string(`SELECT * WHERE { ?s <http://e/p> ?m . ?m <http://e/q> ?o }`))
@@ -235,23 +237,23 @@ test_evaluation_streams_without_allocating :: proc(t: ^testing.T) {
 	algebra, translated := sparql.translate(&p)
 	testing.expect(t, translated, "the query should translate")
 
-	q: sparql_kv.Query
-	prepared := sparql_kv.query_init(&q, algebra, s)
-	defer sparql_kv.query_destroy(&q)
+	q: sparql.Query
+	prepared := sparql.query_init(&q, algebra, snap)
+	defer sparql.query_destroy(&q)
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 
-	// Pull one solution before measuring. Preparing a query allocates
-	// nothing store-side, but the *first* match does: memstore merges its
-	// pending inserts into its indexes lazily, on the first read. That is
-	// the store's business and it happens once, not per solution — what
-	// this guard is about is everything after it.
-	_, first := sparql_kv.query_next(&q)
+	// Pull one solution before measuring. Whatever a first read costs is
+	// the store's business and happens once, not per solution — what this
+	// guard is about is everything after it. (Against odin-rdf-store that
+	// first read was memstore merging its pending inserts; record's
+	// permutations are built at apply, so this is now belt and braces.)
+	_, first := sparql.query_next(&q)
 	testing.expect(t, first, "the query should have solutions")
 
 	before := track.total_allocation_count
 	solutions := 1
 	for {
-		_, more := sparql_kv.query_next(&q)
+		_, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
@@ -320,18 +322,24 @@ test_grouping_is_bounded_by_its_groups :: proc(t: ^testing.T) {
 
 @(private = "file")
 grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
-	s, open_err := kvstore.open_ephemeral()
-	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
-	defer kvstore.close(s)
+	g: Guard_DB
+	defer guard_close(&g)
+	if !guard_open(t, &g, "grouping") {
+		return 0
+	}
 
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 	for i in 0 ..< solutions {
 		fmt.sbprintf(&b, "<http://e/s%d> <http://e/p%d> <http://e/o%d> .\n", i, i %% 2, i)
 	}
-	_, load_err, db_err := kvstore.load_triples(s, transmute([]byte)strings.to_string(b))
-	testing.expectf(t, db_err == nil, "the store should accept the load: %v", db_err)
-	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+	if !guard_load_ntriples(t, &g, strings.to_string(b)) {
+		return 0
+	}
+	snap, pinned := guard_snap(t, &g)
+	if !pinned {
+		return 0
+	}
 
 	p: sparql.Parser
 	// Every aggregate here answers from O(1) state per group. GROUP_CONCAT
@@ -355,12 +363,12 @@ grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 
-	q: sparql_kv.Query
-	prepared := sparql_kv.query_init(&q, algebra, s, "", mem.tracking_allocator(&track))
+	q: sparql.Query
+	prepared := sparql.query_init(&q, algebra, snap, "", mem.tracking_allocator(&track))
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 	groups := 0
 	for {
-		_, more := sparql_kv.query_next(&q)
+		_, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
@@ -368,7 +376,7 @@ grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
 	}
 	testing.expectf(t, groups == 2, "expected 2 groups, got %d", groups)
 	peak := track.peak_memory_allocated
-	sparql_kv.query_destroy(&q)
+	sparql.query_destroy(&q)
 	return int(peak)
 }
 
@@ -417,9 +425,11 @@ test_property_path_traversal_is_bounded_by_the_graph :: proc(t: ^testing.T) {
 // per path solution.
 @(private = "file")
 path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
-	s, open_err := kvstore.open_ephemeral()
-	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
-	defer kvstore.close(s)
+	g: Guard_DB
+	defer guard_close(&g)
+	if !guard_open(t, &g, "path") {
+		return 0
+	}
 
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
@@ -434,9 +444,13 @@ path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
 	for i in 0 ..< fanout {
 		fmt.sbprintf(&b, "<http://e/f%d> <http://e/q> <http://e/g%d> .\n", i, i)
 	}
-	_, load_err, db_err := kvstore.load_triples(s, transmute([]byte)strings.to_string(b))
-	testing.expectf(t, db_err == nil, "the store should accept the load: %v", db_err)
-	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+	if !guard_load_ntriples(t, &g, strings.to_string(b)) {
+		return 0
+	}
+	snap, pinned := guard_snap(t, &g)
+	if !pinned {
+		return 0
+	}
 
 	p: sparql.Parser
 	sparql.parser_init(
@@ -455,12 +469,12 @@ path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 
-	q: sparql_kv.Query
-	prepared := sparql_kv.query_init(&q, algebra, s, "", mem.tracking_allocator(&track))
+	q: sparql.Query
+	prepared := sparql.query_init(&q, algebra, snap, "", mem.tracking_allocator(&track))
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 	solutions := 0
 	for {
-		_, more := sparql_kv.query_next(&q)
+		_, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
@@ -474,7 +488,7 @@ path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
 	want := (nodes * nodes + 2 * fanout) * fanout
 	testing.expectf(t, solutions == want, "expected %d solutions, got %d", want, solutions)
 	peak := track.peak_memory_allocated
-	sparql_kv.query_destroy(&q)
+	sparql.query_destroy(&q)
 	return int(peak)
 }
 
@@ -488,18 +502,28 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	allocator := mem.tracking_allocator(&track)
 
-	s, open_err := kvstore.open_ephemeral(kvstore.EPHEMERAL_OPTIONS, allocator)
-	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
+	// The store is deliberately *inside* the tracked allocator here: what
+	// this guard is looking for is anything the engine failed to free, so
+	// the store is torn down by hand before the assertion rather than by
+	// a defer. See guard_close.
 	context.allocator = allocator
-	_, load_err, _ := kvstore.load_triples(
-		s,
-		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
+	g: Guard_DB
+	if !guard_open(t, &g, "evaluation-leaks", allocator) {
+		return
+	}
+	if !guard_load_ntriples(t, &g, `<http://e/a> <http://e/p> <http://e/b> .
 <http://e/b> <http://e/p> <http://e/c> .
 <http://e/c> <http://e/p> <http://e/a> .
 <http://e/a> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> .
-<http://e/b> <http://e/r> <<( <http://e/b> <http://e/p> <<( <http://e/c> <http://e/p> <http://e/a> )>> )>> .`),
-	)
-	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+<http://e/b> <http://e/r> <<( <http://e/b> <http://e/p> <<( <http://e/c> <http://e/p> <http://e/a> )>> )>> .`) {
+		guard_close(&g)
+		return
+	}
+	snap, pinned := guard_snap(t, &g)
+	if !pinned {
+		guard_close(&g)
+		return
+	}
 
 	QUERIES :: [?]string {
 		`SELECT * WHERE { ?s <http://e/p> ?o }`,
@@ -581,11 +605,11 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 			testing.expect(t, parsed)
 			algebra, _ := sparql.translate(&p)
 
-			q: sparql_kv.Query
-			if sparql_kv.query_init(&q, algebra, s, sparql.parser_base(&p), allocator) {
+			q: sparql.Query
+			if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator) {
 				pulled := 0
 				for {
-					_, more := sparql_kv.query_next(&q)
+					_, more := sparql.query_next(&q)
 					if !more {
 						break
 					}
@@ -597,14 +621,14 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 					}
 				}
 			}
-			sparql_kv.query_destroy(&q)
+			sparql.query_destroy(&q)
 			sparql.parser_destroy(&p)
 		}
 	}
 	// The store is torn down before the assertion, not by a defer: a
 	// deferred destroy runs after the check and would leave the store's
 	// own live allocations looking like the engine's leaks.
-	kvstore.close(s, allocator)
+	guard_close(&g)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
@@ -626,17 +650,25 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	allocator := mem.tracking_allocator(&track)
 
-	s, open_err := kvstore.open_ephemeral(kvstore.EPHEMERAL_OPTIONS, allocator)
-	testing.expectf(t, open_err == nil, "the store should open: %v", open_err)
+	// The store is inside the tracked allocator and torn down by hand
+	// before the assertion; see the note in test_evaluation_no_leaks.
 	context.allocator = allocator
-	_, load_err, _ := kvstore.load_triples(
-		s,
-		transmute([]byte)string(`<http://e/a> <http://e/p> <http://e/b> .
+	g: Guard_DB
+	if !guard_open(t, &g, "result-graph-leaks", allocator) {
+		return
+	}
+	if !guard_load_ntriples(t, &g, `<http://e/a> <http://e/p> <http://e/b> .
 <http://e/b> <http://e/p> <http://e/c> .
 <http://e/c> <http://e/p> "text" .
-<http://e/a> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> .`),
-	)
-	testing.expectf(t, load_err.message == "", "fixture did not load: %s", load_err.message)
+<http://e/a> <http://e/r> <<( <http://e/a> <http://e/p> <http://e/b> )>> .`) {
+		guard_close(&g)
+		return
+	}
+	snap, pinned := guard_snap(t, &g)
+	if !pinned {
+		guard_close(&g)
+		return
+	}
 
 	QUERIES :: [?]string {
 		// A template with a variable in every position, and one with a
@@ -671,33 +703,27 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 		testing.expectf(t, parsed, "the query should parse: %s", query)
 		algebra, _ := sparql.translate(&p)
 
-		q: sparql_kv.Query
-		if sparql_kv.query_init(&q, algebra, s, sparql.parser_base(&p), allocator) {
+		q: sparql.Query
+		if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator) {
 			graph: sparql.Result_Graph
 			if p.query.form == .Construct {
 				template: sparql.Template
-				sparql.template_build(&template, p.query.template, sparql_kv.query_slots(&q), allocator)
-				graph = sparql_kv.query_construct(&q, &template, allocator)
+				sparql.template_build(&template, p.query.template, sparql.query_slots(&q), allocator)
+				graph = sparql.query_construct(&q, &template, allocator)
 				sparql.template_destroy(&template)
 			} else {
 				targets: sparql.Describe_Targets
-				sparql.describe_build(&targets, p.query, sparql_kv.query_slots(&q), find_guard, &q, allocator)
-				graph = sparql_kv.query_describe(&q, &targets, allocator)
+						sparql.describe_build(&targets, p.query, sparql.query_slots(&q), snap, allocator)
+				graph = sparql.query_describe(&q, &targets, allocator)
 				sparql.describe_destroy(&targets)
 			}
 			sparql.result_graph_destroy(&graph)
 		}
-		sparql_kv.query_destroy(&q)
+		sparql.query_destroy(&q)
 		sparql.parser_destroy(&p)
 	}
-	kvstore.close(s, allocator)
+	guard_close(&g)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
 }
-
-@(private = "file")
-find_guard :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
-	return sparql_kv.query_find(cast(^sparql_kv.Query)data, term)
-}
-

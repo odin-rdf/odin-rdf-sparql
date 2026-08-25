@@ -6,35 +6,37 @@ A SPARQL query engine for the Odin RDF family: a complete SPARQL 1.1
 Query parser with the SPARQL 1.2 surface (triple terms, reified
 triples, annotations, VERSION), translating queries to the W3C SPARQL
 algebra (§18.2/§18.4), and an evaluation engine that runs that algebra
-against any odin-rdf-store backend through the match interface alone.
-Written in Odin with no external dependencies, and validated by the
-vendored official W3C suites: **352 syntax tests** (154 SPARQL 1.1, 198
-SPARQL 1.2) and **483 evaluation tests across 35 suite directories**,
-every one of them run against the LMDB-backed store at **both**
-`Term_ID` widths.
+against an epoch-pinned snapshot of [odin-rdf-record](../odin-rdf-record).
+Written in Odin with no external dependencies and no native code, and
+validated by the vendored official W3C suites: **352 syntax tests** (154
+SPARQL 1.1, 198 SPARQL 1.2) and **483 evaluation tests across 35 suite
+directories**.
 
-This is the third layer of the family stack —
+This is a top layer of the family stack —
 [odin-rdf-parser](../odin-rdf-parser) (formats and data model) →
-[odin-rdf-store](../odin-rdf-store) (storage, match interface) → this
-engine. SPARQL Update, the HTTP and Graph Store protocols, federation
-(SERVICE), and full-text search are out of scope per the project vision.
+[odin-rdf-record](../odin-rdf-record) (the system of record: an
+append-only hash-chained log replayed into a memory-resident projection)
+→ this engine, a peer of [odin-rdf-shacl](../odin-rdf-shacl). SPARQL
+Update, the HTTP and Graph Store protocols, federation (SERVICE), and
+full-text search are out of scope per the project vision.
 
 ## Packages
 
 | Package           | Description                                                             |
 | ----------------- | ----------------------------------------------------------------------- |
-| `sparql`          | Tokenizer, recursive-descent parser (query text → AST), §18.2/§18.4 translation (AST → algebra), the SSE algebra printer, and the backend-independent evaluation engine |
+| `sparql`          | Tokenizer, recursive-descent parser (query text → AST), §18.2/§18.4 translation (AST → algebra), the SSE algebra printer, the evaluation engine, and the prepared-query API |
 | `sparql/srj`      | Writes the SPARQL Query Results **JSON** Format (SELECT and ASK)        |
 | `sparql/srx`      | Writes the SPARQL Query Results **XML** Format (SELECT and ASK)         |
-| `sparql/kvstore`  | The engine instantiated against the persistent (LMDB) backend           |
 
-`sparql` names no storage backend and imports none. That split was
-originally what kept LMDB out of the link of a program that only wanted
-an in-memory store; odin-rdf-store retired that backend (STORE-A-0006),
-so today it is the seam a future backend would bind to rather than a
-linkage guarantee. The sibling checkouts
-are reached through collections — `rdf:` for the data model, `store:`
-for the match interface — as declared in the Makefile and `ols.json`.
+**The engine is one package.** It used to be two: `sparql` named no
+storage backend and was generic over one, and `sparql/kvstore`
+instantiated it against odin-rdf-store's LMDB backend. odin-rdf-record is
+the one and only store from here on, so that seam is retired rather than
+re-instantiated, and preparing and running a query is `sparql`'s own API.
+`srj` and `srx` stay separate because they are output formats, not
+instantiations. The sibling checkouts are reached through collections —
+`rdf:` for the data model, `record:` for the system of record — as
+declared in the Makefile and `ols.json`.
 
 The two result writers follow odin-rdf-parser's emitter shape —
 `emitter_init` / `emit` / `emitter_finish` for the streaming SELECT
@@ -102,10 +104,9 @@ run :: proc() {
 ```odin
 import "core:fmt"
 import "rdf:rdf"
-import "store:store"
-import "store:store/kvstore"
+import "record:record"
+import "record:record/ingest"
 import "sparql"
-import sparql_kvstore "sparql/kvstore"
 
 DATA :: `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <http://example/alice> a foaf:Person ; foaf:name "Alice" ; foaf:knows <http://example/bob> .
@@ -122,19 +123,40 @@ ORDER BY ?name
 `
 
 evaluate :: proc() {
-	// A store is a directory on disk, opened once and kept.
-	db, open_err := kvstore.open("/var/lib/example/rdf")
-	if open_err != nil {
-		fmt.eprintfln("cannot open the store: %v", open_err)
+	// A store is a directory of log segments, opened once and kept. It
+	// must not be copied or moved after store_open: the writer inside it
+	// holds a pointer to its own file handles.
+	db: record.Store
+	_, open_err, load_err, write_err := record.store_open(
+		&db, "/var/lib/example/rdf", record.posix_file_ops())
+	if open_err != .None || load_err != .None || write_err != .None {
+		fmt.eprintfln("cannot open the store: %v %v %v", open_err, load_err, write_err)
 		return
 	}
-	defer kvstore.close(db)
-	_, load_err, db_err := kvstore.load_turtle(
-		db, transmute([]byte)string(DATA), "http://example/")
-	if load_err.message != "" || db_err != nil {
-		fmt.eprintfln("data did not load: %s %v", load_err.message, db_err)
+	defer record.store_close(&db)
+
+	// Loading is ingest (document → ops) then apply (ops → one epoch).
+	// blank_prefix scopes the document's blank-node labels.
+	ops, ing_err := ingest.turtle(
+		transmute([]byte)string(DATA), nil, context.allocator,
+		blank_prefix = "people_", base = "http://example/")
+	if ing_err.kind != .None {
+		fmt.eprintfln("data did not parse: %v", ing_err.kind)
 		return
 	}
+	defer ingest.ops_destroy(ops, context.allocator)
+	if _, _, apply_err := record.apply(&db, {ops = ops}); apply_err != (record.Apply_Error{}) {
+		fmt.eprintfln("data did not load: %v", apply_err)
+		return
+	}
+
+	// The dataset the query answers about. store_at(&db, epoch) in place
+	// of store_latest asks the same question of the past.
+	snap, snap_err := record.store_latest(&db)
+	if snap_err != .None {
+		return
+	}
+	defer record.snapshot_release(&snap)
 
 	p: sparql.Parser
 	sparql.parser_init(&p, transmute([]byte)string(FRIENDS))
@@ -144,28 +166,29 @@ evaluate :: proc() {
 	}
 	algebra, _ := sparql.translate(&p)
 
-	// A prepared query borrows the algebra, so the parser outlives it.
-	q: sparql_kvstore.Query
-	defer sparql_kvstore.query_destroy(&q)
-	if !sparql_kvstore.query_init(&q, algebra, db, sparql.parser_base(&p)) {
+	// A prepared query borrows the algebra and the snapshot, so both
+	// outlive it. query_destroy releases neither.
+	q: sparql.Query
+	defer sparql.query_destroy(&q)
+	if !sparql.query_init(&q, algebra, snap, sparql.parser_base(&p)) {
 		fmt.eprintfln("unsupported: %s", q.unsupported)
 		return
 	}
 
-	names := sparql_kvstore.query_var_names(&q)
-	internal := sparql_kvstore.query_var_internal(&q)
+	names := sparql.query_var_names(&q)
+	internal := sparql.query_var_internal(&q)
 	for {
 		// A row is Term_IDs indexed by variable slot, valid until the
 		// next pull. Deep-copy it if you keep it.
-		row, more := sparql_kvstore.query_next(&q)
+		row, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
 		for id, slot in row {
-			if id == store.UNBOUND || internal[slot] {
+			if id == sparql.UNBOUND || internal[slot] {
 				continue   // unbound, or a pattern blank node
 			}
-			#partial switch term in sparql_kvstore.query_term(&q, id) {
+			#partial switch term in sparql.query_term(&q, id) {
 			case rdf.IRI:
 				fmt.printf("?%s=<%s> ", names[slot], string(term))
 			case rdf.Literal:
@@ -179,10 +202,19 @@ evaluate :: proc() {
 }
 ```
 
-`sparql/kvstore` is the same code against the persistent backend: one
-`^kvstore.Store` in place of the dictionary/dataset pair, and
-`query_error` afterwards, because a read from LMDB can fail and an
-exhausted query and a failed one must not look alike.
+`record.posix_file_ops()` is the durable form, and what an application
+uses. **The suites in this repository use `record.Mem_FS` and
+`record.mem_file_ops(&fs)` instead** — the same store with its log in
+memory, so a test needs no directory, no cleanup and no uniqueness, and
+the Windows CI runner works even though `record` has no Windows
+`File_Ops`. `tests/readme` therefore compiles this example with the
+memory seam substituted for the two `posix_file_ops` lines; nothing else
+about it differs.
+
+There is **no error to check after a run**. A read on record cannot fail
+— the projection is memory-resident — so an exhausted query is the only
+kind there is, and the `query_error` this engine had against LMDB is
+gone.
 
 CONSTRUCT and DESCRIBE answer with a graph rather than a solution
 sequence — compile the template or the clause against the prepared
@@ -209,53 +241,81 @@ The evaluator's half:
   the query.
 - A **solution row** is the execution's working row, valid until the
   next `query_next`. A consumer that keeps a solution copies it.
-- A **term** from `query_term` is valid until `query_destroy`: the query
-  builds it from database bytes and frees it later. Clone it to outlive
-  the query.
+- The **snapshot is yours**. `query_init` holds it for the query's life
+  and `query_destroy` does not release it — see *A query is one snapshot*
+  below for why that is the right way round.
+- A **term** from `query_term` is valid until `query_destroy`. What that
+  costs varies by term and you never have to know which: record hands
+  back a borrow of its dictionary arena for most kinds, an owned joined
+  string for a split IRI, and an owned tree for a triple term, and
+  `query_destroy` releases each through record's own verb. Clone it
+  (`rdf.clone_term`) to outlive the query — and you must, since closing
+  the store frees the arena the borrowing kinds point into.
 - A **Result_Graph** from `query_construct` / `query_describe` owns
   every term in it and is the caller's: free it with
   `sparql.result_graph_destroy`. That is what lets it outlive both the
   query and the store.
 - `query_destroy` frees everything else — the plan, the slot table, the
-  operator state, every match iterator a run left open, and every term
-  the query computed — including after a run abandoned mid-stream and
-  after a `query_init` that returned false.
+  operator state, and every term the query computed — including after a
+  run abandoned mid-stream. A `query_init` that returned false has
+  already freed its own allocations, so calling `query_destroy` on one is
+  safe and unnecessary in equal measure.
 
 ### A query is one snapshot
 
-On `sparql/kvstore`, `query_init` takes a **read transaction** and
-`query_destroy` ends it, so every read a query makes — binding its ground
-terms, matching each pattern at each depth, materializing terms at the
-answer boundary — sees one dataset. Without that they are independent
-reads, and a writer committing between two of them yields a solution
-assembled from two datasets, which is not an answer to the query. It is
-the property the engine already gives `NOW()` (§17.4.5.1), moved from the
-clock to the data.
+`query_init` takes a `record.Snapshot` and holds it for the query's life,
+so every read a query makes — binding its ground terms, matching each
+pattern at each depth, materializing terms at the answer boundary — sees
+one dataset. Without that they are independent reads, and a writer
+committing between two of them yields a solution assembled from two
+datasets, which is not an answer to the query. It is the property the
+engine already gives `NOW()` (§17.4.5.1), moved from the clock to the
+data.
+
+**A snapshot is a resource: acquire, use, release.** `store_latest`
+pins the published head and `store_at(&db, epoch)` pins a past one; the
+query reads whichever it is handed and answers about that dataset, with
+no source change and no separate as-of entry point. The coordinate is the
+epoch.
+
+**It is the caller's, and `query_destroy` does not release it.** That is
+deliberate, and it is what makes the one case below work.
 
 Two consequences worth knowing before you meet them:
 
-- **An open read transaction pins pages**, so a concurrent writer grows
-  the file for as long as the query lives. A query is a fine lifetime for
-  that; a request handler that holds a `Query` open across unrelated work
-  is making a storage-sizing decision.
-- **A query cannot see an uncommitted write it did not open inside.** To
-  run one inside a write transaction you hold — deciding whether a
-  candidate may join the dataset, say — use `query_init_txn`, which takes
-  your `^kvstore.Txn` and leaves it open for you to commit or abort:
+- **A live snapshot pins one index set**, so a store being written to
+  holds the superseded set alive for as long as the query does. A query
+  is a fine lifetime for that; a request handler that keeps a `Query`
+  open across unrelated work is making a memory-sizing decision.
+- **A query can see an uncommitted write — through record's validation
+  hook.** A consumer deciding whether a candidate may join the dataset
+  wires a `record.Validator` at `store_open`, and `apply` hands its
+  `check` *the dataset the write would produce*: head plus changeset, as
+  an ordinary snapshot at the epoch it would commit at. So querying a
+  candidate is the ordinary call, and there is no second constructor for
+  it:
 
   ```odin
-  tx, _ := kvstore.txn_begin(db, .Write)
-  defer kvstore.txn_abort(&tx)
-  kvstore.load_turtle_txn(&tx, candidate)
+  check :: proc(data: rawptr, candidate: record.Snapshot,
+                ops: []record.Resident_Op, allocator: runtime.Allocator) -> bool {
+      q: sparql.Query
+      defer sparql.query_destroy(&q)   // does not release the candidate
+      if !sparql.query_init(&q, algebra, candidate) {
+          return true
+      }
+      _, found := sparql.query_next(&q)
+      return !found                     // false under .Enforce refuses the write
+  }
 
-  q: sparql_kvstore.Query
-  defer sparql_kvstore.query_destroy(&q)   // leaves tx open
-  sparql_kvstore.query_init_txn(&q, algebra, &tx, sparql.parser_base(&p))
+  record.store_open(&db, dir, ops, record.Validator{check = check, data = ctx})
   ```
 
-  An ordinary `query_init` at that moment is not refused — it opens a read
-  transaction of its own and answers about the committed dataset. The
-  wrong constructor gives you an answer, not a diagnostic.
+  The candidate is a handle record releases itself, which is why
+  `query_init` takes a snapshot it does not own: a query that released it
+  would drop a reference it never took. An ordinary query at that moment
+  is not refused — it answers about the committed head, because that is
+  the snapshot it was handed. The wrong snapshot gives you an answer, not
+  a diagnostic.
 
 Allocator discipline: every entry point takes an
 `allocator := context.allocator`, allocates only from it, and frees
@@ -263,6 +323,11 @@ through it. The streaming operators allocate **nothing per solution**;
 the deliberate exceptions are DISTINCT (which must retain what it has
 seen), the blocking operators (GROUP BY, ORDER BY, MINUS's right side, a
 subquery), and the §17 string functions.
+
+One more exception with the store's name on it: an inlined literal read
+during expression evaluation materializes into a buffer the term borrows,
+so the engine keeps a small pool of them. They are allocated a bounded
+number of times and reused, not allocated per solution.
 
 Allocation guards in `tests/guards` enforce all of it in CI: scanning
 allocates nothing at all; parse/translate/destroy and
@@ -277,24 +342,29 @@ by the graph rather than by their input.
 The W3C SPARQL syntax and evaluation suites are vendored under
 `tests/w3c/` (see its README for provenance and for the per-directory
 enablement discipline) and run hermetically. Enabled means fully green:
-no skip lists, no expected-failure files. The full matrix runs at both
-`Term_ID` widths:
+no skip lists, no expected-failure files.
+
+There is **no `Term_ID` width matrix**. It existed because
+odin-rdf-store's id width was a build-time choice and this project
+compiled the store's sources into its own binaries; odin-rdf-record's
+widths are fixed by design, its inline term encoding having been frozen
+at first write. `make test` runs once, and the same run on all three CI
+runners, because nothing here links native code.
 
 ```sh
-make test    # the whole matrix: unit tests, guards, W3C suites × {64, 32}
+make test    # unit tests, guards, the README examples, the W3C suites
 make check   # vet + strict-style over every package
 ```
 
 Or individually:
 
 ```sh
-odin test sparql            -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
-odin test sparql/kvstore    -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
-odin test tests/guards      -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
-odin test tests/w3c/harness -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
-odin test tests/readme      -collection:rdf=../odin-rdf-parser -collection:store=../odin-rdf-store
+odin test sparql            -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
+odin test tests/guards      -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
+odin test tests/w3c/harness -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
+odin test tests/readme      -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
 ```
 
 All three README examples above — the parser quick start, the evaluation
-walk-through, and the query inside a write transaction — are compiled and
-asserted by `tests/readme`, so they cannot drift from the real API.
+walk-through, and the query over a validator's candidate — are compiled
+and asserted by `tests/readme`, so they cannot drift from the real API.

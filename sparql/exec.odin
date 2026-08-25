@@ -1858,13 +1858,10 @@ nps_next :: proc(
 		pattern[subject_position] = probe_id(e, plan.subject)
 		pattern[object_position] = probe_id(e, plan.object)
 		pattern[QUAD_G] = probe_id(e, plan.graph)
-		assert(
-			pattern[0] != UNBOUND &&
-			pattern[1] != UNBOUND &&
-			pattern[2] != UNBOUND &&
-			pattern[3] != UNBOUND,
-			"UNBOUND leaked into a match pattern",
-		)
+		// The second copy of the assert probe_pattern used to carry, and
+		// gone for the same reason: on record UNBOUND and WILDCARD are
+		// one value, so this asserted 0 != 0 and fired on any negated
+		// property set with an unbound endpoint. See probe_pattern.
 		node.iters[0] = match_open(e, pattern)
 		node.iter_open[0] = true
 		node.bound_count[0] = 0

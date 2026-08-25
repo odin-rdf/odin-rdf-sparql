@@ -4,18 +4,17 @@
 // SPARQL-T-0019 for the evaluation half).
 package readme
 
+import "base:runtime"
+
 import "core:fmt"
 import "core:strings"
 import "core:testing"
 
 import "rdf:rdf"
-import "store:store"
-import "store:store/kvstore"
+import "record:record"
+import "record:record/ingest"
 
 import "../../sparql"
-// Aliased because an unaliased import takes the last path segment, and
-// odin-rdf-store's backend package is also called kvstore.
-import sparql_kvstore "../../sparql/kvstore"
 
 QUERY :: `
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
@@ -69,23 +68,53 @@ SELECT ?name ?friend WHERE {
 ORDER BY ?name
 `
 
+// The README opens the store with `record.posix_file_ops()` over a
+// directory, which is what an application does. This substitutes
+// `Mem_FS` + `mem_file_ops` — the same store with its log in memory —
+// because a test should need no directory, no cleanup and no uniqueness,
+// and because record has no Windows `File_Ops` and the CI matrix has a
+// Windows runner. Those two lines are the only difference between this
+// body and the README's, and the README says so.
 @(test)
 readme_evaluation :: proc(t: ^testing.T) {
-	// The store is a directory on disk. This one is scratch, so it is
-	// removed at the end; a real one is opened once and kept.
-	db, open_err := kvstore.open_ephemeral()
-	if !testing.expectf(t, open_err == nil, "the store should open: %v", open_err) {
+	fs: record.Mem_FS
+	defer record.mem_fs_destroy(&fs)
+
+	db: record.Store
+	_, open_err, load_err, write_err := record.store_open(&db, "readme", record.mem_file_ops(&fs))
+	if !testing.expectf(
+		t,
+		open_err == .None && load_err == .None && write_err == .None,
+		"cannot open the store: %v %v %v",
+		open_err,
+		load_err,
+		write_err,
+	) {
 		return
 	}
-	defer kvstore.close(db)
-	_, load_err, db_err := kvstore.load_turtle(
-		db,
+	defer record.store_close(&db)
+
+	ops, ing_err := ingest.turtle(
 		transmute([]byte)string(DATA),
-		"http://example/",
+		nil,
+		context.allocator,
+		blank_prefix = "people_",
+		base = "http://example/",
 	)
-	if !testing.expectf(t, load_err.message == "" && db_err == nil, "data did not load: %s %v", load_err.message, db_err) {
+	if !testing.expectf(t, ing_err.kind == .None, "data did not parse: %v", ing_err.kind) {
 		return
 	}
+	defer ingest.ops_destroy(ops, context.allocator)
+	_, _, apply_err := record.apply(&db, {ops = ops})
+	if !testing.expectf(t, apply_err == record.Apply_Error{}, "data did not load: %v", apply_err) {
+		return
+	}
+
+	snap, snap_err := record.store_latest(&db)
+	if !testing.expectf(t, snap_err == .None, "cannot pin a snapshot: %v", snap_err) {
+		return
+	}
+	defer record.snapshot_release(&snap)
 
 	p: sparql.Parser
 	sparql.parser_init(&p, transmute([]byte)string(FRIENDS))
@@ -98,30 +127,31 @@ readme_evaluation :: proc(t: ^testing.T) {
 		return
 	}
 
-	// A prepared query borrows the algebra, so the parser outlives it.
-	q: sparql_kvstore.Query
-	defer sparql_kvstore.query_destroy(&q)
-	if !sparql_kvstore.query_init(&q, algebra, db, sparql.parser_base(&p)) {
+	// A prepared query borrows the algebra and the snapshot, so both
+	// outlive it. query_destroy releases neither.
+	q: sparql.Query
+	defer sparql.query_destroy(&q)
+	if !sparql.query_init(&q, algebra, snap, sparql.parser_base(&p)) {
 		testing.expectf(t, false, "unsupported: %s", q.unsupported)
 		return
 	}
 
 	answer := strings.builder_make()
 	defer strings.builder_destroy(&answer)
-	names := sparql_kvstore.query_var_names(&q)
-	internal := sparql_kvstore.query_var_internal(&q)
+	names := sparql.query_var_names(&q)
+	internal := sparql.query_var_internal(&q)
 	for {
 		// A row is Term_IDs indexed by variable slot, valid until the
 		// next pull. Deep-copy it if you keep it.
-		row, more := sparql_kvstore.query_next(&q)
+		row, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
 		for id, slot in row {
-			if id == store.UNBOUND || internal[slot] {
+			if id == sparql.UNBOUND || internal[slot] {
 				continue // unbound, or a pattern blank node
 			}
-			#partial switch term in sparql_kvstore.query_term(&q, id) {
+			#partial switch term in sparql.query_term(&q, id) {
 			case rdf.IRI:
 				fmt.sbprintf(&answer, "?%s=<%s> ", names[slot], string(term))
 			case rdf.Literal:
@@ -135,27 +165,60 @@ readme_evaluation :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(answer), "?name=\"Alice\" ?friend=\"Bob\" \n?name=\"Bob\" \n")
 }
 
-// The README's third example: a query inside a write transaction the caller
-// holds, so it sees the candidate that transaction carries (SPARQL-T-0024).
-// The snippet in the README is this body from `txn_begin` to `query_init_txn`,
-// with the counting below standing in for whatever the caller does with the
-// answer.
+// The README's third example: a query over a validator's *candidate* —
+// the dataset a write would produce, handed to record's validation hook
+// as an ordinary snapshot at the epoch it would commit at. That is what
+// replaced `query_init_txn`, which took a caller's write transaction and
+// which SPARQL-T-0031 deleted.
+//
+// The snippet in the README is the `check` procedure below plus the
+// `store_open` that wires it. What is asserted here is the part that
+// matters and that a reader cannot check by eye: that the candidate
+// really carries the uncommitted write. The README's `return !found` is
+// where a caller decides; this one always accepts, so that both commits
+// land and the second can be counted against the first.
 CANDIDATE :: `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
 <http://example/carol> a foaf:Person ; foaf:name "Carol" .
 `
 
-@(test)
-readme_query_inside_a_write_transaction :: proc(t: ^testing.T) {
-	db, open_err := kvstore.open_ephemeral()
-	if !testing.expectf(t, open_err == nil, "the store should open: %v", open_err) {
-		return
-	}
-	defer kvstore.close(db)
-	_, load_err, db_err := kvstore.load_turtle(db, transmute([]byte)string(DATA), "http://example/")
-	if !testing.expectf(t, load_err.message == "" && db_err == nil, "data did not load: %s %v", load_err.message, db_err) {
-		return
-	}
+@(private = "file")
+Judge :: struct {
+	algebra:   sparql.Algebra,
+	solutions: int,
+	calls:     int,
+}
 
+@(private = "file")
+check :: proc(
+	data: rawptr,
+	candidate: record.Snapshot,
+	ops: []record.Resident_Op,
+	allocator: runtime.Allocator,
+) -> bool {
+	j := cast(^Judge)data
+	j.calls += 1
+	_ = ops
+	_ = allocator
+
+	q: sparql.Query
+	defer sparql.query_destroy(&q) // does not release the candidate
+	if !sparql.query_init(&q, j.algebra, candidate) {
+		return true
+	}
+	n := 0
+	for {
+		_, more := sparql.query_next(&q)
+		if !more {
+			break
+		}
+		n += 1
+	}
+	j.solutions = n
+	return true
+}
+
+@(test)
+readme_query_over_a_validator_candidate :: proc(t: ^testing.T) {
 	p: sparql.Parser
 	sparql.parser_init(&p, transmute([]byte)string(FRIENDS))
 	defer sparql.parser_destroy(&p)
@@ -164,30 +227,51 @@ readme_query_inside_a_write_transaction :: proc(t: ^testing.T) {
 	}
 	algebra, _ := sparql.translate(&p)
 
-	tx, txn_err := kvstore.txn_begin(db, .Write)
-	if !testing.expectf(t, txn_err == nil, "txn_begin: %v", txn_err) {
-		return
-	}
-	defer kvstore.txn_abort(&tx)
-	kvstore.load_turtle_txn(&tx, transmute([]byte)string(CANDIDATE), "http://example/")
-
-	q: sparql_kvstore.Query
-	defer sparql_kvstore.query_destroy(&q) // leaves tx open
-	if !sparql_kvstore.query_init_txn(&q, algebra, &tx, sparql.parser_base(&p)) {
-		testing.expectf(t, false, "unsupported: %s", q.unsupported)
-		return
+	j := Judge {
+		algebra = algebra,
 	}
 
-	solutions := 0
-	for {
-		_, more := sparql_kvstore.query_next(&q)
-		if !more {
-			break
+	fs: record.Mem_FS
+	defer record.mem_fs_destroy(&fs)
+	db: record.Store
+	_, open_err, _, _ := record.store_open(
+		&db,
+		"candidate",
+		record.mem_file_ops(&fs),
+		record.Validator{check = check, data = &j},
+	)
+	if !testing.expectf(t, open_err == .None, "cannot open the store: %v", open_err) {
+		return
+	}
+	defer record.store_close(&db)
+
+	load :: proc(t: ^testing.T, db: ^record.Store, source: string, scope: string) -> bool {
+		ops, err := ingest.turtle(
+			transmute([]byte)source,
+			nil,
+			context.allocator,
+			blank_prefix = scope,
+			base = "http://example/",
+		)
+		if !testing.expectf(t, err.kind == .None, "did not parse: %v", err.kind) {
+			return false
 		}
-		solutions += 1
+		defer ingest.ops_destroy(ops, context.allocator)
+		_, _, apply_err := record.apply(db, {ops = ops})
+		return testing.expectf(t, apply_err == record.Apply_Error{}, "did not load: %v", apply_err)
 	}
-	// Alice, Bob, and the uncommitted Carol — the candidate is visible
-	// because the query is reading through the transaction that carries it.
-	testing.expect_value(t, solutions, 3)
-	testing.expectf(t, sparql_kvstore.query_error(&q) == nil, "store error: %v", sparql_kvstore.query_error(&q))
+
+	if !load(t, &db, DATA, "people_") {
+		return
+	}
+	testing.expect_value(t, j.solutions, 2) // Alice and Bob
+
+	if !load(t, &db, CANDIDATE, "carol_") {
+		return
+	}
+	// Alice, Bob, and the uncommitted Carol — the candidate is the
+	// dataset the write would produce, so the query sees it before a byte
+	// is written.
+	testing.expect_value(t, j.solutions, 3)
+	testing.expect_value(t, j.calls, 2)
 }

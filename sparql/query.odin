@@ -118,7 +118,22 @@ query_init :: proc(
 	plan_builder_init(&q.builder, &q.slots, snapshot, allocator)
 	plan, built := plan_build(&q.builder, algebra)
 	if !built {
-		q.unsupported = q.builder.unsupported
+		// **A failed init leaves nothing behind, including for a caller
+		// that never calls query_destroy.** The slot table, the builder
+		// and any EXISTS sub-plans the walk got through before it met the
+		// operator it could not plan are all released here; `unsupported`
+		// survives because it is a string literal from plan.odin and not
+		// something the builder owns. query_destroy stays safe on the
+		// zeroed struct that is left.
+		unsupported := q.builder.unsupported
+		for sub in q.builder.exists_plans {
+			plan_destroy(sub, allocator)
+		}
+		plan_builder_destroy(&q.builder)
+		var_slots_destroy(&q.slots)
+		delete(q.materialized)
+		q^ = {}
+		q.unsupported = unsupported
 		return false
 	}
 	q.plan = plan
@@ -139,7 +154,8 @@ query_next :: proc(q: ^Query) -> (row: []record.Term_ID, ok: bool) {
 // allocated: the plan and its EXISTS sub-plans, the slot table, the
 // operator state, every term the query computed, and every term
 // query_term materialized. Safe on a query whose query_init returned
-// false.
+// false — which released its own allocations, so this is a no-op over a
+// zeroed struct rather than a second free.
 //
 // It does not free the algebra (the parser owns that), the store, the
 // snapshot (see query_init), or a Result_Graph a CONSTRUCT or DESCRIBE

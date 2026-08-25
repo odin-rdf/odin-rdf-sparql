@@ -28,18 +28,23 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
 # results serializations; they stay separate because they are output
 # formats, never instantiations.
 #
-# **PENDING is the port's red edge.** These three packages still name
-# `store:` and `sparql/kvstore`, and neither `make test` nor `make check`
-# can include them until they are ported: tests/guards and tests/readme at
-# SPARQL-T-0032, tests/w3c/harness at SPARQL-T-0033. They are listed rather
-# than deleted so that what is missing is visible in this file rather than
-# only in a task. tests/smoke is the record plumbing's own test and
-# tests/portcheck is the port's bridge coverage -- one query of every
-# operator shape, under the leak checker, because otherwise nothing in
-# this repository runs the engine for two tasks. Both go when the ported
-# suite makes them redundant (SPARQL-T-0032/T-0033).
-PKGS     := sparql sparql/srj sparql/srx tests/smoke tests/portcheck
-PENDING  := tests/guards tests/w3c/harness tests/readme
+# tests/guards holds the allocation guards; tests/readme compiles and
+# asserts the README's examples (SPARQL-T-0009). Both were ported to
+# odin-rdf-record at SPARQL-T-0032, along with the nine test files that
+# lived in the deleted sparql/kvstore -- those are in `sparql` now,
+# because their subject was always SPARQL and only incidentally a
+# backend.
+#
+# **PENDING is what is left of the port's red edge.** tests/w3c/harness
+# still names `store:` and comes back at SPARQL-T-0033. It is listed
+# rather than deleted so that what is missing is visible in this file
+# rather than only in a task; delete this variable and its uses when the
+# list empties. tests/smoke is the record plumbing's own test and
+# tests/portcheck is the port's bridge coverage; both go at
+# SPARQL-T-0033, when the harness makes them redundant several hundred
+# times over.
+PKGS     := sparql sparql/srj sparql/srx tests/guards tests/readme tests/smoke tests/portcheck
+PENDING  := tests/w3c/harness
 # bench/ has an entry point, so it is vetted outside the PKGS loop rather
 # than inside it -- and both of its builds are, since a `when`-gated
 # branch that nothing compiles is a branch that rots (SPARQL-T-0040).
@@ -74,7 +79,7 @@ test: ## Run the full suite
 		odin test $$pkg $(TEST_FLAGS) || exit 1; \
 	done
 	@if [ -n "$(PENDING)" ]; then \
-		echo "-- not yet ported (SPARQL-T-0032/T-0033): $(PENDING) --"; \
+		echo "-- not yet ported (SPARQL-T-0033): $(PENDING) --"; \
 	fi
 
 # Vets every package including the ones with no tests, so a package the suite

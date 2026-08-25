@@ -142,11 +142,12 @@ jobs:
       # odin-rdf-record's widths are fixed because its inline term encoding
       # was frozen at first write, so there is one configuration.
       #
-      # **It is a partial suite until SPARQL-T-0033.** `tests/guards`,
-      # `tests/readme` and `tests/w3c/harness` still name the deleted
-      # instantiation package and are listed as PENDING in the Makefile;
-      # `make test` names them and skips them rather than pretending they
-      # passed.
+      # **It is a partial suite until SPARQL-T-0033.** `tests/w3c/harness`
+      # still names the deleted instantiation package and is listed as
+      # PENDING in the Makefile; `make test` names it and skips it rather
+      # than pretending it passed. `tests/guards` and `tests/readme` came
+      # back at SPARQL-T-0032, together with the nine test files that
+      # lived in `sparql/kvstore` and are in `sparql` now.
       - name: Test
         working-directory: odin-rdf-sparql
         run: make test
