@@ -59,10 +59,28 @@ jobs:
       # are built against whichever parser this file names, and moving one
       # without the other is how two versions of the data model end up in one
       # binary.
+
+      # **odin-rdf-parser `v0.1.2` is a pin with a floor's reason**
+      # (2026-08-25). It sat at `v0.1.0` through the whole port, deliberately:
+      # `v0.1.1` fixed a scanner position (`RDF-T-0025`) that nothing here
+      # asserts, and the family left this repository alone until it was off
+      # odin-rdf-store. `v0.1.2` is different — it is `RDF-T-0026`, and this
+      # repository is what asked for it. Below it, `resolve()` runs an
+      # *absolute* IRI through RFC 3986 §5.2 reference resolution and strips
+      # its dot segments, base or no base, so a Turtle document loads a term
+      # it does not contain. `sparql10-i18n/normalization-02` stores
+      # `eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz` and asks for it byte for
+      # byte; `test_eval_sparql10_i18n` is enabled and fails at any earlier
+      # ref. The engine's own query parser was always correct, so nothing in
+      # `sparql/` moved for this — only what the loader hands it.
+      #
+      # `RDF-T-0025` comes along for the ride, and this repository still does
+      # not assert it: `sparql/scanner.odin`'s `scan_long_string` carries a
+      # line-for-line copy of the same defect, unfiled here as of this bump.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-parser
-          ref: v0.1.0
+          ref: v0.1.2
           path: odin-rdf-parser
 
       # **odin-rdf-store's checkout was here and is retired**

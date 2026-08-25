@@ -193,9 +193,11 @@ configuration, one run.)
 | `sparql10-graph/` | SPARQL-T-0020 | 17 |
 | `sparql11-negation/` | SPARQL-T-0020 | 12 |
 | `sparql10-expr-builtin/` | SPARQL-T-0033 | 25 |
+| `sparql10-i18n/` | `RDF-T-0026` (odin-rdf-parser) | 5 |
 
-That is **537 evaluation tests across thirty-eight directories**, in one
-configuration.
+That is **542 evaluation tests across thirty-nine directories**, in one
+configuration. *(537 across thirty-eight until 2026-08-25, when the last
+row was enabled.)*
 
 **The last row is the port's own doing.** `sparql10-expr-builtin` sat
 out for one entry — `dawg-lang-3`, `?x :p "string"@EN` against
@@ -215,6 +217,18 @@ IRI to match unnormalized, and the two parsers disagree: Turtle's removes
 dot segments where SPARQL's does not — measured at SPARQL-T-0033, and a
 question for the family's IRI normalization decision rather than for any
 store).
+
+> **Amended 2026-08-25.** The second half of that paragraph is wrong twice
+> over and the row above it is the correction. `normalization-02` was never
+> a normalization question — the entry asserts that *no* normalization
+> happens, which is this family's policy — and the disagreement was not
+> symmetric: **odin-rdf-parser ran absolute IRIs through RFC 3986 §5.2
+> reference resolution and stripped their dot segments, base or no base**,
+> which Turtle §6.3 does not permit, while this engine's query parser was
+> correct. Fixed upstream as `RDF-T-0026`; `sparql10-i18n` is enabled at
+> 5/5 with no change on this side. **One directory is out**,
+> `sparql11-subquery`, and RDF/XML is a permanent ceiling rather than a
+> pending task.
 
 ## What DESCRIBE returns
 
@@ -280,6 +294,22 @@ still stands.
 > So it is **two directories out, not three**, holding **17 passing
 > entries** that nothing asserts, and enabling both would take asserted
 > coverage from 537 to 554.
+
+> **Amendment, 2026-08-25, later the same day — one directory out.**
+> `RDF-T-0026` is fixed in odin-rdf-parser: `resolve()` returns a reference
+> that carries a scheme byte for byte and never enters §5.2, so
+> `normalization-02`'s `:s2` is loaded as the document wrote it and matches
+> the query's IRI. **`sparql10-i18n` is enabled at 5/5** and nothing in this
+> engine changed. It is **39 directories enabled and 542 asserted entries**;
+> of the 556 evaluable entries in the corpus, **546 pass — 98.2%**.
+>
+> `sparql11-subquery` alone remains, at 4/14, holding **4 passing entries**
+> that nothing asserts; enabling it would take asserted coverage from 542 to
+> 556, and it cannot be enabled while ten of its data documents are RDF/XML.
+> *(The arithmetic in the amendment above does not survive re-measurement:
+> the two directories held 8 passing entries between them, not 17, and 19
+> asserted entries were at stake, not 17 — 537 + 19 = 556, the whole corpus.
+> The conclusion it drew was right and its figures were not.)*
 
 Those three directories hold **32 passing entries** that no test asserts,
 because enablement is per-directory: a directory with one known failure

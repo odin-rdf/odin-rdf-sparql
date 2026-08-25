@@ -4,7 +4,7 @@ level: task
 title: "Term identity: language-tag case, and whether rdf.equal agrees with the store"
 short_code: "SPARQL-T-0021"
 created_at: 2026-08-05T22:48:10.277277+00:00
-updated_at: 2026-08-25T16:45:00.000000+00:00
+updated_at: 2026-08-25T18:30:00.000000+00:00
 parent: 
 blocked_by: []
 archived: false
@@ -100,7 +100,8 @@ anything is failing.
 - [ ] Implemented across odin-rdf-parser's four format parsers and this
       engine's SPARQL parser if the ADR says construction-time.
 - [ ] **The vendored suites re-run in every repo**: odin-rdf-parser's
-      1045, this engine's 537, odin-rdf-shacl's 98. `SPARQL-T-0033`
+      1045, this engine's 537 *(542 since `sparql10-i18n` was enabled,
+      2026-08-25)*, odin-rdf-shacl's 98. `SPARQL-T-0033`
       measured the fold's blast radius here already and found none — no
       enabled entry regressed and no expected result in the corpus carries
       an uppercase tag that survives to a comparison — so the risk is
@@ -152,6 +153,9 @@ obvious reading of a normalization test that fails.
 on this side needs to change** — the near-miss note in
 `tests/w3c/README.md` and `eval_test.odin`'s header both describe it, and
 the only edit due here afterwards is enabling the directory.
+
+*(2026-08-25, later the same day: `RDF-T-0026` landed and that is exactly
+what the edit was. See the Status Update below.)*
 
 ### Where the language-tag fold would land in odin-rdf-parser
 
@@ -288,3 +292,41 @@ nobody is looking for it.
   halves' framing was wrong; the 2026-08-06 analysis it rested on is kept
   in full below, since it is still the best account of where a fold belongs
   and one of its costs has since disappeared with odin-rdf-store.
+
+- **2026-08-25 (later still) — `RDF-T-0026` is fixed upstream, and the
+  half that left this item is closed.**
+
+  odin-rdf-parser's `resolve()` now returns a reference that carries a
+  scheme byte for byte — base or no base — and never enters RFC 3986
+  §5.2, so a Turtle or TriG document no longer loads an IRI it does not
+  contain. The fix also corrected a second half the report did not name:
+  §5.2.2's `R.path == ""` branch was calling `remove_dot_segments` where
+  the algorithm does not, invisible only because every base used to come
+  back normalized from `resolve()` itself.
+
+  **`sparql10-i18n` is enabled at 5/5**, which is the one edit this item
+  said was due here, and **no line of `sparql/` changed to earn it** —
+  the prediction that the query parser was the one behaving correctly
+  held all the way through. `test_eval_sparql10_i18n` is in
+  `eval_test.odin`; `make test` is 287 tests and `make check` is clean.
+  Coverage is **542 asserted entries across 39 directories**, up from
+  537/38, and of the corpus's 556 evaluable entries **546 pass (98.2%)**.
+  `sparql11-subquery` is the only directory left out, and RDF/XML is a
+  ceiling rather than a task.
+
+  **CI pins odin-rdf-parser `v0.1.2`** (owner decision: cut the tag rather
+  than pin a SHA). It is the first parser bump this repository has made —
+  `v0.1.0` held through the entire port — and it is a floor, since the
+  enabled directory fails at any earlier ref. `RDF-T-0025`'s scanner fix
+  arrives with it and is still not asserted here: `sparql/scanner.odin`'s
+  `scan_long_string` carries a line-for-line copy of the same defect
+  (`set_error` reads `s.line`/`s.line_start` at EOF while passing the
+  opener's offset, so a multi-line unterminated literal reports a negative
+  column). Verified by reading, not filed.
+
+  **What is left of this item is the language-tag question and nothing
+  else**, unchanged by any of the above: `rdf.equal` reports `@EN != @en`
+  where record folds on intern, `results.odin`'s `literals_equivalent`
+  still works around it with `strings.equal_fold`, and the ADR the
+  acceptance criteria ask for is still odin-rdf-parser's to write. P3
+  stands — the split is latent, not failing.

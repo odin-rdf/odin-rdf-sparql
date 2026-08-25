@@ -9,7 +9,7 @@ algebra (§18.2/§18.4), and an evaluation engine that runs that algebra
 against an epoch-pinned snapshot of [odin-rdf-record](../odin-rdf-record).
 Written in Odin with no external dependencies and no native code, and
 validated by the vendored official W3C suites: **352 syntax tests** (154
-SPARQL 1.1, 198 SPARQL 1.2) and **537 evaluation tests across 38 suite
+SPARQL 1.1, 198 SPARQL 1.2) and **542 evaluation tests across 39 suite
 directories**, no skip list and no expected-failure file.
 
 This is a top layer of the family stack —

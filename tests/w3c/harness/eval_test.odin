@@ -74,6 +74,15 @@ import "core:testing"
 // is the one behaving correctly. Filed as `RDF-T-0026` against the
 // parser, and this directory waits on that rather than on
 // `SPARQL-T-0021`.)*
+//
+// *(Amended 2026-08-25, later the same day: `RDF-T-0026` is fixed. The
+// parser's `resolve()` returns a reference that carries a scheme byte
+// for byte — base or no base — and never enters §5.2, so `:s2`'s object
+// is now the IRI the document wrote. **`sparql10-i18n` is enabled below
+// at 5/5**, and nothing in this engine changed to get there: the entry
+// was always asking for the do-nothing policy this side already had.
+// **One directory is out now** — `sparql11-subquery`, whose reason is
+// permanent.)*
 
 @(test)
 test_eval_sparql10_expr_builtin :: proc(t: ^testing.T) {
@@ -276,6 +285,19 @@ test_eval_sparql10_graph :: proc(t: ^testing.T) {
 @(test)
 test_eval_sparql11_negation :: proc(t: ^testing.T) {
 	run_eval_suite(t, "sparql11-negation")
+}
+
+// The last directory a bug held back, and the bug was not here
+// (`RDF-T-0026`, filed from `SPARQL-T-0021`'s split). `normalization-02`
+// stores `eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz` and asks for it byte
+// for byte, expecting that term and explicitly not the normalized one
+// beside it in the data; it failed while odin-rdf-parser resolved
+// absolute IRIs it should have left alone. Enabled at 5/5 with the
+// parser fixed — a suite entry asserting that a term survives loading
+// unchanged, which is worth having asserted whatever else moves.
+@(test)
+test_eval_sparql10_i18n :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-i18n")
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,
