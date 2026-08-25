@@ -4,17 +4,17 @@ level: initiative
 title: "Port to odin-rdf-record: the query engine moves off odin-rdf-store"
 short_code: "SPARQL-I-0003"
 created_at: 2026-08-24T19:22:39.833634+00:00
-updated_at: 2026-08-24T21:21:26.025273+00:00
+updated_at: 2026-08-25T15:25:00.000000+00:00
 parent: SPARQL-V-0001
 blocked_by: []
 archived: false
 
 tags:
   - "#initiative"
-  - "#phase/active"
+  - "#phase/completed"
 
 
-exit_criteria_met: false
+exit_criteria_met: true
 estimated_complexity: L
 initiative_id: port-to-odin-rdf-record-the-query
 ---
@@ -878,3 +878,71 @@ recorded in Context. The record-side prerequisite (§6) is filed as
 this initiative's `blocked_by` names it, and the reference is cross-repository —
 the Metis workspaces are per-repository, so nothing resolves it automatically.
 Awaiting the owner's review of both documents before decomposition into tasks.
+
+### 2026-08-25 — complete. Ten tasks, two days, and odin-rdf-store has no consumers
+
+All eleven tasks are closed (`T-0030`…`T-0040`), the last three today.
+`make test` is green at **286 tests and 537/537 evaluated W3C entries
+across 38 enabled directories**, up from the 512/37 this initiative
+started from. `make check` and `make bench` green.
+
+**The central claim is measured, not asserted.** `bench/` was built
+*before* the port for exactly this (`SPARQL-T-0040`), and against
+odin-rdf-record **fourteen of its sixteen read-count pins reproduce to
+the integer**, along with all sixteen solution counts. The engine asks
+record exactly the questions it asked LMDB, so the port moved cost and
+not behaviour. The two that moved are both `GROUP BY`'s `load`, by the
+number of groups, from record inlining a small canonical integer the
+store never interned — correct, and arguably an improvement.
+
+**What the port cost, and it is two things, both filed rather than worked
+around** (`RECORD-T-0026`, `RECORD-T-0027`):
+
+- `GRAPH <g> { … }` is a scan (`RECORD-A-0004`) — 169,055 candidates for
+  4,122 answers, the whole store, and the only benchmark case that got
+  slower.
+- The ordered read has no safe instance (`RECORD-A-0001`'s id scheme).
+  `snapshot_match_as` exists, is well designed, and cannot be used,
+  because record's id order is not SPARQL's and no plan can prove when
+  they agree.
+
+**What it gained**: triple terms, both stored (`RECORD-I-0004`, `v0.4.0`
+cut for this consumer) and *cheaper* to take apart than they were; join
+ordering, the seam this engine built and left empty for a year; as-of at
+no cost, again; and one package where there were two.
+
+**Three findings worth carrying past this initiative**, because each
+contradicted something written down:
+
+1. **Ordering a BGP by cardinality alone makes plans worse.** The
+   specification asked for exactly that. This executor is a nested loop,
+   so a pattern sharing no variable with what is bound re-scans instead of
+   probing — and the benchmark's own `bgp3`, commented as "written
+   deliberately worst-first", was already optimal and would have been made
+   4000x worse. Connectivity first, cost second (`SPARQL-T-0037`).
+2. **A read counter cannot see a residual scan.** The five verbs that
+   survived the port to the integer were, by construction, blind to the
+   one thing the port was expected to cost, because `scan_next` filters
+   inside its own loop. `candidates` — `range_len` summed over every
+   window — had to be added before §12 could be answered at all
+   (`SPARQL-T-0036`). This is the observation most worth telling other
+   consumers of record.
+3. **Designing an API for a consumer is not the same as the consumer
+   being able to use it.** record's `api.md` §12 was drafted against "a
+   SPARQL engine will eventually sit on this" and it largely paid off —
+   snapshots cost nothing, `range_len` was *better* than the estimate this
+   engine went looking for. Ordered iteration is the one that did not, and
+   the mismatch was not in the surface but in the semantics of the values
+   flowing through it (`SPARQL-T-0038`).
+
+**The four owner decisions all held.** The no-second-backend stance made
+the port a deletion rather than a re-instantiation; gating on triple terms
+kept a headline capability instead of recording a limit; folding the
+planner surface in gave `SPARQL-T-0037` a measured baseline to move rather
+than a claim to assert; and building `bench/` inside the port is the only
+reason any of the above is a number.
+
+**odin-rdf-store is retirable and has no consumers.** The retirement
+handoff is in `SPARQL-T-0039`'s Status. The family `CLAUDE.md` and both
+evidence notes are committed in their own repositories and **not pushed**;
+pushing, and whether this port warrants a tag, are the owner's.
