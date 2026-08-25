@@ -62,6 +62,18 @@ import "core:testing"
 // removes dot segments where SPARQL's does not. Measured at
 // SPARQL-T-0033; it is parser-side and belongs to the family's IRI
 // normalization question, not to any store).
+//
+// *(Amended 2026-08-25: the last clause is wrong. It is **not** a
+// normalization question. The entry's data holds both the normalized IRI
+// and the as-written one, the query asks for the as-written one byte for
+// byte, and it expects that one and explicitly not the other — so it
+// asserts the do-nothing policy this family already has. It fails because
+// odin-rdf-parser's Turtle parser runs an *absolute* IRI through RFC 3986
+// par. 5.2 reference resolution and strips its dot segments, base or no
+// base, which Turtle par. 6.3 does not permit; this engine's query parser
+// is the one behaving correctly. Filed as `RDF-T-0026` against the
+// parser, and this directory waits on that rather than on
+// `SPARQL-T-0021`.)*
 
 @(test)
 test_eval_sparql10_expr_builtin :: proc(t: ^testing.T) {

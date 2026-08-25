@@ -251,6 +251,36 @@ still stands.
 | `sparql10-i18n/` | 4/5 | `normalization-2` | SPARQL-T-0021 |
 | `sparql11-subquery/` | 4/14 | `subquery01`–`subquery10` | RDF/XML in odin-rdf-parser |
 
+> **Amendment, 2026-08-25.** The paragraph and table above are the record
+> of 2026-08-09 and two of their three rows have moved. The counts around
+> them are store-era: it is **38 directories enabled and 537 asserted
+> entries**, not 37 and 512, after the port to odin-rdf-record
+> (`SPARQL-I-0003`).
+>
+> - **`sparql10-expr-builtin` is enabled at 25/25.** `dawg-lang-3` passes:
+>   odin-rdf-record folds a language tag to lowercase on intern, which is
+>   RDF 1.1 Concepts §3.3's own rule and exactly the match the DAWG entry
+>   expects. Nothing in this engine changed. It is **not** waiting on
+>   `SPARQL-T-0021` any more — see below for what that item still covers.
+> - **`sparql10-i18n` is still 4/5, and the reason in the table is wrong.**
+>   `normalization-2` is **not** a term-identity or normalization-policy
+>   question. Read the fixture: the data holds both the normalized IRI
+>   (`:s1`) and the as-written one (`:s2`), the query asks for the
+>   as-written one byte for byte, and the expected result is `:s2` **and
+>   explicitly not `:s1`** — so the entry asserts that *no* normalization
+>   happens, which is this family's decision anyway. It fails because
+>   **odin-rdf-parser's Turtle parser runs absolute IRIs through RFC 3986
+>   §5.2 reference resolution and strips their dot segments**, with or
+>   without a base, so `:s2`'s object is stored mangled while this engine's
+>   query parser correctly leaves the query's IRI alone. That is a bug in
+>   the parser, filed as **`RDF-T-0026`**, and this directory waits on it.
+> - `sparql11-subquery` is unchanged: ten RDF/XML data documents, a
+>   permanent ceiling.
+>
+> So it is **two directories out, not three**, holding **17 passing
+> entries** that nothing asserts, and enabling both would take asserted
+> coverage from 537 to 554.
+
 Those three directories hold **32 passing entries** that no test asserts,
 because enablement is per-directory: a directory with one known failure
 is dark in its entirety. Enabling all three with pinned counts would take
@@ -273,7 +303,15 @@ operator is not in-scope inside it". See `Plan_Graph_Bind` in
 `sparql/plan.odin`.
 
 **Two are term identity, and they are the family's question rather than
-this engine's.** `dawg-lang-3` asks for `?x :p "string"@EN` against
+this engine's.** *(Amended 2026-08-25: **one is**, and the other never
+was. The language-tag half below is right and has been answered by
+odin-rdf-record folding on intern; `SPARQL-T-0021` now covers only what
+that leaves — `rdf.equal` in odin-rdf-parser still reporting `@EN` !=
+`@en`, so the family holds two definitions of literal equality. The IRI
+half below is a misdiagnosis: `normalization-2` is a parser bug,
+`RDF-T-0026`, not a question about whether this family normalizes IRIs.
+It does not, deliberately, and that entry agrees with it. "Both store
+dictionaries" reads "record's dictionary".)* `dawg-lang-3` asks for `?x :p "string"@EN` against
 `"string"@en`: BCP 47 tags are case-insensitive, so those are one
 literal, but neither the RDF parser nor the SPARQL parser folds the case
 and they intern as two keys. `normalization-2` is the same shape for

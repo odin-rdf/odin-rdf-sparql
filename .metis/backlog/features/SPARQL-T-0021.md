@@ -1,10 +1,10 @@
 ---
 id: term-identity-language-tag-case
 level: task
-title: "Term identity: language-tag case and IRI normalization, a family question"
+title: "Term identity: language-tag case, and whether rdf.equal agrees with the store"
 short_code: "SPARQL-T-0021"
 created_at: 2026-08-05T22:48:10.277277+00:00
-updated_at: 2026-08-05T22:48:10.277277+00:00
+updated_at: 2026-08-25T16:45:00.000000+00:00
 parent: 
 blocked_by: []
 archived: false
@@ -19,32 +19,45 @@ exit_criteria_met: false
 initiative_id: NULL
 ---
 
-# Term identity: language-tag case and IRI normalization, a family question
+# Term identity: language-tag case, and whether rdf.equal agrees with the store
 
 ## Objective **[REQUIRED]**
 
-Two vendored W3C evaluation entries fail because a term the query writes
-and a term the data holds are *the same term* by the specification and
-two different dictionary keys in this family. Neither is an evaluation
-bug: the engine compares Term_IDs, and by the time it sees them the
-decision has already been made.
+**Rescoped 2026-08-25.** This item was filed with two halves and they have
+gone in opposite directions. The IRI half has left — it turned out not to
+be a term-identity question at all — and what remains is one question that
+is now sharper than when it was written.
 
-**`sparql10-expr-builtin/dawg-lang-3`** — "Graph matching with lang tag
-being a different case". The query asks for `?x :p "string"@EN`; the data
-holds `"string"@en`. BCP 47 language tags are case-insensitive, so those
-are one literal. Neither the RDF parser nor the SPARQL parser folds the
-case, so they intern as two.
+**The question: `"x"@EN` and `"x"@en` are one literal, and this family
+gives two answers depending on who is asked.**
 
-**`sparql10-i18n/normalization-2`** — the query writes
-`eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz` and the data writes the same IRI
-after RFC 3987 syntax-based normalization (lowercase scheme, dot-segment
-removal, percent-decoding of unreserved characters, uppercase
-percent-encodings). Again one IRI by the specification, two keys here.
+- **odin-rdf-record folds** a language tag to lowercase on intern, so the
+  two are **one term** and one id. That is RDF 1.1 Concepts §3.3's own rule
+  — "the value space of language tags is always in lower case" — and it is
+  correct.
+- **odin-rdf-parser does not.** `rdf.equal` on two `rdf.Term`s differing
+  only in tag case reports **not equal**.
 
-Both are **term-identity** questions, and they are the family's rather
-than this engine's: whatever the answer is, it has to hold for the RDF
-parser, the store's dictionary, and the SPARQL parser at once, or the
-same document loaded twice would produce different terms.
+So a consumer comparing ids gets one answer and a consumer comparing
+`rdf.Term`s gets another, **inside one family, today**. When this item was
+written the family was consistently wrong, which is a smaller problem than
+being inconsistent.
+
+## What has already been settled, and by whom
+
+**The symptom that filed this item is gone.** `sparql10-expr-builtin/
+dawg-lang-3` — `?x :p "string"@EN` against `"string"@en` — **passes**, and
+the directory is enabled at 25/25 (`SPARQL-T-0033`, the port to
+odin-rdf-record). It passes for the right reason rather than by luck: the
+DAWG entry expects exactly the match §3.3 mandates.
+
+But it was decided **by odin-rdf-record, for odin-rdf-record's reasons**,
+not by the ADR this item asks for. The analysis below was right about
+*what* should happen and wrong about *where* — it traced the fix to
+`literal_lang`/`literal_dir_lang` in odin-rdf-parser on the grounds that
+folding anywhere else leaves two notions of identity in one family, and
+that is precisely the state the family is now in. **The analysis has been
+vindicated by being ignored.**
 
 ## Backlog Item Details **[CONDITIONAL: Backlog Item]**
 
@@ -54,54 +67,127 @@ same document loaded twice would produce different terms.
 ### Priority
 - [x] P3 - Low (when time permits)
 
-Two entries in 488, and both are corner cases of *how a term is written*
-rather than of what a query means. They keep two directories disabled —
-`sparql10-expr-builtin` (24/25) and `sparql10-i18n` (4/5) — which is 29
-entries of coverage, and that is the cost worth weighing.
+**Held at P3, deliberately, and the reason has changed.** It was P3 because
+two suite entries were at stake. Those are resolved. It stays P3 because
+**nothing is known to be broken by the split** — every consumer that
+matters compares through a store today: this engine evaluates over
+`record.Term_ID`s, and odin-rdf-shacl reads through session verbs. The
+exposure is a consumer comparing `rdf.Term`s outside a store, and none is
+known.
+
+It is a **latent inconsistency**, not a defect with a reproduction. That is
+worth being honest about rather than inflating: the argument for doing it
+is that a family should not hold two definitions of term equality, not that
+anything is failing.
 
 ### Business Justification **[CONDITIONAL: Feature]**
-- **User Value**: `"x"@EN` and `"x"@en` are one literal, and two spellings of one IRI are one IRI — which is what every other RDF toolkit does and what a user comparing this engine's answers to Jena's will expect.
-- **Business Value**: Enables two more suite directories, and settles a question all three family repos would otherwise answer separately (or, worse, differently).
-- **Effort Estimate**: M, and it is a *design* decision before it is an implementation. Where does normalization happen — the parsers, the dictionary, or both? Doing it in the dictionary makes every consumer inherit it and makes `lookup_term` return something the document did not say; doing it in the parsers makes it a property of ingestion and leaves a hand-built term unnormalized.
+- **User Value**: One definition of when two literals are the same literal, whichever layer you ask.
+- **Business Value**: Settles a question three repos would otherwise answer separately — and two of them already have, differently.
+- **Effort Estimate**: S–M, and smaller than the original's M, because the hard part is done. record has demonstrated the fold is correct and costs nothing; what remains is odin-rdf-parser adopting it, which is a tagged library's behaviour change (`@EN` in, `en` out) and so a minor version rather than a patch.
 
 ## Acceptance Criteria **[REQUIRED]**
 
-- [ ] The decision recorded as an ADR in the repo that owns it (odin-rdf-parser's data model, most likely): whether the family normalizes language-tag case and IRIs, where, and what `lookup_term` then promises to return.
-- [ ] Language-tag case folding implemented wherever the ADR says, consistently across odin-rdf-parser's four format parsers, this engine's SPARQL parser, and both store dictionaries.
-- [ ] RFC 3987 syntax-based normalization likewise. Note that odin-rdf-parser already has `remove_dot_segments` in its IRI resolution, so part of this exists and is applied only on the resolution path.
-- [ ] `dawg-lang-3` and `normalization-2` pass; `sparql10-expr-builtin` (25) and `sparql10-i18n` (5) enabled with pinned counts; `tests/w3c/README.md`'s near-miss section updated.
+- [ ] **The decision recorded as an ADR in odin-rdf-parser**, which owns
+      the data model: does `rdf.equal`/`rdf.hash` fold language-tag case,
+      and if so does folding happen at literal construction (so the term
+      itself is folded) or only in comparison (so two spellings compare
+      equal but round-trip as written)? **record has already answered the
+      same question for itself by folding the term**, and an ADR that
+      disagrees with a shipped sibling should say why.
+- [ ] **Whatever is decided, `rdf.equal` and record's term identity agree**
+      — or the divergence is documented as deliberate, in both repos, with
+      the reason. Silent disagreement is the one outcome to rule out.
+- [ ] Implemented across odin-rdf-parser's four format parsers and this
+      engine's SPARQL parser if the ADR says construction-time.
+- [ ] **The vendored suites re-run in every repo**: odin-rdf-parser's
+      1045, this engine's 537, odin-rdf-shacl's 98. `SPARQL-T-0033`
+      measured the fold's blast radius here already and found none — no
+      enabled entry regressed and no expected result in the corpus carries
+      an uppercase tag that survives to a comparison — so the risk is
+      known to be low on this side and unmeasured on the parser's.
+- [ ] **`results.odin`'s `literals_equivalent` workaround removed.** It
+      compares language tags with `strings.equal_fold` at comparison time,
+      which is this repository's local patch for the family's split. The
+      original item predicted the fix would make it unnecessary; it is the
+      one concrete piece of debt the split is costing, and it is the honest
+      measure of whether the ADR landed.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
 
-### Technical Approach
+### What left this item, and where it went
 
-The two halves are not equally settled. Language-tag folding is
-unambiguous — BCP 47 says tags are case-insensitive, RDF 1.1 says a
-language-tagged string's tag is compared case-insensitively, and this
-engine *already* folds case in `value_equal` and `value_same_term`
-(`sparql/value.odin`). It is only the *dictionary key* that does not,
-which is why the FILTER-level tests pass and the graph-matching one does
-not.
+**The IRI half is now `RDF-T-0026` in odin-rdf-parser**, filed 2026-08-25,
+and it is a **bug rather than a policy question**.
 
-IRI normalization is the genuinely open one: RFC 3987 defines several
-levels, RDF says IRIs are compared by simple string comparison after the
-IRI is *established*, and how much normalization happens before that is
-the family's call.
+The decision recorded below on 2026-08-06 — "IRIs: do nothing,
+permanently", on RFC 3987 Simple String Comparison and RDF 1.1 Concepts
+§3.2's "further normalization MUST NOT be performed" — **stands, and is
+vindicated by the very entry that was cited against it**. Reading
+`sparql10-i18n/normalization-02` settles it:
+
+```
+data:      :s1 :p <example://a/b/c/%7Bfoo%7D#xyz> .          # normalized
+           :s2 :p <eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz> . # as written
+query:     PREFIX p1: <eXAMPLE://a/./b/../b/%63/%7bfoo%7d#>
+           SELECT ?S WHERE { ?S :p p1:xyz }
+expected:  :s2 -- and explicitly NOT :s1
+```
+
+**The entry asserts that no normalization happens.** Under the do-nothing
+policy it passes trivially — the query's IRI and `:s2`'s object are the
+same bytes. It fails because **odin-rdf-parser's Turtle parser runs
+absolute IRIs through RFC 3986 §5.2 reference resolution and removes their
+dot segments**, with or without a base, so `:s2`'s object is stored as
+`eXAMPLE://a/b/%63/%7bfoo%7d#xyz` while this engine's query parser —
+correctly — leaves the query's IRI as written. Verified directly against
+`rdf/turtle`, not inferred.
+
+So the failure was never about whether this family normalizes IRIs. It was
+one parser normalizing when it must not, which is nobody's policy and
+everybody's bug. It was mis-filed here for twenty days because the DAWG
+entry is called `normalization-02` and a missing normalization is the
+obvious reading of a normalization test that fails.
+
+`sparql10-i18n` stays disabled at 4/5 until `RDF-T-0026` lands. **Nothing
+on this side needs to change** — the near-miss note in
+`tests/w3c/README.md` and `eval_test.odin`'s header both describe it, and
+the only edit due here afterwards is enabling the directory.
+
+### Where the language-tag fold would land in odin-rdf-parser
+
+The original tracing still holds and is worth keeping, because it was
+tested rather than assumed — see the 2026-08-06 Status entry. Its
+conclusion: fold in `literal_lang`/`literal_dir_lang`, because the store
+dictionary's canonical bytes and direct `rdf.Term` comparison both inherit
+it there. One clause it contains is now out of date — "kvstore's
+`literal_canonical` … a STORE-A-0003 format-version bump" — since
+odin-rdf-store is retired and has no consumers. **That removes the largest
+cost the original analysis identified**: there is no persistent database
+whose existing keys would stop matching. record folds already, so its
+format is not at stake either.
+
+The remaining cost is what it always was: the language slice is borrowed
+from the source buffer, so a non-lowercase tag needs an allocation — the
+copy-on-write shape the parser already uses for escape unescaping, and one
+more clause on its documented allocation contract.
 
 ### Dependencies
 
-Owned by odin-rdf-parser's data model; this repo is where the evidence
-is (the two suite entries) and would consume the answer. Both store
-dictionaries key on the strings the parsers hand them, so a change there
-is a change everywhere.
+None. It is a family decision that this repository does not own and is not
+blocked on for anything — the entries that motivated it are green.
 
 ### Risk Considerations
 
-Normalizing in the dictionary means `lookup_term` can return a term that
-is not byte-identical to what the document said, which would break the
-round-trip property odin-rdf-store pins in its conformance suite. That
-is the constraint the ADR has to work around, and the reason this is a
-design task and not a patch.
+**The risk of doing it** is a tagged library changing observable behaviour
+(`@EN` in, `en` out, emitters round-tripping `@en`), which is a minor
+version and a re-run of 1045 tests, checked for any vendored expectation
+that preserves an uppercase tag.
+
+**The risk of not doing it** is the one this item now exists to name: two
+definitions of term equality in one family, with nothing to make them
+disagree loudly. It will surface as a consumer comparing `rdf.Term`s and
+getting an answer the store would not have given, in a context where
+nobody is looking for it.
 
 ## Status Updates **[REQUIRED]**
 
@@ -179,3 +265,26 @@ design task and not a patch.
 
   Left open, with its scope reduced to the family-wide `rdf.equal` question
   and its SPARQL-side forcing cases gone.
+
+- **2026-08-25 (later the same day) — split, and the IRI half was misfiled
+  from the beginning.**
+
+  The morning's reconciliation entry above got the language-tag half right
+  and under-called the IRI half. It described `normalization-02` as "two
+  parsers, two answers … a genuine internal inconsistency", framed as
+  symmetric and left as "whether it becomes its own item is the family's
+  call". Reading the fixture and reproducing against `rdf/turtle` shows it
+  is not symmetric: **the Turtle parser mangles an absolute IRI, with no
+  base, which no reading of Turtle §6.3 or RFC 3986 §5.2 permits**, and the
+  SPARQL parser is right. It is a bug in odin-rdf-parser, now
+  **`RDF-T-0026`**, filed with odin-rdf-record named as the consumer that
+  should care most — `record/ingest` loads through this parser, so a system
+  of record can presently log an IRI its source document did not contain.
+
+  This item keeps the language-tag half only, and its priority and framing
+  are rewritten: the *symptom* is resolved, the *family split* is not, and
+  a split is worse than the shared gap this item was filed against. The
+  original two-halves text is replaced rather than annotated, because both
+  halves' framing was wrong; the 2026-08-06 analysis it rested on is kept
+  in full below, since it is still the best account of where a fold belongs
+  and one of its costs has since disappeared with odin-rdf-store.
