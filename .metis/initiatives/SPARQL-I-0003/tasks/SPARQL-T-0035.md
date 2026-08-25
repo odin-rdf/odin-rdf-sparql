@@ -120,3 +120,36 @@ on the write path only.
 ## Status Updates
 
 *To be added during implementation*
+
+
+### 2026-08-25 — most of this task is already done
+
+**`sparql12-eval-triple-terms` is enabled and green: 38 of 38, at
+SPARQL-T-0033.** This task's criteria were written when odin-rdf-record
+refused a triple term at `apply`, so they had the directory disabled
+through the port and restored here. `RECORD-I-0004` landed in between —
+it was filed *by* this initiative, precisely so the capability would not
+be narrowed — and SPARQL-T-0030 moved the pin to `v0.4.0`. The directory
+was simply enabled and simply passed on the first run.
+
+So of this task's criteria:
+
+- **"pin the record release" was already satisfied** at SPARQL-T-0030,
+  by the owner's call — noted in SPARQL-T-0031's handoff.
+- **"restore 512 of 512" is superseded**: the suite stands at **537 of
+  537 across 38 directories**, because SPARQL-T-0033 also enabled
+  `sparql10-expr-builtin`, which record's language-tag folding made
+  green.
+- **"read the parts directly" is done**: `Triple_Reader` is retired and
+  `exec_triple_parts` calls `record.snapshot_triple_parts` — one read out
+  of the encoding, no allocation, no decode, where odin-rdf-store needed
+  a `lookup_term` plus three `find_term`s.
+
+**What is genuinely left is the record of it**: `triple_adapter`'s
+two-round-trip note was the store evidence `SPARQL-T-0019` recorded, and
+the gap it described is closed. The replacement text is in
+`sparql/exec.odin`'s `exec_triple_parts` and in `expr_eval.odin`'s
+`SYNTHETIC_FIRST` (the consumer id range, the other half of that
+evidence). Whether this task still needs to exist, or whether its
+remaining content folds into SPARQL-T-0039's reconciliation, is the
+owner's call.

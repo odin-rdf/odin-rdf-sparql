@@ -13,8 +13,8 @@ import "core:testing"
 
 import rdf "rdf:rdf"
 
-import srj "../../../sparql/srj"
-import srx "../../../sparql/srx"
+import "../../../sparql/srj"
+import "../../../sparql/srx"
 
 // VARS has static storage on purpose: an Odin slice literal is backed by
 // the enclosing stack frame, so returning one from a procedure hands back

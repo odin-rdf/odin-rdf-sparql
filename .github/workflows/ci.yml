@@ -116,9 +116,10 @@ jobs:
       # runner compiles record without its POSIX `File_Ops` — that file is
       # `#+build linux, darwin` — which works only for as long as nothing
       # here names `posix_file_ops`. Every store this repository opens —
-      # `tests/smoke`, `bench/store.odin`, and every harness call site the
-      # remaining port tasks write — uses `mem_file_ops`, which is
-      # platform-free.
+      # the suites, the guards, the W3C harness, `bench/store.odin` — uses
+      # `mem_file_ops`, which is platform-free. The README shows
+      # `posix_file_ops`, because that is what an application uses; no
+      # test does.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
@@ -142,12 +143,11 @@ jobs:
       # odin-rdf-record's widths are fixed because its inline term encoding
       # was frozen at first write, so there is one configuration.
       #
-      # **It is a partial suite until SPARQL-T-0033.** `tests/w3c/harness`
-      # still names the deleted instantiation package and is listed as
-      # PENDING in the Makefile; `make test` names it and skips it rather
-      # than pretending it passed. `tests/guards` and `tests/readme` came
-      # back at SPARQL-T-0032, together with the nine test files that
-      # lived in `sparql/kvstore` and are in `sparql` now.
+      # **The suite is whole again as of SPARQL-T-0033**: 537 of 537
+      # evaluated entries across 38 directories, no skip list and no
+      # expected-failure file — 25 more than before the port, because
+      # record's language-tag folding closed the one entry that kept
+      # `sparql10-expr-builtin` out.
       - name: Test
         working-directory: odin-rdf-sparql
         run: make test

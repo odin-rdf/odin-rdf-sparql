@@ -6,9 +6,8 @@ import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 
-import kvstore "store:store/kvstore"
 
-import sparql "../../../sparql"
+import "../../../sparql"
 
 // The guard behind the expected-result readers: every file the vendored
 // evaluation suites name as an expectation is read, in every format they
@@ -202,11 +201,17 @@ UPDATE_ENTRIES :: 3
 RDF_XML_DATA_ENTRIES :: 10
 
 // The manifest-to-store path: every evaluation entry's data documents
-// resolve to files that the store's own loaders ingest, into the default
-// graph or into a named graph whose name is the document's absolute IRI.
-// Evaluation itself is not run here — no evaluator exists yet — but a
-// test whose dataset does not load could never pass, and finding that
-// out now is much cheaper than finding it out one suite at a time.
+// resolve to files that `record/ingest` reads and `record.apply` takes,
+// into the default graph or into a named graph whose name is the
+// document's absolute IRI. A test whose dataset does not load could
+// never pass, and finding that out here is much cheaper than finding it
+// out one suite at a time.
+//
+// **It loads every vendored suite, not every enabled one**, which is the
+// point: the reader guarantee covers what the suites ship rather than
+// what the evaluator is currently held to. Since SPARQL-T-0033 it does so
+// through the same loader the evaluator uses — there were two, and the
+// guarantee was only ever meant to be about one.
 @(test)
 test_entry_datasets_load :: proc(t: ^testing.T) {
 	loaded, quads, rdfxml_blocked := 0, 0, 0
@@ -237,9 +242,7 @@ test_entry_datasets_load :: proc(t: ^testing.T) {
 				continue
 			}
 			loaded += 1
-			n, count_err := kvstore.count(td.store)
-			testing.expectf(t, count_err == nil, "count failed: %v", count_err)
-			quads += n
+			quads += test_dataset_quads(&td)
 		}
 	}
 	testing.expectf(

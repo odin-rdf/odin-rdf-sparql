@@ -27,7 +27,7 @@ import "core:unicode"
 
 import rdf "rdf:rdf"
 
-import sparql "../../../sparql"
+import "../../../sparql"
 
 // Result_Kind is the shape of an expectation or an answer.
 Result_Kind :: enum {

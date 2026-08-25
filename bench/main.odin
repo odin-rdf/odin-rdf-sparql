@@ -22,10 +22,13 @@ package main
 // one against the record store and compares; the pins in `config.odin`
 // are what it compares against.
 //
-// A second reason it must run first: read counting is cheap today
-// because every read goes through one of five adapters in
-// `sparql/kvstore/eval.odin`. `SPARQL-T-0031` collapses that seam into
-// direct calls, and the easy instrumentation point goes with it.
+// A second reason it had to run first: read counting was cheap because
+// every read went through one of five adapters in
+// `sparql/kvstore/eval.odin`. `SPARQL-T-0031` collapsed that seam into
+// direct calls and the easy instrumentation point went with it — the
+// counters moved to those call sites and the tally to
+// `sparql/counting.odin`, with the verbs and their meanings deliberately
+// unchanged so that T-0036's comparison still means something.
 //
 //
 // # Two modes over one workload
@@ -36,7 +39,7 @@ package main
 //   - *Timing* — the plain build. The real path through the engine, the
 //     real allocator, nothing wrapped. Wall clock only.
 //   - *Instrumented* — built with `SPARQL_COUNT_READS`, which compiles a
-//     tally into the five adapters (`sparql/kvstore/counting.odin`).
+//     tally into the engine's read seam (`sparql/counting.odin`).
 //     Reports store reads and asserts the pins. **No timing is taken
 //     here and none should ever be quoted from it.**
 //
@@ -100,7 +103,7 @@ main :: proc() {
 		fmt.println("odin-rdf-sparql bench — timing: nothing wrapped.")
 	}
 	fmt.println(
-		"Synthetic corpus over odin-rdf-store (kvstore/LMDB); a regression instrument, not a claim about real-world cost.",
+		"Synthetic corpus over odin-rdf-record (memory seam); a regression instrument, not a claim about real-world cost.",
 	)
 
 	// A process-level warm-up, discarded entirely, before any

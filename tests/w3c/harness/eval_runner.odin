@@ -2,18 +2,14 @@
 // parse and translate its query, evaluate it, and turn the answer into
 // the Result_Set that comparison understands.
 //
-// Both backends run every enabled test. That is the initiative's
-// dual-backend discipline and it is not ceremony: the engine core is
-// generic over the backend, so a difference between backends
-// is either a backend bug or a place where the core leaked an assumption
-// about one of them. Running both is how either becomes visible.
-//
-// The two backends have different types all the way down — different
-// store handles, different query types, different failure modes — so
-// this file dispatches on an enum rather than abstracting over them. The
-// duplication is real and deliberate: the alternative is a procedure-
-// pointer interface, which is fine in test code but would obscure that
-// these are two genuinely separate instantiations.
+// **The `Backend` enum and its dispatch are gone** (SPARQL-T-0033).
+// There was one arm and it was kept anyway, as "the seam a second
+// backend would use" — the same reason odin-rdf-store retained its
+// conformance Backend adapter when it became a single-backend library.
+// odin-rdf-record is the one and only store from here on (owner,
+// 2026-08-24), which retires that reason: the enum, `backend_name`, the
+// dispatch, and the `_kvstore` suffix on 37 test procedures all go, and
+// this file's own loading path merges into `dataset.odin`'s.
 package w3c
 
 import "core:os"
@@ -21,27 +17,8 @@ import "core:path/filepath"
 import "core:strings"
 
 import rdf "rdf:rdf"
-import store "store:store"
-import kvstore "store:store/kvstore"
 
-import sparql "../../../sparql"
-import sparql_kv "../../../sparql/kvstore"
-
-// One arm today. The enum and the dispatch below are kept rather than
-// collapsed: they are the seam a second backend would use, the same reason
-// odin-rdf-store retained its conformance Backend adapter when it became a
-// single-backend library (STORE-A-0006).
-Backend :: enum {
-	Kvstore,
-}
-
-backend_name :: proc(b: Backend) -> string {
-	switch b {
-	case .Kvstore:
-		return "kvstore"
-	}
-	return "?"
-}
+import "../../../sparql"
 
 // Eval_Status separates the three outcomes a test run can have. They
 // must stay separate: an operator the engine has not implemented is not
@@ -50,16 +27,15 @@ backend_name :: proc(b: Backend) -> string {
 Eval_Status :: enum {
 	Ok,
 	Unsupported, // the engine does not implement something the query uses
-	Failed, // the data would not load, the query would not parse, or the store errored
+	Failed, // the data would not load, or the query would not parse
 }
 
-// evaluate_entry runs one manifest entry against one backend. detail is
-// a static description when status is not Ok. The caller owns the result
-// and frees it with result_set_destroy.
+// evaluate_entry runs one manifest entry. detail is a static description
+// when status is not Ok. The caller owns the result and frees it with
+// result_set_destroy.
 evaluate_entry :: proc(
 	suite: Suite,
 	e: Entry,
-	backend: Backend,
 ) -> (
 	rs: Result_Set,
 	status: Eval_Status,
@@ -106,7 +82,7 @@ evaluate_entry :: proc(
 		append(&declared, Dataset_Document{name = strings.clone(name), named = clause.named})
 	}
 
-	rs, status, detail = evaluate_algebra(suite, e, algebra, p.query, sparql.parser_base(&p), declared[:], backend)
+	rs, status, detail = evaluate_algebra(suite, e, algebra, p.query, sparql.parser_base(&p), declared[:])
 	if status != .Ok || p.query.form != .Ask {
 		return rs, status, detail
 	}
@@ -123,27 +99,6 @@ evaluate_entry :: proc(
 Dataset_Document :: struct {
 	name:  string,
 	named: bool,
-}
-
-@(private = "file")
-evaluate_algebra :: proc(
-	suite: Suite,
-	e: Entry,
-	algebra: sparql.Algebra,
-	query: ^sparql.Query,
-	base: string,
-	declared: []Dataset_Document,
-	backend: Backend,
-) -> (
-	rs: Result_Set,
-	status: Eval_Status,
-	detail: string,
-) {
-	switch backend {
-	case .Kvstore:
-		return evaluate_kvstore(suite, e, algebra, query, base, declared)
-	}
-	return {}, .Failed, "unknown backend"
 }
 
 // graph_result turns a constructed or described graph into the harness's
@@ -185,12 +140,16 @@ query_is_ordered :: proc(suite: Suite, e: Entry) -> bool {
 	return len(p.query.order) > 0
 }
 
+// evaluate_algebra loads the entry's dataset and runs the query against
+// it. The store is opened per entry and dies with it — the memory seam
+// makes that cheap, and it is what keeps entries independent on a
+// multi-threaded runner.
 @(private = "file")
-evaluate_kvstore :: proc(
+evaluate_algebra :: proc(
 	suite: Suite,
 	e: Entry,
 	algebra: sparql.Algebra,
-	query: ^sparql.Query,
+	query: ^sparql.Parsed_Query,
 	base: string,
 	declared: []Dataset_Document,
 ) -> (
@@ -198,12 +157,10 @@ evaluate_kvstore :: proc(
 	status: Eval_Status,
 	detail: string,
 ) {
-	s, open_err := kvstore.open_ephemeral()
-	if open_err != nil {
-		return {}, .Failed, "cannot open the kvstore"
-	}
-	defer kvstore.close(s)
-	if loaded, why := load_entry_into_kvstore(s, suite, e); !loaded {
+	td: Test_Dataset
+	test_dataset_init(&td)
+	defer test_dataset_destroy(&td)
+	if loaded, why := load_entry_dataset(&td, suite, e); !loaded {
 		return {}, .Failed, why
 	}
 	for document in declared {
@@ -213,142 +170,63 @@ evaluate_kvstore :: proc(
 			graph_iri = strings.concatenate({suite.base, document.name})
 			graph = rdf.IRI(graph_iri)
 		}
-		loaded, why := load_kv_document(s, suite, document.name, graph)
+		loaded, why := load_declared_document(&td, suite, document.name, graph)
 		delete(graph_iri)
 		if !loaded {
 			return {}, .Failed, why
 		}
 	}
 
-	q: sparql_kv.Query
-	defer sparql_kv.query_destroy(&q)
-	if !sparql_kv.query_init(&q, algebra, s, base) {
-		if q.unsupported != "" {
-			return {}, .Unsupported, q.unsupported
-		}
-		return {}, .Failed, "the store failed while resolving the query's terms"
+	// Every document is in; the dataset the query answers about is what
+	// the store holds now.
+	snap, pinned := test_dataset_snapshot(&td)
+	if !pinned {
+		return {}, .Failed, "cannot pin a snapshot of the entry's dataset"
+	}
+
+	q: sparql.Query
+	defer sparql.query_destroy(&q)
+	if !sparql.query_init(&q, algebra, snap, base) {
+		// The only way preparation fails. Resolving the query's ground
+		// terms cannot: a term the store has never seen is an ordinary
+		// answer, not an error.
+		return {}, .Unsupported, q.unsupported
 	}
 
 	#partial switch query.form {
 	case .Construct:
 		template: sparql.Template
 		defer sparql.template_destroy(&template)
-		if !sparql.template_build(&template, query.template, sparql_kv.query_slots(&q)) {
+		if !sparql.template_build(&template, query.template, sparql.query_slots(&q)) {
 			return {}, .Unsupported, "CONSTRUCT template"
 		}
-		graph := sparql_kv.query_construct(&q, &template)
+		graph := sparql.query_construct(&q, &template)
 		defer sparql.result_graph_destroy(&graph)
-		if sparql_kv.query_error(&q) != nil {
-			return {}, .Failed, "the store failed during evaluation"
-		}
 		return graph_result(&graph), .Ok, ""
 	case .Describe:
 		targets: sparql.Describe_Targets
 		defer sparql.describe_destroy(&targets)
-		sparql.describe_build(&targets, query, sparql_kv.query_slots(&q), find_kvstore, &q)
-		graph := sparql_kv.query_describe(&q, &targets)
+		sparql.describe_build(&targets, query, sparql.query_slots(&q), snap)
+		graph := sparql.query_describe(&q, &targets)
 		defer sparql.result_graph_destroy(&graph)
-		if sparql_kv.query_error(&q) != nil {
-			return {}, .Failed, "the store failed during evaluation"
-		}
 		return graph_result(&graph), .Ok, ""
 	}
 
 	rs.kind = .Bindings
-	names := sparql_kv.query_var_names(&q)
-	internal := sparql_kv.query_var_internal(&q)
+	names := sparql.query_var_names(&q)
+	internal := sparql.query_var_internal(&q)
 	for {
-		row, more := sparql_kv.query_next(&q)
+		row, more := sparql.query_next(&q)
 		if !more {
 			break
 		}
 		at := result_set_add_row(&rs)
 		for id, slot in row {
-			if id == store.UNBOUND || internal[slot] {
+			if id == sparql.UNBOUND || internal[slot] {
 				continue
 			}
-			result_set_bind(&rs, at, names[slot], sparql_kv.query_term(&q, id))
+			result_set_bind(&rs, at, names[slot], sparql.query_term(&q, id))
 		}
-	}
-	if sparql_kv.query_error(&q) != nil {
-		result_set_destroy(&rs)
-		return {}, .Failed, "the store failed during evaluation"
 	}
 	return rs, .Ok, ""
 }
-
-// A DESCRIBE clause names IRIs, and resolving one to a store ID is the
-// same non-interning lookup plan building uses. The two adapters are what
-// carry it across the backend boundary this file dispatches on.
-@(private = "file")
-find_kvstore :: proc(data: rawptr, term: rdf.Term) -> (id: store.Term_ID, found: bool) {
-	return sparql_kv.query_find(cast(^sparql_kv.Query)data, term)
-}
-
-// load_entry_into_kvstore mirrors load_entry_dataset (dataset.odin) for
-// the persistent backend: qt:data into the default graph, qt:graphData
-// into a named graph whose name is the document's absolute IRI.
-@(private = "file")
-load_entry_into_kvstore :: proc(s: ^kvstore.Store, suite: Suite, e: Entry) -> (ok: bool, reason: string) {
-	for name in e.data {
-		if loaded, why := load_kv_document(s, suite, name, nil); !loaded {
-			return false, why
-		}
-	}
-	for name in e.graph_data {
-		graph_iri := strings.concatenate({suite.base, name})
-		defer delete(graph_iri)
-		if loaded, why := load_kv_document(s, suite, name, rdf.IRI(graph_iri)); !loaded {
-			return false, why
-		}
-	}
-	return true, ""
-}
-
-load_kv_document :: proc(
-	s: ^kvstore.Store,
-	suite: Suite,
-	name: string,
-	graph: rdf.Graph_Label,
-) -> (
-	ok: bool,
-	reason: string,
-) {
-	path, _ := filepath.join({SUITE_ROOT, suite.dir, name})
-	defer delete(path)
-	content, read_err := os.read_entire_file(path, context.allocator)
-	if read_err != nil {
-		return false, "cannot read data document"
-	}
-	defer delete(content)
-
-	base := strings.concatenate({suite.base, name})
-	defer delete(base)
-
-	parse_err: store.Load_Error
-	err: kvstore.Error
-	switch {
-	case strings.has_suffix(name, ".ttl"):
-		_, parse_err, err = kvstore.load_turtle(s, content, base, graph)
-	case strings.has_suffix(name, ".nt"):
-		_, parse_err, err = kvstore.load_triples(s, content, graph)
-	case strings.has_suffix(name, ".trig"):
-		// See load_document (dataset.odin): a quad document names its
-		// own graphs.
-		_, parse_err, err = kvstore.load_trig(s, content, base)
-	case strings.has_suffix(name, ".nq"):
-		_, parse_err, err = kvstore.load_quads(s, content)
-	case strings.has_suffix(name, ".rdf"):
-		return false, "data document is RDF/XML, which the family's parser does not implement"
-	case:
-		return false, "data document is in an unrecognized format"
-	}
-	if err != nil {
-		return false, "the store rejected the data document"
-	}
-	if parse_err.message != "" {
-		return false, parse_err.message
-	}
-	return true, ""
-}
-

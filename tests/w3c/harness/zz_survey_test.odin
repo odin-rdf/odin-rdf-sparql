@@ -35,7 +35,7 @@ zz_survey :: proc(t: ^testing.T) {
 		reason := ""
 		for e in entries {
 			if !strings.contains(e.type_str, "QueryEvaluationTest") {continue}
-			actual, status, detail := evaluate_entry(suite, e, .Kvstore)
+			actual, status, detail := evaluate_entry(suite, e)
 			defer result_set_destroy(&actual)
 			if status == .Unsupported {
 				unsup += 1

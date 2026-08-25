@@ -6,7 +6,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 
-import sparql "../../../sparql"
+import "../../../sparql"
 
 // Test-file IRIs resolve against the upstream suite location, per the
 // W3C convention; the prefixes and SUITE_ROOT live alongside the

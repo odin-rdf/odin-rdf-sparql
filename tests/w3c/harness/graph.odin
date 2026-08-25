@@ -11,7 +11,7 @@ package w3c
 import "core:strings"
 
 import rdf "rdf:rdf"
-import turtle "rdf:rdf/turtle"
+import "rdf:rdf/turtle"
 
 // Graph_Index owns its statements and an index from subject to the
 // positions of the statements about it.

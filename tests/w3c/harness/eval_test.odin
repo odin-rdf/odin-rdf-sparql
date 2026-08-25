@@ -7,8 +7,8 @@ import "core:strings"
 import "core:testing"
 
 // Evaluation suites are enabled one directory at a time, and an enabled
-// directory must be fully green against **both** backends — no skip
-// lists, no expected-failure files, and an entry the engine cannot yet
+// directory must be fully green — no skip lists, no expected-failure
+// files, and an entry the engine cannot yet
 // evaluate counts as a failure rather than a pass. That is the same rule
 // the syntax suites follow, and it is what keeps "enabled" meaning
 // something.
@@ -37,171 +37,193 @@ import "core:testing"
 // an operator inside it that sees more than one solution at a time. The
 // rest arrive as their operators do.
 //
-// sparql10-expr-builtin is *not* enabled, and it is worth saying why: 24
-// of its 25 entries pass, and the one that does not — dawg-lang-3,
-// `?x :p "string"@EN` against `"string"@en` — fails for a reason that
-// has nothing to do with §17. Neither the RDF parser nor the SPARQL
-// parser normalizes the case of a language tag, so the query's term and
-// the stored term are different keys in the dictionary and find_term
-// misses. Fixing it means normalizing on both sides of the family, which
-// is a data-model change rather than a function-library one.
+// **sparql10-expr-builtin is enabled as of SPARQL-T-0033, and the port
+// is what enabled it.** It sat out for one entry: dawg-lang-3,
+// `?x :p "string"@EN` against `"string"@en`, which failed because
+// neither the RDF parser nor the SPARQL parser normalized the case of a
+// language tag, so the query's term and the stored term were different
+// keys in odin-rdf-store's dictionary and `find_term` missed. The note
+// here used to say that fixing it meant normalizing on both sides of the
+// family — a data-model change rather than a function-library one.
+//
+// odin-rdf-record made it, for its own reasons: its canonical term
+// encoding folds a language tag to lowercase on intern, so `"string"@EN`
+// and `"string"@en` are one term. That is RDF 1.1's own rule (Concepts
+// §3.3: the value space of language tags is lower case) and the DAWG
+// expects exactly this match, so the entry passes for the right reason
+// rather than by luck. All 25 pass, and the directory is held to the
+// same standard as the rest.
+//
+// Two directories are still out, both for reasons the port did not touch:
+// `sparql11-subquery` (ten entries whose data is RDF/XML, which
+// odin-rdf-parser does not implement — the count is pinned in
+// readers_test.odin) and `sparql10-i18n` (`normalization-02` expects an
+// IRI to match unnormalized, and the two parsers disagree: Turtle's
+// removes dot segments where SPARQL's does not. Measured at
+// SPARQL-T-0033; it is parser-side and belongs to the family's IRI
+// normalization question, not to any store).
 
 @(test)
-test_eval_sparql10_triple_match_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-triple-match", .Kvstore)
+test_eval_sparql10_expr_builtin :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-expr-builtin")
 }
 
 @(test)
-test_eval_sparql10_basic_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-basic", .Kvstore)
+test_eval_sparql10_triple_match :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-triple-match")
 }
 
 @(test)
-test_eval_sparql10_ask_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-ask", .Kvstore)
+test_eval_sparql10_basic :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-basic")
 }
 
 @(test)
-test_eval_sparql10_bnode_coreference_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-bnode-coreference", .Kvstore)
+test_eval_sparql10_ask :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-ask")
 }
 
 @(test)
-test_eval_sparql10_expr_equals_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-expr-equals", .Kvstore)
+test_eval_sparql10_bnode_coreference :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bnode-coreference")
 }
 
 @(test)
-test_eval_sparql10_type_promotion_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-type-promotion", .Kvstore)
-}
-
-
-@(test)
-test_eval_sparql10_boolean_effective_value_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-boolean-effective-value", .Kvstore)
+test_eval_sparql10_expr_equals :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-expr-equals")
 }
 
 @(test)
-test_eval_sparql10_bound_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-bound", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_distinct_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-distinct", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_open_world_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-open-world", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_optional_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-optional", .Kvstore)
-}
-
-@(test)
-test_eval_sparql10_reduced_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-reduced", .Kvstore)
+test_eval_sparql10_type_promotion :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-type-promotion")
 }
 
 
 @(test)
-test_eval_algebra_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-algebra", .Kvstore)
+test_eval_sparql10_boolean_effective_value :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-boolean-effective-value")
 }
 
 @(test)
-test_eval_expr_ops_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-expr-ops", .Kvstore)
+test_eval_sparql10_bound :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-bound")
 }
 
 @(test)
-test_eval_optional_filter_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-optional-filter", .Kvstore)
+test_eval_sparql10_distinct :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-distinct")
 }
 
 @(test)
-test_eval_bind_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-bind", .Kvstore)
+test_eval_sparql10_open_world :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-open-world")
+}
+
+@(test)
+test_eval_sparql10_optional :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-optional")
+}
+
+@(test)
+test_eval_sparql10_reduced :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-reduced")
 }
 
 
 @(test)
-test_eval_dataset_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-dataset", .Kvstore)
+test_eval_algebra :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-algebra")
 }
 
 @(test)
-test_eval_exists_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-exists", .Kvstore)
+test_eval_expr_ops :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-expr-ops")
 }
 
 @(test)
-test_eval_bindings_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-bindings", .Kvstore)
+test_eval_optional_filter :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-optional-filter")
 }
 
 @(test)
-test_eval_functions_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-functions", .Kvstore)
+test_eval_bind :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-bind")
+}
+
+
+@(test)
+test_eval_dataset :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-dataset")
 }
 
 @(test)
-test_eval_regex_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-regex", .Kvstore)
+test_eval_exists :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-exists")
 }
 
 @(test)
-test_eval_sparql10_cast_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-cast", .Kvstore)
+test_eval_bindings :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-bindings")
 }
 
 @(test)
-test_eval_sparql11_cast_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-cast", .Kvstore)
+test_eval_functions :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-functions")
 }
 
 @(test)
-test_eval_sparql11_aggregates_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-aggregates", .Kvstore)
+test_eval_regex :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-regex")
 }
 
 @(test)
-test_eval_sparql11_grouping_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-grouping", .Kvstore)
+test_eval_sparql10_cast :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-cast")
 }
 
 @(test)
-test_eval_sparql10_sort_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-sort", .Kvstore)
+test_eval_sparql11_cast :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-cast")
 }
 
 @(test)
-test_eval_sparql10_solution_seq_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-solution-seq", .Kvstore)
+test_eval_sparql11_aggregates :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-aggregates")
 }
 
 @(test)
-test_eval_sparql11_project_expression_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-project-expression", .Kvstore)
+test_eval_sparql11_grouping :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-grouping")
 }
 
 @(test)
-test_eval_sparql11_property_path_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-property-path", .Kvstore)
+test_eval_sparql10_sort :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-sort")
 }
 
 @(test)
-test_eval_sparql10_construct_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-construct", .Kvstore)
+test_eval_sparql10_solution_seq :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-solution-seq")
 }
 
 @(test)
-test_eval_sparql11_construct_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-construct", .Kvstore)
+test_eval_sparql11_project_expression :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-project-expression")
+}
+
+@(test)
+test_eval_sparql11_property_path :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-property-path")
+}
+
+@(test)
+test_eval_sparql10_construct :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-construct")
+}
+
+@(test)
+test_eval_sparql11_construct :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-construct")
 }
 
 // The SPARQL 1.2 evaluation directories (SPARQL-T-0018). The three
@@ -209,23 +231,23 @@ test_eval_sparql11_construct_kvstore :: proc(t: ^testing.T) {
 // out-of-engine-scope entries by run_eval_suite, the same way a syntax
 // entry in an evaluation directory is.
 @(test)
-test_eval_sparql12_eval_triple_terms_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-eval-triple-terms", .Kvstore)
+test_eval_sparql12_eval_triple_terms :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-eval-triple-terms")
 }
 
 @(test)
-test_eval_sparql12_expression_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-expression", .Kvstore)
+test_eval_sparql12_expression :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-expression")
 }
 
 @(test)
-test_eval_sparql12_grouping_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-grouping", .Kvstore)
+test_eval_sparql12_grouping :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-grouping")
 }
 
 @(test)
-test_eval_sparql12_rdf11_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql12-rdf11", .Kvstore)
+test_eval_sparql12_rdf11 :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql12-rdf11")
 }
 
 // The two GRAPH-scoping directories (SPARQL-T-0020). Each was one entry
@@ -235,20 +257,20 @@ test_eval_sparql12_rdf11_kvstore :: proc(t: ^testing.T) {
 // afterwards. Whichever of the two is read first, the other stops being
 // a surprise — see Plan_Graph_Bind.
 @(test)
-test_eval_sparql10_graph_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql10-graph", .Kvstore)
+test_eval_sparql10_graph :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql10-graph")
 }
 
 @(test)
-test_eval_sparql11_negation_kvstore :: proc(t: ^testing.T) {
-	run_eval_suite(t, "sparql11-negation", .Kvstore)
+test_eval_sparql11_negation :: proc(t: ^testing.T) {
+	run_eval_suite(t, "sparql11-negation")
 }
 
 // run_eval_suite runs every evaluation entry of a directory: load,
 // evaluate, compare. The suite's pinned entry count is asserted here too,
 // so a manifest-reader regression cannot quietly shrink what "fully
 // green" covers.
-run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
+run_eval_suite :: proc(t: ^testing.T, dir: string) {
 	suite, found := find_suite(dir)
 	if !testing.expectf(t, found, "%s is not a vendored evaluation suite", dir) {
 		return
@@ -285,15 +307,14 @@ run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
 			continue
 		}
 
-		actual, status, detail := evaluate_entry(suite, e, backend)
+		actual, status, detail := evaluate_entry(suite, e)
 		defer result_set_destroy(&actual)
 		if !testing.expectf(
 			t,
 			status == .Ok,
-			"%s/%s [%s] (%s): %v — %s",
+			"%s/%s (%s): %v — %s",
 			suite.dir,
 			e.id,
-			backend_name(backend),
 			e.name,
 			status,
 			detail,
@@ -328,10 +349,9 @@ run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
 		testing.expectf(
 			t,
 			false,
-			"%s/%s [%s] (%s): %s\n--- got ---\n%s--- want ---\n%s",
+			"%s/%s (%s): %s\n--- got ---\n%s--- want ---\n%s",
 			suite.dir,
 			e.id,
-			backend_name(backend),
 			e.name,
 			reason,
 			actual_text,
@@ -339,9 +359,8 @@ run_eval_suite :: proc(t: ^testing.T, dir: string, backend: Backend) {
 		)
 	}
 	log.infof(
-		"%s [%s]: %d/%d evaluation tests passed (%d entries not evaluated)",
+		"%s: %d/%d evaluation tests passed (%d entries not evaluated)",
 		suite.dir,
-		backend_name(backend),
 		passed,
 		len(entries) - not_evaluated,
 		not_evaluated,

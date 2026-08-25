@@ -6,7 +6,7 @@ import "core:strings"
 import "core:testing"
 
 
-import sparql "../../sparql"
+import "../../sparql"
 
 // A representative query touching every token family: keywords, vars,
 // IRIs, prefixed names (incl. percent + escape), literals of every

@@ -29,22 +29,19 @@ COLL := -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
 # formats, never instantiations.
 #
 # tests/guards holds the allocation guards; tests/readme compiles and
-# asserts the README's examples (SPARQL-T-0009). Both were ported to
-# odin-rdf-record at SPARQL-T-0032, along with the nine test files that
-# lived in the deleted sparql/kvstore -- those are in `sparql` now,
+# asserts the README's examples (SPARQL-T-0009); tests/w3c/harness runs
+# the vendored W3C suites. The three of them plus the nine test files
+# that lived in the deleted sparql/kvstore were ported to odin-rdf-record
+# across SPARQL-T-0032 and -T-0033 -- the nine are in `sparql` now,
 # because their subject was always SPARQL and only incidentally a
 # backend.
 #
-# **PENDING is what is left of the port's red edge.** tests/w3c/harness
-# still names `store:` and comes back at SPARQL-T-0033. It is listed
-# rather than deleted so that what is missing is visible in this file
-# rather than only in a task; delete this variable and its uses when the
-# list empties. tests/smoke is the record plumbing's own test and
-# tests/portcheck is the port's bridge coverage; both go at
-# SPARQL-T-0033, when the harness makes them redundant several hundred
-# times over.
-PKGS     := sparql sparql/srj sparql/srx tests/guards tests/readme tests/smoke tests/portcheck
-PENDING  := tests/w3c/harness
+# **The port's red edge is closed.** `PENDING` lived here for two tasks,
+# listing what did not yet compile so that what was missing was visible
+# in this file rather than only in a task; it is empty and gone, and so
+# are the two bridge packages that stood in for the suite while it was
+# (tests/smoke, tests/portcheck).
+PKGS     := sparql sparql/srj sparql/srx tests/guards tests/w3c/harness tests/readme
 # bench/ has an entry point, so it is vetted outside the PKGS loop rather
 # than inside it -- and both of its builds are, since a `when`-gated
 # branch that nothing compiles is a branch that rots (SPARQL-T-0040).
@@ -58,7 +55,7 @@ SRC_DIRS := $(PKGS) $(BENCH)
 # `make test` runs once. odin-rdf-shacl became exempt the same way and for
 # the same reason (2026-08-20).
 
-.PHONY: all help test check bench build-bench clean
+.PHONY: all help test check check-aliases bench build-bench clean
 
 all: test
 
@@ -78,9 +75,7 @@ test: ## Run the full suite
 		echo "-- $$pkg --"; \
 		odin test $$pkg $(TEST_FLAGS) || exit 1; \
 	done
-	@if [ -n "$(PENDING)" ]; then \
-		echo "-- not yet ported (SPARQL-T-0033): $(PENDING) --"; \
-	fi
+
 
 # Vets every package including the ones with no tests, so a package the suite
 # never instantiates still has to compile clean.
@@ -95,6 +90,8 @@ check: ## Vet every package
 	@odin check $(BENCH) -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
 	@echo "-- sparql (instrumented) --"
 	@odin check sparql -no-entry-point -vet -strict-style $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
+	@echo "-- import aliases --"
+	@$(MAKE) --no-print-directory check-aliases
 
 # Benchmarks measure the engine, and a debug build measures the compiler
 # instead, so they get the release flags.
@@ -119,6 +116,24 @@ build-bench: ## Build both benchmark binaries without running them
 	mkdir -p build
 	@odin build $(BENCH) -out:$(OUT) -o:speed -no-bounds-check $(COLL) || exit 1
 	@odin build $(BENCH) -out:$(OUT)-counted -o:speed -no-bounds-check $(COLL) -define:SPARQL_COUNT_READS=true || exit 1
+
+# An import alias that repeats the package's own name is noise, and the
+# port left a lot of it behind: `import sparql "../../sparql"` and
+# `import record "record:record"` say nothing an unaliased import does
+# not. odin-rdf-shacl ends its `check` with this grep for the same
+# reason; it is here since SPARQL-T-0033, when every import in the
+# repository was being rewritten anyway.
+#
+# Aliases that are *not* redundant stay: `rdf "rdf:rdf"` is one (the
+# unaliased form binds `rdf` too, but the collection prefix makes the
+# intent worth stating), and any alias that renames rather than repeats.
+check-aliases:
+	@bad=$$(grep -rn 'import \([a-z_][a-z_0-9]*\) "[^"]*/\1"' --include='*.odin' . || true); \
+	if [ -n "$$bad" ]; then \
+		echo "redundant import alias -- the alias repeats the package name:"; \
+		echo "$$bad"; \
+		exit 1; \
+	fi
 
 clean: ## Remove build/
 	rm -rf build

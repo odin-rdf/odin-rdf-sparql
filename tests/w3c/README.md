@@ -146,9 +146,12 @@ floor for every vendored evaluation directory, enabled or not, is that
 its manifest reads, its expectations parse (556 across four formats), its
 data loads, and its queries parse and translate.
 
-Enabled for evaluation so far, each fully green against kvstore at both
-Term_ID widths (it read "both backends, memstore and kvstore" until
-odin-rdf-store retired the in-memory one — STORE-A-0006):
+Enabled for evaluation so far, each fully green against odin-rdf-record.
+(This line read "both backends, memstore and kvstore" until
+odin-rdf-store retired the in-memory one — STORE-A-0006 — then "against
+kvstore at both Term_ID widths" until SPARQL-T-0033 ported the engine
+onto odin-rdf-record, whose widths are fixed by design. One
+configuration, one run.)
 
 | Directory | Enabled by | Tests |
 |---|---|---|
@@ -189,11 +192,29 @@ odin-rdf-store retired the in-memory one — STORE-A-0006):
 | `sparql12-rdf11/` | SPARQL-T-0018 | 3 |
 | `sparql10-graph/` | SPARQL-T-0020 | 17 |
 | `sparql11-negation/` | SPARQL-T-0020 | 12 |
+| `sparql10-expr-builtin/` | SPARQL-T-0033 | 25 |
 
-That is **512 evaluation tests across thirty-seven directories**, each run
-at both Term_ID widths. (It read "both backends" until odin-rdf-store
-retired its in-memory one — STORE-A-0006 — leaving the width matrix as the
-whole of the matrix.)
+That is **537 evaluation tests across thirty-eight directories**, in one
+configuration.
+
+**The last row is the port's own doing.** `sparql10-expr-builtin` sat
+out for one entry — `dawg-lang-3`, `?x :p "string"@EN` against
+`"string"@en` — because neither the RDF parser nor the SPARQL parser
+normalized a language tag's case, so the two terms were different keys
+in odin-rdf-store's dictionary. odin-rdf-record folds language tags to
+lowercase on intern, which is RDF 1.1's own rule (Concepts §3.3: the
+value space of language tags is lower case) and what the DAWG entry
+expects. The directory went green without anything in this engine
+changing.
+
+Two directories are still out, neither for a reason the port touched:
+`sparql11-subquery` (ten entries whose data is RDF/XML, which
+odin-rdf-parser does not implement — the count is pinned in
+`readers_test.odin`) and `sparql10-i18n` (`normalization-02` expects an
+IRI to match unnormalized, and the two parsers disagree: Turtle's removes
+dot segments where SPARQL's does not — measured at SPARQL-T-0033, and a
+question for the family's IRI normalization decision rather than for any
+store).
 
 ## What DESCRIBE returns
 
@@ -203,8 +224,9 @@ resources, and which triples that is nobody's business but the engine's.
 So no W3C evaluation directory pins DESCRIBE output. That is measured
 rather than assumed: the vendored corpus contains no `qt:QueryDescribe`
 entry and no query whose form is DESCRIBE at all. The form is therefore
-covered by `sparql/kvstore/forms_test.odin` instead, which is the only
-place its behaviour is stated.
+covered by `sparql/forms_test.odin` instead, which is the only place its
+behaviour is stated. (It was `sparql/kvstore/forms_test.odin` until
+SPARQL-T-0032 made the engine one package.)
 
 This engine answers a DESCRIBE with **every triple of the query's default
 graph whose subject is a described resource**. Nothing else: no
