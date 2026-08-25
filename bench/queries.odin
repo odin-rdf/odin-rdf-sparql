@@ -136,6 +136,33 @@ CASES := []Case {
 		`SELECT ?s ?name WHERE { ?s a b:Entity . ?s b:name ?name . ?s b:dept b:d0 }`,
 	},
 
+	// **The merge join's declining case** (SPARQL-T-0029), and the only
+	// case here that exists to make a planner say no. Same two-pattern
+	// shape as `bgp2`, with the left side narrowed to one node's
+	// neighbours: `b:knows` from `b:e0` is four facts where `b:name` is
+	// one per entity, so the right window is ~5,000x the left and
+	// MERGE_SCAN_PRICE declines the merge.
+	//
+	// **It guards the decision, not a timing.** The row to watch is
+	// `match`: 5 is the nested loop (one scan plus four probes) and 2
+	// would be a merge, so raising the price past this ratio moves this
+	// pin and nothing else here would notice.
+	//
+	// Its *timing* is deliberately not the argument, because on this
+	// corpus the declined merge would have been fast anyway — and why is
+	// worth writing down. record assigns dictionary ids in first-mention
+	// order, and `b:e0`'s four targets are first mentioned while `b:e0`
+	// itself is being emitted, so they hold among the lowest entity ids
+	// in the store and sit at the very front of the right window. A merge
+	// walks only as far as the largest join value it is asked for, so it
+	// would touch six facts of 20,500 here. Nothing in the pattern says
+	// so, which is exactly why the planner prices the full walk instead.
+	{
+		name = "bgp2-narrow-left",
+		about = "two patterns, left side ~5000x smaller -- the merge's declining case",
+		text = PREFIX + `SELECT ?o ?name WHERE { b:e0 b:knows ?o . ?o b:name ?name }`,
+	},
+
 	// A property path from one fixed start node. Fixed rather than
 	// unbound on purpose: `?a b:knows+ ?b` over this corpus is quadratic
 	// and would measure the generator's fan-out rather than the operator.

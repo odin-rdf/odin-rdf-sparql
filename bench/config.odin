@@ -175,25 +175,55 @@ Pin :: struct {
 // it. Same 4,122 answers, a window 41x wider than they are. That is the
 // record-side half of SPARQL-I-0003 par. 12, and it is the reason
 // `candidates` was added.
+// **Five rows moved on 2026-08-25 for the merge join** (SPARQL-T-0029),
+// and they moved in the pattern that says a join *strategy* changed
+// rather than a result: **every `solutions` count is identical**, and
+// `match` collapses while `candidates` rises slightly.
+//
+// The merge joins the first two patterns of a BGP by advancing two
+// cursors in step, so the two scans it opens replace one-per-row of the
+// left side. `bgp2` is the clean read -- 20,001 scans become **2** and
+// `next` falls 60,001 -> 40,002, while `candidates` rises 40,500 ->
+// 41,000, because both windows were being read in full either way and
+// the extra 500 is the right side's window no longer being narrowed by a
+// bound subject. Time 3.199 -> 0.518 ms. `group` is the same shape and
+// was not expected: its `?s b:dept ?d . ?s b:rank ?r` is a two-pattern
+// join wearing an aggregate, 5.531 -> 2.527 ms.
+//
+// `bgp3` merges its first join and probes the third pattern, which joins
+// on a different variable and therefore cannot merge -- 100,001 -> 80,002,
+// **a fifth off rather than a collapse**, and the honest ceiling of a
+// left-deep chain.
+//
+// `bgp3-selective-last` is the interesting one, because it is the row
+// where the merge costs candidates and wins anyway: 4,879 -> 23,769
+// candidates, **4.9x the reading**, and 0.508 -> 0.396 ms. Solving it
+// against `bgp2` is where MERGE_SCAN_PRICE's value comes from.
+//
+// `graph`, `optional`, `order`, `order-limit` and `path` did not move a
+// single count. `optional`'s two patterns are two operators rather than
+// one BGP, and the rest are one pattern or none.
 PINS := []Pin {
-	{config = "small", case_name = "bgp2", solutions = 2000, match = 2001, next = 6001, load = 0, find = 3, triple = 0, candidates = 4500},
-	{config = "small", case_name = "bgp3", solutions = 8000, match = 10001, next = 28001, load = 0, find = 4, triple = 0, candidates = 18500},
+	{config = "small", case_name = "bgp2", solutions = 2000, match = 2, next = 4002, load = 0, find = 3, triple = 0, candidates = 5000},
+	{config = "small", case_name = "bgp3", solutions = 8000, match = 8002, next = 26002, load = 0, find = 4, triple = 0, candidates = 20500},
 	{config = "small", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 20617},
 	{config = "small", case_name = "optional", solutions = 2000, match = 2001, next = 4496, load = 0, find = 3, triple = 0, candidates = 2995},
-	{config = "small", case_name = "group", solutions = 12, match = 2001, next = 6001, load = 4012, find = 26, triple = 0, candidates = 4500},
+	{config = "small", case_name = "group", solutions = 12, match = 2, next = 4002, load = 4012, find = 26, triple = 0, candidates = 5000},
 	{config = "small", case_name = "order", solutions = 2000, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
 	{config = "small", case_name = "order-limit", solutions = 10, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
-	{config = "small", case_name = "bgp3-selective-last", solutions = 180, match = 361, next = 901, load = 0, find = 5, triple = 0, candidates = 589},
+	{config = "small", case_name = "bgp3-selective-last", solutions = 180, match = 182, next = 2518, load = 0, find = 5, triple = 0, candidates = 2909},
+	{config = "small", case_name = "bgp2-narrow-left", solutions = 4, match = 5, next = 13, load = 0, find = 3, triple = 0, candidates = 8},
 	{config = "small", case_name = "path", solutions = 1950, match = 1950, next = 9750, load = 0, find = 2, triple = 0, candidates = 7800},
 
-	{config = "large", case_name = "bgp2", solutions = 20000, match = 20001, next = 60001, load = 0, find = 3, triple = 0, candidates = 40500},
-	{config = "large", case_name = "bgp3", solutions = 80000, match = 100001, next = 280001, load = 0, find = 4, triple = 0, candidates = 180500},
+	{config = "large", case_name = "bgp2", solutions = 20000, match = 2, next = 40002, load = 0, find = 3, triple = 0, candidates = 41000},
+	{config = "large", case_name = "bgp3", solutions = 80000, match = 80002, next = 260002, load = 0, find = 4, triple = 0, candidates = 182500},
 	{config = "large", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 169055},
 	{config = "large", case_name = "optional", solutions = 20000, match = 20001, next = 44934, load = 0, find = 3, triple = 0, candidates = 25433},
-	{config = "large", case_name = "group", solutions = 12, match = 20001, next = 60001, load = 40012, find = 26, triple = 0, candidates = 40500},
+	{config = "large", case_name = "group", solutions = 12, match = 2, next = 40002, load = 40012, find = 26, triple = 0, candidates = 41000},
 	{config = "large", case_name = "order", solutions = 20000, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
 	{config = "large", case_name = "order-limit", solutions = 10, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
-	{config = "large", case_name = "bgp3-selective-last", solutions = 1610, match = 3221, next = 8051, load = 0, find = 5, triple = 0, candidates = 4879},
+	{config = "large", case_name = "bgp3-selective-last", solutions = 1610, match = 1612, next = 24815, load = 0, find = 5, triple = 0, candidates = 23769},
+	{config = "large", case_name = "bgp2-narrow-left", solutions = 4, match = 5, next = 13, load = 0, find = 3, triple = 0, candidates = 8},
 	{config = "large", case_name = "path", solutions = 19612, match = 19612, next = 98060, load = 0, find = 2, triple = 0, candidates = 78448},
 }
 

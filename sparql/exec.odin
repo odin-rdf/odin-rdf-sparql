@@ -93,6 +93,21 @@ Op_Phase :: enum {
 	Pull_Right,
 }
 
+// Merge_Cursor is a scan with its current fact read out — the one
+// lookahead a merge join needs, since deciding whether a cursor has
+// reached a join value means having already looked at the fact.
+//
+// It is a value, and that is the point: `record.Scan` is a slice over a
+// permutation plus its residual checks, so copying a Merge_Cursor
+// snapshots a position exactly, lookahead included. That is what lets
+// the merge replay a run of equal join values for a repeated left row
+// without buffering it or opening a second scan.
+Merge_Cursor :: struct {
+	scan:  record.Scan,
+	quad:  Encoded_Quad,
+	valid: bool, // false once the scan is spent; quad is then meaningless
+}
+
 // Exec_Node is one operator's state, instantiated for a backend's
 // iterator type. Every operator shares the struct — see Exec_Kind for
 // why — so most of its fields belong to one kind and are zero in the
@@ -124,6 +139,22 @@ Exec_Node :: struct {
 	bound_count: []int,
 	depth:       int,
 	started:     bool,
+
+	// BGP merge join (Plan_Merge, SPARQL-T-0029). Three cursors over one
+	// scan of depth 1's window: `merge_main` is the monotone one and
+	// never goes backwards, `merge_group` remembers where the current
+	// join value's run of facts began, and `merge_cur` walks that run
+	// once per row depth 0 produces. Copying a cursor is how a run is
+	// replayed -- a record.Scan is a slice and some registers, so a
+	// duplicate left row costs a struct copy rather than a re-open.
+	merge_main:  Merge_Cursor,
+	merge_group: Merge_Cursor,
+	merge_cur:   Merge_Cursor,
+	// The join value merge_group is positioned on, and whether it is.
+	// Cleared by merge_begin rather than by node_reset, because a run
+	// always starts there -- see its comment.
+	merge_value: record.Term_ID,
+	merge_have:  bool,
 
 	// Project: the slots kept, and the row handed out (the working row
 	// must not be masked in place — a basic graph pattern below reads it
@@ -268,6 +299,31 @@ match_open :: proc(e: ^Exec, pattern: Match_Pattern) -> record.Scan {
 		g = pattern[QUAD_G],
 	}
 	r := record.snapshot_match(e.snapshot, p)
+	when SPARQL_COUNT_READS {
+		read_counts.match += 1
+		read_counts.store_ops += 1
+		read_counts.candidates += record.range_len(r)
+	}
+	return record.range_iter(r, record.Filter{origin = .Any})
+}
+
+// match_open_as is match_open with the permutation named rather than
+// chosen -- `snapshot_match_as` in place of `snapshot_match`, and
+// nothing else different, counters included.
+//
+// Only the merge join calls it (SPARQL-T-0029), and only to get a window
+// that ascends in the join variable. It is not a wider read: the order
+// it is given prefixes on the pattern's ground components, which is what
+// `choose_order` prefixes on too, so the window holds the same facts.
+@(private = "file")
+match_open_as :: proc(e: ^Exec, pattern: Match_Pattern, order: record.Order) -> record.Scan {
+	p := record.Pattern {
+		s = pattern[QUAD_S],
+		p = pattern[QUAD_P],
+		o = pattern[QUAD_O],
+		g = pattern[QUAD_G],
+	}
+	r := record.snapshot_match_as(e.snapshot, p, order)
 	when SPARQL_COUNT_READS {
 		read_counts.match += 1
 		read_counts.store_ops += 1
@@ -1807,21 +1863,45 @@ bgp_next :: proc(
 	if !node.started {
 		node.started = true
 		node.depth = 0
+		if node.bgp.merge.active {
+			merge_begin(e, node)
+		}
 	} else {
 		node.depth = last
 	}
 
 	for node.depth >= 0 {
 		depth := node.depth
+		// Depth 1 is the merge's right side when there is one; depth 0 is
+		// its left, and differs from an ordinary scan only in naming the
+		// permutation that makes it ascend in the join variable.
+		merged := node.bgp.merge.active && depth == 1
 		if !node.iter_open[depth] {
-			node.iters[depth] = match_open(e, probe_pattern(e, node, depth))
+			switch {
+			case merged:
+				merge_position(e, node)
+			case node.bgp.merge.active && depth == 0:
+				node.iters[0] = match_open_as(
+					e,
+					probe_pattern(e, node, 0),
+					node.bgp.merge.left_order,
+				)
+			case:
+				node.iters[depth] = match_open(e, probe_pattern(e, node, depth))
+			}
 			node.iter_open[depth] = true
 			node.bound_count[depth] = 0
 		}
 		// Release what this depth bound for its previous quad before
 		// asking for the next one.
 		unbind_depth(e, node, depth)
-		quad, more := match_next(&node.iters[depth])
+		quad: Encoded_Quad
+		more: bool
+		if merged {
+			quad, more = merge_next(node)
+		} else {
+			quad, more = match_next(&node.iters[depth])
+		}
 		if !more {
 			node.iter_open[depth] = false
 			node.depth -= 1
@@ -1836,6 +1916,94 @@ bgp_next :: proc(
 		node.depth += 1
 	}
 	return nil, false
+}
+
+// --- Merge join -----------------------------------------------------
+//
+// The three procedures below are the whole of it. What makes them a
+// merge rather than a loop is one invariant: **both sides ascend in the
+// join variable, so the right cursor never has to go back.**
+//
+// The left side ascends because `Plan_Merge.left_order` names a
+// permutation whose key reaches the join variable immediately after the
+// pattern's ground components, and those are constant across the window.
+// The right side ascends for the same reason. And ascending means
+// ascending *by `<` on record.Term_ID*, because record's permutations
+// are radix-sorted on the raw component values — the ids are compared,
+// never interpreted, which is exactly why SPARQL-T-0038's finding that
+// record's id order is not SPARQL's `ORDER BY` order does not reach
+// here. A merge needs a consistent total order and record has one.
+
+// merge_begin opens the right side, once per run of the BGP.
+//
+// It is opened here, before depth 0 has bound anything, and that timing
+// is load-bearing: `probe_pattern` substitutes whatever the working row
+// holds, so at this instant it yields depth 1's pattern with the join
+// variable still unbound — the static window the merge is priced on. A
+// binding an enclosing operator supplied is substituted and welcome; it
+// narrows the window without disturbing its order.
+//
+// **This is why node_reset says nothing about the merge.** A run begins
+// only from `!started`, and node_reset's whole effect on a BGP is to
+// clear that flag, so every re-run — including a correlated one under a
+// different outer binding — arrives here and re-opens against the
+// bindings of that moment. There is no per-run merge state that outlives
+// this procedure.
+@(private = "file")
+merge_begin :: proc(e: ^Exec, node: ^Exec_Node) {
+	node.merge_main.scan = match_open_as(
+		e,
+		probe_pattern(e, node, 1),
+		node.bgp.merge.right_order,
+	)
+	merge_advance(&node.merge_main)
+	node.merge_have = false
+}
+
+// merge_position places the replay cursor for the join value depth 0 has
+// just bound. This is what runs where the nested loop would open a probe.
+@(private = "file")
+merge_position :: proc(e: ^Exec, node: ^Exec_Node) {
+	merge := node.bgp.merge
+	want := e.work[merge.slot]
+	if !node.merge_have || node.merge_value != want {
+		// A join value depth 0 has not produced before. Depth 0 ascends,
+		// so a value the main cursor has already passed can never be
+		// asked for again — which is what makes this a forward walk over
+		// the window rather than a seek into it.
+		for node.merge_main.valid && node.merge_main.quad[merge.right_pos] < want {
+			merge_advance(&node.merge_main)
+		}
+		node.merge_value = want
+		node.merge_have = true
+		node.merge_group = node.merge_main
+	}
+	node.merge_cur = node.merge_group
+}
+
+// merge_next yields the next fact of the current join value's run, and
+// reports the run's end the way an exhausted scan does, so the depth
+// loop above backtracks without knowing which it was talking to.
+@(private = "file")
+merge_next :: proc(node: ^Exec_Node) -> (quad: Encoded_Quad, ok: bool) {
+	merge := node.bgp.merge
+	if !node.merge_cur.valid || node.merge_cur.quad[merge.right_pos] != node.merge_value {
+		// Spent. The replay cursor is now on the first fact past the run,
+		// which is where the search for the next join value would start
+		// — so hand that position to the main cursor instead of walking
+		// the run again. Idempotent: every row of a repeated left value
+		// stops in the same place.
+		node.merge_main = node.merge_cur
+		return {}, false
+	}
+	quad = node.merge_cur.quad
+	merge_advance(&node.merge_cur)
+	return quad, true
+}
+
+@(private = "file")
+merge_advance :: proc(c: ^Merge_Cursor) {
+	c.quad, c.valid = match_next(&c.scan)
 }
 
 // --- Property paths -------------------------------------------------

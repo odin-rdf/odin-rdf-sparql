@@ -176,6 +176,48 @@ Plan_Term_Shape :: struct {
 	parts: [3]Plan_Ref,
 }
 
+// Plan_Merge is the merge join, and `active` is the whole of the
+// decision: when it is set, the executor joins the first two patterns
+// of `order` by advancing two cursors in step instead of probing the
+// second once per row of the first (SPARQL-T-0029).
+//
+// # Why only the first two
+//
+// A merge is a merge because the right cursor is **monotone** -- it
+// only ever moves forward. That holds exactly while the left side never
+// restarts underneath it, and the left side of a depth-d join restarts
+// once per row of depth d-1. At depth 1 there is no depth -1, so the
+// left side runs once and the right cursor crosses its window once.
+// Deeper than that it would have to rewind, which is a re-open per row
+// and the thing this replaces.
+//
+// So a left-deep chain merges its first join and probes the rest, which
+// is also the honest ceiling: a merge's output is sorted by its join
+// variable, so a second join on a *different* variable could not consume
+// an ordered input even if one were offered.
+//
+// # What the orders are for
+//
+// Both sides must ascend in the shared variable, so each names the
+// permutation that puts every ground component of its own pattern first
+// and the join variable next. Such an order always exists -- the six are
+// the six permutations of S/P/O, with G appended in all of them -- so
+// "not leadable" is not a case. And because `choose_order` maximises the
+// same prefix, naming an order here **cannot widen a window**: the
+// prefix is the pattern's ground components either way, so the two
+// windows hold the same facts in a different order.
+//
+// left_pos and right_pos are QUAD_S/P/O -- never QUAD_G, which sits at
+// key depth 3 in every order and can therefore never lead.
+Plan_Merge :: struct {
+	active:      bool,
+	slot:        int, // the shared variable's slot
+	left_order:  record.Order,
+	right_order: record.Order,
+	left_pos:    int, // where the shared variable sits in order[0]'s triple
+	right_pos:   int, // and in order[1]'s
+}
+
 // Plan_BGP is a basic graph pattern to be evaluated as a chain of
 // index probes: for each pattern in join order, substitute what the
 // row already binds and match.
@@ -197,6 +239,10 @@ Plan_BGP :: struct {
 	order:       [dynamic]int,
 	shapes:      [dynamic]Plan_Term_Shape,
 	shape_range: [dynamic][2]int,
+	// The merge join over order[0] and order[1], or a zero value when
+	// the shape does not allow one or the pricing declined it. Filled by
+	// join_order, which is the only procedure that may.
+	merge:       Plan_Merge,
 }
 
 // Plan_Nothing yields no solutions. It is what a pattern collapses to
@@ -2115,6 +2161,152 @@ join_order :: proc(b: ^Plan_Builder, plan: ^Plan_BGP) {
 			}
 		}
 	}
+
+	plan_merge(plan, costs)
+}
+
+// MERGE_SCAN_PRICE is what one opened scan costs in candidate-visits,
+// and it is the only tunable in the merge decision.
+//
+// The trade, in the engine's own counted verbs. A nested loop at depth 1
+// opens one scan per row surviving depth 0 and visits only the facts
+// that match; a merge opens one scan and visits the right side's whole
+// static window, because the join variable is unbound in it. So the loop
+// pays scan opens and the merge pays candidates, and this constant is
+// the exchange rate between them.
+//
+// **Measured, and an instruction count would have got it wrong.** Two
+// benchmark cases on one machine give two equations in the two unit
+// costs -- `bgp2` (20,001 opens and 40,500 visits against 2 and 41,000)
+// and `bgp3-selective-last` (1,610 and 4,879 against 2 and ~21,600) --
+// and they solve to **~134 ns per open against ~6.7 ns per visit, a
+// ratio of about 20**. Counting instructions suggests single digits and
+// is wrong by a factor of three, because the cost is memory and not
+// arithmetic: a probe's two binary searches are ~34 *random* accesses
+// into a 165k-element permutation, where a merge's walk is sequential
+// and prefetched. 16 is that crossover with a margin under it, since
+// declining a marginal win costs a fraction and taking a bad merge can
+// cost a whole window.
+//
+// It is deliberately a constant and not a measured quantity: the two
+// costs it relates are properties of the machine, not of the dataset,
+// and a planner that re-derived them per query would pay more than the
+// decision is worth.
+//
+// # What the rule is pessimistic about, deliberately
+//
+// A merge walks its right side only as far as the *largest* join value
+// the left side produces -- when the left side is spent the BGP ends and
+// the rest of the window is never touched. So `r` is an upper bound that
+// the data often beats, sometimes by orders of magnitude
+// (`bgp2-narrow-left` in bench/ walks 6 facts of a 20,500-fact window).
+//
+// The planner cannot use that. Where a left value lands inside the right
+// window is a property of the ids, and ids are assigned by first
+// mention; nothing in a pattern predicts it. So the rule prices the
+// worst case, which is a full walk, and accepts that it declines some
+// merges that would have been cheap.
+MERGE_SCAN_PRICE :: 16
+
+// plan_merge decides the merge join, and declining is the default.
+//
+// `costs` is join_order's own per-pattern candidate count, reused rather
+// than recomputed: it was taken with `snapshot_match`, whose prefix is
+// the pattern's ground components, and Plan_Merge's orders prefix on
+// exactly the same components. The windows differ in order and not in
+// width, so these are the right numbers and they are already paid for.
+@(private = "file")
+plan_merge :: proc(plan: ^Plan_BGP, costs: []int) {
+	plan.merge = {}
+	if len(plan.order) < 2 {
+		return
+	}
+	left := plan.triples[plan.order[0]]
+	right := plan.triples[plan.order[1]]
+
+	// Exactly one shared variable, at exactly one position on each side.
+	// Counting pairs rejects both disqualifying shapes at once: two
+	// shared variables, and one variable repeated inside a pattern
+	// (`?s b:knows ?s`), which would make "the" join value ambiguous.
+	slot, left_pos, right_pos, shared := -1, -1, -1, 0
+	for i in 0 ..< 4 {
+		if !plan_ref_is_var(left[i]) {
+			continue
+		}
+		for j in 0 ..< 4 {
+			if !plan_ref_is_var(right[j]) || right[j].slot != left[i].slot {
+				continue
+			}
+			slot, left_pos, right_pos, shared = left[i].slot, i, j, shared + 1
+		}
+	}
+	if shared != 1 {
+		return
+	}
+	// A variable shared only in the graph position cannot lead: G is at
+	// key depth 3 in all six orders (RECORD-A-0004). The join would have
+	// to scan for it, which is the case this exists to avoid.
+	if left_pos == QUAD_G || right_pos == QUAD_G {
+		return
+	}
+
+	left_order, left_ok := merge_order_for(left, left_pos)
+	right_order, right_ok := merge_order_for(right, right_pos)
+	if !left_ok || !right_ok {
+		return
+	}
+
+	// The pricing. `l` bounds the rows depth 0 can hand up and `r` is
+	// what the merge reads whether or not they match, so this is the
+	// pessimistic form of "is reading the right side once cheaper than
+	// probing it per row" -- it assumes every left candidate survives
+	// and none of them match. An empty side is left to the nested loop,
+	// which short-circuits it without reading anything.
+	l, r := costs[plan.order[0]], costs[plan.order[1]]
+	if l == 0 || r == 0 || r >= MERGE_SCAN_PRICE * l {
+		return
+	}
+
+	plan.merge = Plan_Merge {
+		active      = true,
+		slot        = slot,
+		left_order  = left_order,
+		right_order = right_order,
+		left_pos    = left_pos,
+		right_pos   = right_pos,
+	}
+}
+
+// merge_order_for names the permutation that reads `t` with the variable
+// at `pos` leading: every ground component of the triple first, then
+// `pos`. Maximising the prefix is what keeps the window as narrow as
+// `choose_order` would have made it, and since the six orders are the
+// six permutations of S/P/O such an order always exists for a `pos`
+// that is not G.
+@(private = "file")
+merge_order_for :: proc(t: Plan_Triple, pos: int) -> (order: record.Order, ok: bool) {
+	depth := -1
+	for candidate in record.Order {
+		key := record.order_key(candidate)
+		at := -1
+		leadable := true
+		for k in 0 ..< 3 {
+			component := int(key[k])
+			if component == pos {
+				at = k
+				break
+			}
+			if plan_ref_is_var(t[component]) {
+				leadable = false
+				break
+			}
+		}
+		if !leadable || at <= depth {
+			continue
+		}
+		order, depth, ok = candidate, at, true
+	}
+	return
 }
 
 // plan_destroy frees a plan tree.

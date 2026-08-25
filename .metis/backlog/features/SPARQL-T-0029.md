@@ -1,18 +1,18 @@
 ---
-id: consume-ordered-iteration-for-min
+id: consume-ordered-reads-for-joins-a
 level: task
 title: "Consume ordered reads for joins: a merge join over two named permutations"
 short_code: "SPARQL-T-0029"
-created_at: 2026-08-09T13:15:00.000000+00:00
-updated_at: 2026-08-25T16:10:00.000000+00:00
+created_at: 2026-08-09T13:15:00+00:00
+updated_at: 2026-08-25T17:11:49.294372+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#feature"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -74,12 +74,16 @@ It should be picked up when there is a reason, not on principle.
 - **Business Value**: The deployment shape is ~200 processes per machine and CPU frugality is a first-order requirement, so collapsing a per-row store call to a single sequential merge is the right *kind* of saving. Whether it is a large one here is unknown — see below.
 - **Effort Estimate**: M–L, and larger than the original's "M". The blocker is not the read: it is that this executor has no operator shape to put a merge join in.
 
-## Acceptance Criteria **[REQUIRED]**
+## Acceptance Criteria
 
-- [ ] **Two patterns of one BGP that share a variable, both readable with
+**[REQUIRED]**
+
+- [x] **Two patterns of one BGP that share a variable, both readable with
       that variable leading, are joined by a merge** rather than by
-      probing the second once per row of the first.
-- [ ] **The choice is made at plan time and priced**, not taken whenever
+      probing the second once per row of the first. `Plan_Merge`
+      (`sparql/plan.odin`), executed by `merge_begin`/`merge_position`/
+      `merge_next` in `sparql/exec.odin`.
+- [x] **The choice is made at plan time and priced**, not taken whenever
       it is possible. `SPARQL-T-0037` put `range_len` in the plan builder
       for exactly this kind of decision, and a merge reads *both* windows
       in full where a nested loop reads a narrow probe per row — so a very
@@ -87,21 +91,33 @@ It should be picked up when there is a reason, not on principle.
       original item got right about odin-rdf-store and for a different
       reason**: there, asking for an order could widen the scan; here, the
       scan width is the same either way and what changes is whether the
-      right side is read once or per row.
-- [ ] **Fallback is the current nested loop**, unchanged, wherever the
+      right side is read once or per row. `MERGE_SCAN_PRICE`, and the
+      window-width half of that sentence is now *proven* rather than
+      assumed — see the criterion below and `merge_order_for`.
+- [x] **Fallback is the current nested loop**, unchanged, wherever the
       shape does not allow a merge — which is most shapes. See below.
-- [ ] **No result changes.** 537/537 across 38 directories, before and
-      after. A BGP's solutions are a set; join *strategy* may change what
-      is efficient and must not change what is found.
-- [ ] **A test that the merge path is taken**, not merely available.
-      Results cannot distinguish the two by the criterion above, so this
-      is the only way the task is testable — the same argument that gave
-      `SPARQL-T-0037` its `plan_order` tests, and they are the pattern to
-      copy.
-- [ ] **Bench numbers, from the pinned cases that already exist.** This is
+- [x] **No result changes.** ~~537/537 across 38 directories~~ **546 of
+      556 evaluable entries across 40 directories, 0 mismatches, the same
+      10 RDF/XML entries dark — identical before and after**, and every
+      one of the bench's `solutions` counts unmoved.
+- [x] **A test that the merge path is taken**, not merely available.
+      `sparql/merge_join_test.odin`, six cases built on
+      `join_order_test.odin`'s `plan_order` pattern: `plan_merge_of`
+      asserts `Plan_BGP.merge` directly — that it is taken, that the
+      pricing declines a 20:1 ratio, that two shared variables decline,
+      and **which permutations** were named, since reading the right side
+      as SPOG instead of PSOG would still be a window but would not
+      ascend together. Verified to have teeth rather than passing
+      vacuously: raising `MERGE_SCAN_PRICE` fails the declining case, and
+      the correlated case was instrumented to confirm it re-opens the
+      merge three times.
+- [x] **Bench numbers, from the pinned cases that already exist.** This is
       a change whose entire purpose is cost, so a number is the
       deliverable. `bgp2` and `bgp3` are pinned and are the two cases that
-      would move.
+      would move. Both moved; so did `group`, which was not expected, and
+      `bgp3-selective-last`. One case was **added** — `bgp2-narrow-left`,
+      the declining case, because nothing in the mix measured the half of
+      the pricing rule that says no.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
 
@@ -202,6 +218,132 @@ itself. A real consumer's query shape is better evidence than this
 paragraph.
 
 ## Status Updates **[REQUIRED]**
+
+- **2026-08-25 (evening) — picked up, active.** Owner asked for it on the
+  reading that a merge "can only improve performance, not regress it".
+  **That reading is wrong, and this repository already owns the
+  counter-example**: `bgp3-selective-last`, the case `SPARQL-T-0037`
+  added. Its plan puts `?s b:dept b:d0` first — ~1,667 candidates in
+  `large` — and joins it against `?s a b:Entity`, whose static window is
+  20,000. A nested loop opens 1,610 narrow probes and visits 4,879
+  candidates; an unpriced merge would read the full 20,000-fact window
+  instead, **a 4.4x rise in `candidates` to save 1,610 scan opens**. So
+  the pricing criterion is not polish on top of the merge, it is the half
+  that makes the owner's sentence true, and it lands with it.
+
+  **Baseline, this machine, before any change** (`make test` 288 green;
+  `make bench`, `large`): bgp2 3.199 ms / match 20001 / next 60001 /
+  candidates 40500; bgp3 21.901 ms / 100001 / 280001 / 180500;
+  bgp3-selective-last 0.508 ms / 3221 / 8051 / 4879.
+
+  **Design, and it is smaller than this item predicted.** Two findings
+  against the Implementation Notes above:
+
+  1. **"Either pattern not leadable by the shared variable" is an empty
+     exclusion.** The six orders are the six permutations of S/P/O with G
+     appended, so for any join position there is always an order putting
+     every ground component first and the join variable next — and since
+     `choose_order` maximises the same prefix, **the merge's window is
+     exactly as narrow as the probe's would have been on the left side.**
+     Naming an order costs nothing here. The live exclusions are only:
+     more than one shared variable, a variable repeated inside one
+     pattern, and a variable shared only in G (G is at key depth 3 in
+     every order and can never lead).
+  2. **"There is nowhere to put it" overestimates the surgery.** A merge
+     does fit the depth loop, because what makes it a merge is that the
+     right cursor is *monotone*: both sides ascend in the join variable,
+     so the right side is opened once per BGP run and only ever moves
+     forward. `record.Scan` is a slice cursor held by value, so replaying
+     a group for a duplicate left row is a struct copy, not a re-open and
+     not a buffer. `iter_open[1]` false means "position for this left
+     row" instead of "open a probe", and everything above depth 1 is
+     untouched.
+
+     The monotonicity is also what bounds the scope: a cursor may only
+     move forward if the left side never restarts under it, which is true
+     **only at depth 1**. So the merge fuses the first two patterns in
+     join order and nothing deeper — which is exactly the arithmetic this
+     item already predicted for `bgp3` (~80,002 scans: 2 for the merge,
+     80,000 for the unmergeable `?o` join).
+
+  **Pricing.** Loop cost is `L_rows` scan opens plus the matching facts;
+  merge cost is one open plus the right side's whole static window `R`.
+  Taking `L` (the left window) as the pessimistic `L_rows` and 0 as the
+  pessimistic match count, the merge wins while `R < k * L`, where `k` is
+  the price of a scan open in candidate-visits. `k` is a named constant,
+  chosen from measurement rather than asserted — see the next update.
+
+- **2026-08-25 (evening) — built, measured, green. Ready for review.**
+
+  **Results, `make bench`, this machine, baseline -> merge.** Every
+  `solutions` count is unmoved in both configurations; only cost moved.
+
+  | case (`large`) | match | next | candidates | ms |
+  | --- | --- | --- | --- | --- |
+  | bgp2 | 20001 -> **2** | 60001 -> 40002 | 40500 -> 41000 | 3.199 -> **0.518** |
+  | bgp3 | 100001 -> 80002 | 280001 -> 260002 | 180500 -> 182500 | 21.901 -> 18.516 |
+  | group | 20001 -> **2** | 60001 -> 40002 | 40500 -> 41000 | 5.531 -> **2.527** |
+  | bgp3-selective-last | 3221 -> 1612 | 8051 -> 24815 | 4879 -> 23769 | 0.508 -> 0.396 |
+  | bgp2-narrow-left *(new)* | 5 | 13 | 8 | 0.004 |
+
+  `graph`, `optional`, `order`, `order-limit` and `path` did not move a
+  single count. `make test` is 294 (six new); the W3C corpus is **546
+  passing across 40 directories, 0 mismatches**, identical to baseline.
+
+  **`group` was not predicted and should have been.** Its
+  `?s b:dept ?d . ?s b:rank ?r` is a two-pattern join wearing an
+  aggregate, and it halved. The lesson for the next optimization is that
+  this item's arithmetic enumerated the cases *named* after joins rather
+  than the cases that *are* joins.
+
+  **The pricing constant was measured, and instruction-counting had it
+  wrong by 3x.** The design update above reasoned a scan open at ~34
+  compares against a candidate visit at ~5, so k in single digits, and
+  set 8. Forcing the merge on and solving `bgp2` and `bgp3-selective-last`
+  as two equations in the two unit costs gives **~134 ns per open against
+  ~6.7 ns per visit — a ratio near 20.** The reason is memory, not
+  arithmetic: a probe's two binary searches are ~34 *random* accesses into
+  a 165k-element permutation where a merge's walk is sequential and
+  prefetched. `MERGE_SCAN_PRICE` is **16**: the measured crossover with a
+  margin under it, because declining a marginal win costs a fraction and
+  taking a bad merge costs a whole window.
+
+  At 8, `bgp3-selective-last` was declined and left 22% on the table. It
+  is now taken, and it is the row worth reading twice: **4.9x the
+  candidates and faster anyway.**
+
+  **The declining case had to be built, and the first attempt at it
+  failed in an instructive way.** Nothing in `bench/` exercised a merge
+  being refused, so `bgp2-narrow-left` was added —
+  `b:e0 b:knows ?o . ?o b:name ?name`, a 4-fact left against a
+  20,500-fact right. It was intended to show a timing regression when
+  forced, and it does not: forced, it is *faster*. **A merge walks its
+  right side only as far as the largest join value the left side asks
+  for**, and record assigns dictionary ids in first-mention order, so
+  `b:e0`'s four targets — first mentioned while `b:e0` itself is emitted
+  — hold among the lowest entity ids in the store and sit at the front of
+  the window. Six facts of 20,500 are touched.
+
+  That is a property of the data and nothing in a pattern predicts it, so
+  the planner still prices the full walk and still declines. The case was
+  kept, re-aimed at the **decision** (`match` = 5, not 2) and its comment
+  rewritten to say so. It is the only thing in the repository that fails
+  if `MERGE_SCAN_PRICE` is raised without an argument.
+
+  **Two of this item's Implementation Notes were wrong and are corrected
+  in the code rather than here** (both are argued at their definitions):
+  "not leadable in any of the six orders" is an empty exclusion, and
+  "there is nowhere to put it" overestimated the surgery — the merge sits
+  inside the existing depth loop, because monotonicity is what makes it a
+  merge and `record.Scan` being a value is what makes group replay a
+  struct copy. Effort was M, not M–L.
+
+  **Not done, and deliberately.** Streaming `DISTINCT` and streaming
+  `GROUP BY` stay parked exactly as this item left them — still nothing
+  measures them. A *seeking* merge (galloping into the sorted window
+  instead of walking it) would remove the pessimism the pricing rule has
+  to assume, and it is the concrete case for record's designed-but-unbuilt
+  `Range.Vars`/`VarIter` with `Seek`; it is a further item, not this one.
 
 - **2026-08-09 — Filed from odin-rdf-store while STORE-T-0015 was being
   built**, alongside SPARQL-T-0028 for the estimator half. Blocked on the
