@@ -354,6 +354,7 @@ runners, because nothing here links native code.
 ```sh
 make test    # unit tests, guards, the README examples, the W3C suites
 make check   # vet + strict-style over every package
+make bench   # the benchmarks -- see below, this is two builds
 ```
 
 Or individually:
@@ -368,3 +369,39 @@ odin test tests/readme      -collection:rdf=../odin-rdf-parser -collection:recor
 All three README examples above — the parser quick start, the evaluation
 walk-through, and the query over a validator's candidate — are compiled
 and asserted by `tests/readme`, so they cannot drift from the real API.
+
+## Benchmarks
+
+`bench/` is a synthetic corpus and a fixed query mix — one query per
+operator class, from a two-pattern join to a property path — reported one
+line per case. It is a regression instrument rather than a claim about
+real-world cost.
+
+**`make bench` builds and runs the same workload twice, and the two runs
+answer different questions.** Every instrument perturbs what it measures,
+so they are two builds rather than two code paths:
+
+- **Timing.** The plain build: the real path through the engine, the real
+  allocator, nothing wrapped. Best of five after a warm-up. Wall clock
+  only.
+- **Instrumented.** Built with `-define:SPARQL_COUNT_READS=true`, which
+  compiles a tally into the engine's read seam (`sparql/counting.odin`).
+  It reports how many questions evaluating each query asked the store,
+  and **asserts them against pinned integers** in `bench/config.odin`.
+  No timing is taken here and none should be quoted from it.
+
+The pins are the point. A read count is a property of the plan and the
+executor rather than of the machine, so it can be an exact integer that
+fails the build when it moves — which is stricter than any timing
+threshold could be, and is what proved the port to odin-rdf-record moved
+cost rather than behaviour: fourteen of the sixteen pins taken against
+odin-rdf-store reproduce against record to the integer. A pin is not a
+claim that a number must never move, only that it must never move
+unnoticed; re-pinning is a deliberate edit with a reason in the commit.
+
+A read counter cannot see everything, and one verb exists because of it.
+`candidates` is `record.range_len` summed over every window the engine
+opened — what the store was *handed*, where the other verbs count what it
+gave back. record filters a residual pattern inside its own scan loop, so
+without it a query whose window is the entire store looks identical to one
+that read a prefix.

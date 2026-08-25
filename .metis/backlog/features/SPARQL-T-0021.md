@@ -124,3 +124,58 @@ design task and not a patch.
   Note that `results.odin`'s `literals_equivalent` already compares language tags with `strings.equal_fold`, so the harness works around this at comparison time; that workaround is what the fix would make unnecessary.
 
 - **2026-08-05 — Created at SPARQL-I-0002's exit verification (SPARQL-T-0019)**, which characterized these two as term-identity rather than evaluation failures.
+
+- **2026-08-25 — Re-read after the port to odin-rdf-record (SPARQL-I-0003,
+  SPARQL-T-0039). The two halves have moved in opposite directions, and
+  neither moved the way this item predicted.**
+
+  **The language-tag half is closed for this repository, and not by the
+  parser.** This item traced the fix carefully to `literal_lang` /
+  `literal_dir_lang` in odin-rdf-parser, on the grounds that folding anywhere
+  else leaves two notions of identity in one family. **odin-rdf-record folded
+  it instead**, for its own reasons: its canonical term encoding lowercases a
+  language tag on intern, so `"x"@EN` and `"x"@en` are one term. The forcing
+  case named above — the single `dawg-lang-3` entry — **now passes, and for
+  the right reason**: RDF 1.1 Concepts §3.3 says the value space of language
+  tags is lower case, and the DAWG entry expects exactly this match.
+  `sparql10-expr-builtin` was enabled as a consequence (+25 entries, +1
+  directory, `SPARQL-T-0033`).
+
+  The analysis was right about *what* needed to happen and wrong about *where*
+  it would happen, and the difference still matters family-wide: `rdf.equal`
+  in odin-rdf-parser continues to report `@EN` != `@en`, so the two-notions-
+  of-identity concern this item raised is **narrowed rather than resolved** —
+  it no longer bites this engine, because everything here compares through
+  record's ids, and it would still bite a consumer comparing `rdf.Term`s
+  outside a store. odin-rdf-shacl reached the same position on 2026-08-20.
+  **The parser-side decision is left open on purpose and is the family's, not
+  this repository's.** The concrete cost of leaving it open is now one
+  workaround: `results.odin`'s `literals_equivalent` still compares with
+  `strings.equal_fold`, which this item predicted the fix would make
+  unnecessary, and which is still there.
+
+  **The IRI half is unchanged in its decision and wrong in its diagnosis.**
+  "Do nothing, permanently" stands — RFC 3987 Simple String Comparison, and
+  normalizing to pass a test would take the family out of RDF 1.1 conformance.
+  But `sparql10-i18n/normalization-02`, the entry cited for it, **is not
+  failing for that reason.** Measured directly at `SPARQL-T-0033`: the SPARQL
+  parser leaves `eXAMPLE://a/./b/../b/%63/%7bfoo%7d#xyz` as written while
+  odin-rdf-parser's Turtle parser resolves it to
+  `eXAMPLE://a/b/%63/%7bfoo%7d#xyz`. **Two parsers in one family, two answers,
+  no store involved** — a dot-segment resolution disagreement, which is a
+  question about RFC 3986 reference resolution rather than about IRI
+  equivalence. That is a genuine internal inconsistency and it is not what
+  this item is about. It is recorded in `tests/w3c/README.md` and
+  `eval_test.odin`'s header; whether it becomes its own item is the family's
+  call.
+
+  **Two term-identity properties record introduced were checked and cost
+  nothing**, which is worth recording because they were the port's live risks:
+  a non-canonical numeric lexical form is a distinct term from the inlined
+  canonical one (no mismatch anywhere traces to it), and an inlineable literal
+  is always resolvable even when absent from the data (invisible in the
+  corpus; visible in `bench/` as two `GROUP BY` read-count pins, and there it
+  is an improvement).
+
+  Left open, with its scope reduced to the family-wide `rdf.equal` question
+  and its SPARQL-side forcing cases gone.

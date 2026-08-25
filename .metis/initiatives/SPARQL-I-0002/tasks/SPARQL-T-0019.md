@@ -181,7 +181,14 @@ than a class — so `unify_quad` still over-fetches and filters, with the
 comment there re-aimed; and **STORE-T-0015/0018** (ordered iteration and
 cardinality estimates, the planner surface) are what SPARQL-T-0037 and
 SPARQL-T-0038 consume from record's `snapshot_match_as` and `range_len`,
-which exist. **STORE-T-0016** (the graph list and a graph's terms) and
+which exist. *(Corrected 2026-08-25 by those two tasks' outcomes, which
+were not yet known when this was written: **only one of the pair was
+consumable.** `range_len` was — an exact O(1) count, better than the
+estimate STORE-T-0018 asked for, and `join_order` orders a BGP with it.
+`snapshot_match_as` exists and **cannot be used**: record's id order is
+not SPARQL's `ORDER BY` order, and no plan can establish when the two
+agree, so STORE-T-0015's capability is available here and inert. That
+is SPARQL-T-0038, closed as evidence.)* **STORE-T-0016** (the graph list and a graph's terms) and
 **STORE-T-0019** (snapshot reads) were both built in odin-rdf-store
 (`graphs`/`nodes`, and the transactions this engine adopted in
 SPARQL-T-0024); on record, a snapshot *is* the dataset, and there is no

@@ -202,7 +202,7 @@ SPARQL's order for the same fixture. Together they are a guard: if someone
 later takes the streaming path on the grounds that "record's ids are
 ordered", these fail with the reason attached.
 
-`make test` 289 tests, 537/537 unchanged.
+`make test` 286 tests, 537/537 unchanged. *(This line said 289 when written and was wrong — counted, not summed. The commit message carries the same slip; the number is 286.)*
 
 ### The decision this needs
 

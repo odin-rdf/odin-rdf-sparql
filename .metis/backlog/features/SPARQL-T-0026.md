@@ -11,11 +11,11 @@ archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
+  - "#phase/completed"
   - "#feature"
 
 
-exit_criteria_met: false
+exit_criteria_met: true
 initiative_id: NULL
 ---
 
@@ -130,3 +130,32 @@ a pattern and is the natural place to keep that shape.
 ## Status Updates **[REQUIRED]**
 
 - **2026-08-09 — Created from odin-rdf-store `STORE-T-0017`**, which landed the store half and left this one unfiled. The store's own close-out records that nothing observable changes until this task exists; it now does.
+
+- **2026-08-25 — Closed, not done** (SPARQL-I-0003, §12). This item asked the
+  engine to build `store.NAMED_GRAPHS` in the graph position of a match
+  pattern, so that `GRAPH ?g { … }` would stop over-fetching the default
+  graph and filtering it out in `unify_quad`. **The sentinel left with
+  odin-rdf-store**, which this engine no longer depends on, so the item cannot
+  be done as written and is closed rather than re-pointed.
+
+  **The problem it names is real and survives; its shape on odin-rdf-record is
+  different and harder.** record has `Filter.graphs`, a *set* of graph ids —
+  which serves `FROM NAMED` well, and is a better fit for that than the store
+  ever had — but **"every graph that has a name" is not expressible at all**.
+  It is not a set the engine can enumerate cheaply and, more fundamentally,
+  `RECORD-A-0004` keeps G out of every prefix, so there is no equivalent of the
+  trick that made the store's answer free: `DEFAULT_GRAPH` carried the highest
+  kind tag, so in a graph-first index the named graphs were a prefix and the
+  default graph was the tail, and kvstore answered by *ending the scan*
+  instead of filtering it. record has no graph-first index to end.
+
+  So the over-fetch this item wanted removed is still there, and
+  `unify_quad`'s post-filter (`sparql/exec.odin`) still carries the comment
+  saying so, now naming record's constraint instead of the store's. It is the
+  same family of cost as SPARQL-I-0003 §12's `GRAPH <g> { … }` scan and it is
+  filed with that evidence by `SPARQL-T-0039` — one note about G never being a
+  prefix, with two consumer-side consequences, rather than two notes.
+
+  All five of its acceptance criteria were open and none was ever implemented;
+  `store.NAMED_GRAPHS` never appeared in this repository outside a comment,
+  which is why the port did not have to unpick anything.
