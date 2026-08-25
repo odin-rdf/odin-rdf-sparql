@@ -155,4 +155,46 @@ to know that as a failure with a reason, not as a quietly shorter suite.
 
 ## Status Updates
 
-*To be added during implementation*
+
+### 2026-08-25 — handed forward from SPARQL-T-0032
+
+**The harness is the last package naming `store:`.** It is listed as
+`PENDING` in the Makefile; `make test` names it and skips it. Delete
+`PENDING`, its comment and both of its uses when this lands, and drop
+the "partial suite" note from `ci.yml`'s test step.
+
+**Two bridge packages go with it**: `tests/smoke` (the record plumbing's
+own test, from SPARQL-T-0030) and `tests/portcheck` (one query of every
+operator shape under the leak checker, from SPARQL-T-0031, written
+because the port otherwise left nothing running the engine). Both say so
+in their own headers. `ci.yml`'s record-pin argument no longer rests on
+`tests/smoke` — SPARQL-T-0031 moved it onto the engine — so deleting
+them costs nothing there.
+
+**The harness's store code is `dataset.odin`**, which is the file to
+rewrite; `eval_runner.odin` and `readers_test.odin` name the query API.
+The patterns that worked are in `sparql/testkit_test.odin` (a `Test_DB`
+over `Mem_FS`, a snapshot pinned once after the last load, one query
+driver with the renderer passed in) and `tests/guards/guard_db.odin` (the
+same with the allocator chosen by the caller). A W3C dataset loads
+several documents into several graphs, which is `graph_scope_test.odin`'s
+shape: one `apply` per graph, each with its own `blank_prefix`.
+
+**Three record facts a harness will meet that odin-rdf-store hid**, all
+of them already costed elsewhere in this initiative:
+
+- **A changeset is a delta.** `apply` refuses an assert of a quad that is
+  already live with `.Already_Live` at the offending op. A fixture
+  written as "the whole document again" fails where LMDB's idempotent
+  insert accepted it.
+- **`ingest` emits a document's set**, so a document stating one triple
+  twice loads. That is what record `v0.2.0` bought.
+- **Term identity differs in two places that touch value semantics**:
+  language tags fold to lowercase on intern, and a non-canonical numeric
+  lexical form (`"01"^^xsd:integer`) is a *different term* from the
+  inlined canonical one. If an evaluation entry moves, look here first —
+  and note that these are the two the initiative predicted.
+
+**`query_error` does not exist** and neither does `query_init_txn`; the
+AST type is `sparql.Parsed_Query` and the prepared query is
+`sparql.Query`. See SPARQL-T-0031's Status.
