@@ -255,8 +255,20 @@ worth stating as satisfied rather than dropped:
   criterion the finding lands on.
 - **"No result changes."** 537/537 across 38 directories, unchanged.
 
-**`SPARQL-T-0029` is closed with it**, having been superseded by this
-task and then blocked by the same finding.
+~~**`SPARQL-T-0029` is closed with it**, having been superseded by this
+task and then blocked by the same finding.~~ **Corrected 2026-08-25,
+later the same day: that was too broad, and `SPARQL-T-0029` is reopened.**
+This task's finding kills every use of an ordered read that needs the ids
+to *mean* something — `ORDER BY`, `MIN`/`MAX`, top-N — and says nothing
+about uses needing only a **consistent total order**. `SPARQL-T-0029`
+had parked one of those under "Deliberately out of scope": a **merge
+join**, which needs both inputs sorted on the join variable by the same
+order and does not care what the order signifies. Streaming `DISTINCT`
+and `GROUP BY` are in the same position. Closing that item here conflated
+"an ordered read" with "a read ordered the way SPARQL sorts"; it is
+reopened at P2, rescoped to the merge join, and needs nothing new from
+record. **Nothing in this task's own finding changes** — the three
+operators it is about are still blocked, permanently.
 
 **What T-0039 files with record**, alongside the §12 GRAPH numbers: this
 is the second consumer-side cost of a record design decision found by this

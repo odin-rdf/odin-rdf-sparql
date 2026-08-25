@@ -901,10 +901,16 @@ around** (`RECORD-T-0026`, `RECORD-T-0027`):
 - `GRAPH <g> { … }` is a scan (`RECORD-A-0004`) — 169,055 candidates for
   4,122 answers, the whole store, and the only benchmark case that got
   slower.
-- The ordered read has no safe instance (`RECORD-A-0001`'s id scheme).
-  `snapshot_match_as` exists, is well designed, and cannot be used,
-  because record's id order is not SPARQL's and no plan can prove when
-  they agree.
+- The ordered read has no safe instance **for ordering semantics**
+  (`RECORD-A-0001`'s id scheme). `snapshot_match_as` exists, is well
+  designed, and cannot answer `ORDER BY`, `MIN`/`MAX` or top-N, because
+  record's id order is not SPARQL's and no plan can prove when they
+  agree. *(Scoped 2026-08-25, later the same day: this bullet said
+  "cannot be used" and that was too broad. `snapshot_match_as` is
+  perfectly usable by anything needing only a **consistent total
+  order** — a merge join, clustering for `DISTINCT`/`GROUP BY` — none of
+  which the `SPARQL-T-0038` proof touches. `SPARQL-T-0029` was closed on
+  that conflation and has been reopened and rescoped to the live half.)*
 
 **What it gained**: triple terms, both stored (`RECORD-I-0004`, `v0.4.0`
 cut for this consumer) and *cheaper* to take apart than they were; join

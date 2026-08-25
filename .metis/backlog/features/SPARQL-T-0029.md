@@ -1,47 +1,50 @@
 ---
 id: consume-ordered-iteration-for-min
 level: task
-title: "Consume ordered iteration: MIN/MAX in one read, and an ORDER BY that streams"
+title: "Consume ordered reads for joins: a merge join over two named permutations"
 short_code: "SPARQL-T-0029"
 created_at: 2026-08-09T13:15:00.000000+00:00
-updated_at: 2026-08-09T13:15:00.000000+00:00
+updated_at: 2026-08-25T16:10:00.000000+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/completed"
+  - "#phase/backlog"
   - "#feature"
 
 
-exit_criteria_met: true
+exit_criteria_met: false
 initiative_id: NULL
 ---
 
-# Consume ordered iteration: MIN/MAX in one read, and an ORDER BY that streams
+# Consume ordered reads for joins: a merge join over two named permutations
 
 ## Objective **[REQUIRED]**
 
-Four operators in this engine pay for an order the store already has.
-odin-rdf-store now guarantees it and lets it be asked for
-(STORE-T-0015, 2026-08-09):
+**Rewritten 2026-08-25.** This item was filed against odin-rdf-store's
+`match_order`/`match_orderable`/`match_ordered` and asked for four things.
+Three of them are dead: `MIN`/`MAX` in one read, a streaming `ORDER BY`,
+and an `ORDER BY … LIMIT n` that stops all need odin-rdf-record's id order
+to agree with SPARQL's, and `SPARQL-T-0038` proved it does not and that no
+plan can tell when it might. That half is closed and stays closed — see
+the 2026-08-25 Status entries below, both of them.
 
-```odin
-match_order(pattern) -> [4]int          // the order match yields this pattern in
-match_orderable(pattern, lead) -> bool  // can it lead with that position?
-match_ordered(ds, pattern, lead)        // stream ordered by one position
-```
+**The fourth thing is alive, and closing this item on the third was a
+mistake.** The original parked merge joins under "Deliberately out of
+scope", and they are *not blocked by the id-order finding*: a merge join
+needs both inputs sorted on the join variable **by the same order**, and
+any consistent total order will do. The ids never have to mean anything.
+That is the whole difference between this task and `SPARQL-T-0038`, and it
+is worth stating once at the top because the two were conflated for most
+of a day.
 
-The order is ascending in the four positions taken in the reported
-permutation, Term_IDs compared as integers. It is **per pattern** and **a
-function of the pattern alone** — knowable at plan time, before anything
-is read, which is what makes it usable here.
-
-**This task was filed from the store side while building it**, so the
-capability's shape is validated by a consumer rather than assumed by its
-author. It is the second half of the planner surface; SPARQL-T-0028 is the
-first (cardinality estimates), and the two interact — see below.
+**It is buildable today and needs nothing from record.**
+`snapshot_match_as(snap, p, order)` returns `Range.main = ids[lo:hi]` — a
+slice of a stored permutation — so the facts in a window are sorted by
+that order's full key. Read `?s :p ?x` as `.PSOG` and `?x :q ?y` as
+`.PSOG`, and both windows ascend in the variable they share.
 
 ## Backlog Item Details **[CONDITIONAL: Backlog Item]**
 
@@ -49,92 +52,145 @@ first (cardinality estimates), and the two interact — see below.
 - [x] Feature - New functionality or enhancement
 
 ### Priority
-- [x] P1 - High (important for user experience)
+- [x] P2 - Medium
 
-The store item was P1 because four operators independently asked for it.
-The same reasoning lands here, where the operators are.
+**Demoted from P1**, deliberately. The P1 came from four operators
+independently wanting the surface; three of those four are gone. What
+remains is one optimization with a plausible but *unmeasured* payoff, in
+an engine that is correct and fast enough that no consumer has complained.
+It should be picked up when there is a reason, not on principle.
 
 ### Business Justification **[CONDITIONAL: Feature]**
-- **User Value**: Aggregates and sorts over large datasets stop costing memory proportional to the answer.
-- **Business Value**: Closes the largest gap between "correct" and "usable at scale" in this engine. Nothing in the corpus measures it, which is part of the problem — see Risk Considerations.
-- **Effort Estimate**: M, and separable: the MIN/MAX half is small and self-contained, the streaming-ORDER BY half touches the operator tree.
+- **User Value**: A two-pattern join stops opening one index scan per row.
+- **Business Value**: The deployment shape is ~200 processes per machine and CPU frugality is a first-order requirement, so collapsing a per-row store call to a single sequential merge is the right *kind* of saving. Whether it is a large one here is unknown — see below.
+- **Effort Estimate**: M–L, and larger than the original's "M". The blocker is not the read: it is that this executor has no operator shape to put a merge join in.
 
 ## Acceptance Criteria **[REQUIRED]**
 
-- [ ] **MIN/MAX over a plain variable is one read.** `MIN(?o)` over a group whose pattern can be ordered by that variable's position takes the first quad of `match_ordered` instead of passing over the group. `sparql/aggregate.odin`.
-- [ ] **ORDER BY on a stored term streams when it can.** `Plan_Order` is blocking today because the last solution may sort first; over an input already ordered by the sort key it is a pass-through. The plan must decide this from `match_order`/`match_orderable` at build time, never from the data.
-- [ ] **`ORDER BY … LIMIT n` stops after n** when the input is ordered — the top-N case, which today sorts everything to return ten rows.
-- [ ] **Every one of these is a fallback, not a requirement.** When the order is refused the operator does exactly what it does today. `match_orderable` answers from the pattern, so the choice is made once at plan time and never mid-stream.
-- [ ] **No result changes.** The whole vendored corpus green at both `Term_ID` widths — 512 entries across 37 directories. `sparql10-sort` and `sparql11-aggregates` are the directories that would notice, and both are enabled.
-- [ ] A test that the streaming path is *taken*, not merely available: results alone cannot distinguish it, since by the criterion above they are identical either way.
+- [ ] **Two patterns of one BGP that share a variable, both readable with
+      that variable leading, are joined by a merge** rather than by
+      probing the second once per row of the first.
+- [ ] **The choice is made at plan time and priced**, not taken whenever
+      it is possible. `SPARQL-T-0037` put `range_len` in the plan builder
+      for exactly this kind of decision, and a merge reads *both* windows
+      in full where a nested loop reads a narrow probe per row — so a very
+      selective left side should still probe. **This is the same trade the
+      original item got right about odin-rdf-store and for a different
+      reason**: there, asking for an order could widen the scan; here, the
+      scan width is the same either way and what changes is whether the
+      right side is read once or per row.
+- [ ] **Fallback is the current nested loop**, unchanged, wherever the
+      shape does not allow a merge — which is most shapes. See below.
+- [ ] **No result changes.** 537/537 across 38 directories, before and
+      after. A BGP's solutions are a set; join *strategy* may change what
+      is efficient and must not change what is found.
+- [ ] **A test that the merge path is taken**, not merely available.
+      Results cannot distinguish the two by the criterion above, so this
+      is the only way the task is testable — the same argument that gave
+      `SPARQL-T-0037` its `plan_order` tests, and they are the pattern to
+      copy.
+- [ ] **Bench numbers, from the pinned cases that already exist.** This is
+      a change whose entire purpose is cost, so a number is the
+      deliverable. `bgp2` and `bgp3` are pinned and are the two cases that
+      would move.
 
 ## Implementation Notes **[CONDITIONAL: Technical Task]**
 
-### Technical Approach
+### What it would actually buy, arithmetically
 
-**The plumbing is the same seam SPARQL-T-0028 opens.** `Plan_Builder`
-carries `find: Term_Finder` and its `rawptr`; the estimator joins it there,
-and so do these. The `sparql` package must go on naming no backend.
+Predictions to be measured, **not claims** — and deliberately worked out
+here because the first estimate this session produced was wrong by four
+orders of magnitude.
 
-**Where the order is refusable, and it is not a corner.** Every store
-index is graph-first, so with the graph bound any of subject/predicate/
-object can lead, and **with the graph unbound only the graph can**. That
-is every pattern inside a `GRAPH ?g { … }`, since plan building puts an
-unbound slot in the graph position there (`Plan_Graph_Bind`,
-SPARQL-T-0020). So the streaming paths apply to default-graph patterns and
-not inside a GRAPH clause, and the fallback is not a rare branch — it is
-half the queries. Write it first.
+**`bgp2` is the case that would move**: `?s a b:Entity . ?s b:name ?name`,
+both patterns leadable by S, joined on ?s. Today it opens **20,001 scans**
+for 20,000 solutions — one per row of the left side. A merge opens **two**.
+`next` should roughly halve (60,001 today; a merge reads each window once,
+so ~40,000), and **`candidates` should barely move at all**, because both
+windows are read in full either way. That the three verbs move by wildly
+different factors is the point of having three.
 
-**The trade this task must not get wrong, and the reason it needs
-SPARQL-T-0028.** Asking for an order can *widen* the scan. The store's
-worked case is `{g, :s, ?p, ?o}` ordered by object: only gosp can lead
-with the object, and its bound prefix is the graph alone, where the
-ordinary match uses gspo and narrows to one subject. So `MIN(?o)` over a
-subject-bound pattern is one read of a wider scan, and whether that beats
-reading the narrow scan and taking the minimum depends on how many quads
-the narrow one has — which is exactly what `estimate` answers. **Doing
-this task without the estimator risks making MIN slower on the shape it
-was meant to speed up.** Sequence it after SPARQL-T-0028, or gate the
-MIN/MAX rewrite on an estimate.
+**`bgp3` would move much less than it first appears.** `?s a b:Entity .
+?s b:knows ?o . ?o b:name ?name` — the first two share ?s and can merge,
+but the third joins on ?o, and **a merge join's output is sorted by its
+join variable**, so the ?o join cannot merge without a re-sort. Expect
+~80,002 scans against 100,001 today: **a fifth off, not the collapse a
+casual reading suggests.** Left-deep merge chains only stay merges while
+consecutive joins share the same variable.
 
-**Deliberately out of scope, and why.** The store item's evidence log
-named two more consumers:
+That asymmetry is the honest summary of this task: it is a large win on
+the simplest join shape and a modest one on the next-simplest.
 
-- **Merge joins.** Two ordered streams on a shared variable, instead of
-  nested index probes. It needs a planner with alternatives to choose
-  between, which needs both halves of this surface adopted first. A task
-  of its own, once there is something to measure.
-- **Streaming DISTINCT.** Deduplication retains a key per distinct row —
-  the one place the streaming path allocates (`exec.odin`). Over an
-  ordered stream it is a comparison with the previous row. Small, but it
-  requires the *solution* sequence to be ordered, not just one pattern's
-  quads, which is only true in narrow cases. Worth its own look rather
-  than a line in this one.
+### Where it does not apply, which is most places
+
+- Either pattern not leadable by the shared variable in any of the six
+  orders. `choose_order` is free to be overridden by `snapshot_match_as`,
+  so this is rarer than it was on odin-rdf-store — **any order answers any
+  pattern**, only the window width differs — but a wider window may cost
+  more than the merge saves, which is what the pricing criterion is for.
+- More than one shared variable, or a shared variable that is not a single
+  position.
+- Anything past the first join in a chain that changes join variable.
+- `GRAPH ?g { … }`, where the graph is an unbound slot — though note this
+  is *not* the blanket exclusion the original item described, because G is
+  never a leading component here anyway (`RECORD-A-0004`); it is residual,
+  and the triple positions order normally. The one place record's
+  G-residual design makes something *easier*.
+
+### The real cost: there is nowhere to put it
+
+`sparql/exec.odin` evaluates a BGP as a depth-indexed nested loop —
+`probe_pattern` substitutes the row's bindings at depth *d* and opens a
+scan per surviving row from *d-1*, with `Plan_BGP.order` deciding only the
+sequence. A merge join is a different operator shape: two cursors advanced
+in step, neither driven by the other. It does not fit inside the depth
+loop and would be a plan node beside it, which is why the estimate is M–L
+rather than the original's M.
+
+### Same family, still parked, and now with an argument
+
+The original parked **streaming DISTINCT** beside merge joins. It survives
+the same way and for the same reason — deduplication over a stream
+clustered by the row's key is a comparison with the previous row instead
+of a retained key per distinct row, and *clustering needs a total order,
+not SPARQL's order*. **Streaming GROUP BY** belongs with it and was never
+listed: aggregation over an input clustered by the group key needs no
+group table.
+
+Both stay parked, and the reason is now evidence rather than instinct:
+**nothing measures them.** The corpus has no high-cardinality `GROUP BY`,
+and `bench/`'s `group` case has twelve groups — its 40,012 `load` is
+`bindable_id` resolving aggregate results, not the group table, so
+streaming the aggregation would save approximately nothing there. Worth
+their own item when a workload asks; not worth carrying inside this one.
 
 ### Dependencies
 
-- **odin-rdf-store v0.6.0** — none of these procedures exist in `v0.5.0`,
-  which CI pins. The pin bump lands in the same commit, the sequencing
-  SPARQL-T-0025 and SPARQL-T-0026 recorded.
-- **SPARQL-T-0028** for the estimator, per the trade above.
-- SPARQL-T-0026 wants the same release; the three should land together
-  rather than bumping the pin three times.
+**None.** `snapshot_match_as` is in odin-rdf-record `v0.4.0`, which is
+already the pin. This item's old dependency list — odin-rdf-store v0.6.0,
+and `SPARQL-T-0028` for the estimator — is void: the store is gone, and
+`SPARQL-T-0028` was superseded by `SPARQL-T-0037`, which already put the
+costing input (`range_len`) in the plan builder.
+
+Note that record's `Range.Vars(depth)` / `VarIter` — the sorted-distinct-
+values-with-`Seek` view `api.md` §12.3 sketches for leapfrog triejoin — is
+**designed but not built**. Nothing here needs it; a leapfrog join would,
+and that is a further item again.
 
 ### Risk Considerations
 
-**This engine has no benchmarks** — recorded here because it is the
-binding constraint on the whole task. Every claim above is about *cost*,
-the corpus measures only correctness, and there is no bench target in this
-repository to catch a change that is correct and slower. Standing up
-something minimal is arguably a prerequisite rather than a nice-to-have,
-and the store has `make bench` to copy the shape from.
+**"No result changes" is the real one.** A BGP's solutions are a set and
+join strategy must not change them. `SPARQL-T-0037` ran the same risk when
+it reordered patterns and the corpus held, which is some evidence the
+evaluator has no order-dependence — but reordering probes and replacing
+the join algorithm are different exposures, and `sparql10-bnode-coreference`
+and the OPTIONAL directories are still where a failure would show.
 
-**The failure mode to watch is a plan that streams when it must not.**
-`Plan_Order` is blocking for a reason, and the whole of this task is
-deciding when it need not be. The decision must come from the plan — the
-pattern's declared order and the sort key — and never from an observation
-about the rows seen so far. A test that pins *which path was taken* is the
-guard, which is why it is an acceptance criterion.
+**Do not build it because it is buildable.** The engine is green and no
+consumer has asked. `bgp2`'s 20,001-scans-for-two is a good number to point
+at, but it is a synthetic case in a benchmark this repository wrote for
+itself. A real consumer's query shape is better evidence than this
+paragraph.
 
 ## Status Updates **[REQUIRED]**
 
@@ -169,3 +225,28 @@ guard, which is why it is an acceptance criterion.
   `ORDER BY` ordering. Proven and guarded in
   `sparql/order_id_gap_test.odin`; filed as evidence on record's backlog by
   `SPARQL-T-0039`, beside the §12 GRAPH note.
+
+- **2026-08-25 (later the same day) — reopened and rewritten. The closure
+  above was too broad, and this is the correction.**
+
+  The supersession entry is accurate about what it covers and stops one
+  consumer short. `SPARQL-T-0038` proved that record's id order is not
+  SPARQL's `ORDER BY` order and that no plan can establish when they
+  agree — which kills `MIN`/`MAX` in one read, a streaming `ORDER BY`,
+  and an `ORDER BY … LIMIT n` that stops, all three of which need the ids
+  to *mean* something. It says nothing about the consumers that need only
+  a **consistent total order**, and this item's own "Deliberately out of
+  scope" section named one: **merge joins**. Streaming DISTINCT, parked
+  beside it, is in the same position, and so is streaming `GROUP BY`.
+
+  Closing the whole item on a proof about ordering *semantics* conflated
+  "an ordered read" with "a read ordered the way SPARQL sorts". They are
+  not the same thing, and the distinction is the entire remaining content
+  of this item. Reopened at P2, rescoped to the merge join, with the dead
+  three-quarters recorded above rather than deleted.
+
+  Four documents overclaimed in the same way and were corrected alongside
+  this rewrite: `.metis/vision.md`, the family `CLAUDE.md`,
+  `SPARQL-I-0003`'s closing Status, and `RECORD-T-0027` on
+  odin-rdf-record's backlog. All four now say the ordered read is unusable
+  *for ordering semantics* rather than unusable.
