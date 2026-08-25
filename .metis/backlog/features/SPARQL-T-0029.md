@@ -11,11 +11,11 @@ archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
+  - "#phase/completed"
   - "#feature"
 
 
-exit_criteria_met: false
+exit_criteria_met: true
 initiative_id: NULL
 ---
 
@@ -141,3 +141,31 @@ guard, which is why it is an acceptance criterion.
 - **2026-08-09 — Filed from odin-rdf-store while STORE-T-0015 was being
   built**, alongside SPARQL-T-0028 for the estimator half. Blocked on the
   store's v0.6.0, which SPARQL-T-0026 also waits for.
+
+- **2026-08-25 — Superseded by `SPARQL-T-0038`, and then closed with it as
+  evidence** (SPARQL-I-0003, owner decision). This item was written against
+  odin-rdf-store's `match_order`/`match_orderable`/`match_ordered`, which left
+  with the store. `SPARQL-T-0038` re-specified it against odin-rdf-record's
+  stronger shape — `snapshot_match_as` lets the planner name the permutation
+  outright, and any order answers any pattern — and then found that **the
+  shape of the read was never the blocker**.
+
+  **The blocker is the id space, and it is absolute.** record's ids are
+  ordered but not in SPARQL's order: every dictionary id sorts before every
+  inlined one, and only canonical in-range integers, booleans and dates inline
+  at all. An integer past 2^27, any decimal or float or double, and any
+  non-canonical lexical form are each dictionary terms — so by id the five
+  values 1, 3, 200000000, 2.5 and "007" come back as 200000000, 2.5, 007, 1,
+  3 where `ORDER BY` requires 1, 2.5, 3, 007, 200000000. Each mechanism is
+  fatal alone and each is ordinary data.
+
+  What disqualifies a value is a property of that value, and SPARQL has no
+  static types, so no plan can rule them out from a pattern and a sort key.
+  This item's own premise — that the order is "a function of the pattern and
+  is knowable at plan time" — is true of the *permutation* and false of the
+  *ordering semantics*, and it is the second that this optimization needed.
+
+  Applies to `MIN`/`MAX` identically, since SPARQL defines them over the
+  `ORDER BY` ordering. Proven and guarded in
+  `sparql/order_id_gap_test.odin`; filed as evidence on record's backlog by
+  `SPARQL-T-0039`, beside the §12 GRAPH note.

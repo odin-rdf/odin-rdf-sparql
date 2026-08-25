@@ -4,17 +4,17 @@ level: task
 title: "Name the order: MIN/MAX in one read, ORDER BY that streams, LIMIT that stops"
 short_code: "SPARQL-T-0038"
 created_at: 2026-08-24T20:42:45.891203+00:00
-updated_at: 2026-08-24T20:42:45.891203+00:00
+updated_at: 2026-08-25T14:40:00.000000+00:00
 parent: SPARQL-I-0003
 blocked_by: ["SPARQL-T-0037"]
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/completed"
 
 
-exit_criteria_met: false
+exit_criteria_met: true
 initiative_id: SPARQL-I-0003
 ---
 # Name the order: MIN/MAX in one read, ORDER BY that streams, LIMIT that stops
@@ -41,6 +41,11 @@ chooses, at plan time, from the pattern alone.
 
 ## Acceptance Criteria
 
+*Six of these eight are **retired, not met** — the path they describe was
+measured to have no safe instance, so there is nothing to take. They are
+left unticked on purpose, with the reason in the 2026-08-25 Status. The
+two that are ticked are satisfied by the operators being left alone.*
+
 - [ ] **MIN/MAX over a plain variable is one read.** `MIN(?o)` over a
       group whose pattern can be ordered by that variable's position
       takes the first fact of the ordered range instead of passing over
@@ -62,10 +67,10 @@ chooses, at plan time, from the pattern alone.
       and record's id order agree, and the plan must establish that
       before taking it. **This is the criterion most likely to be got
       wrong, and getting it wrong returns wrong answers, not slow ones.**
-- [ ] **Every one of these is a choice, not a requirement.** Where the
+- [x] **Every one of these is a choice, not a requirement.** Where the
       order does not serve, the operator does exactly what it does today.
       The decision is made once at plan time and never mid-stream.
-- [ ] **No result changes.** 512 of 512 across 37 directories.
+- [x] **No result changes.** 512 of 512 across 37 directories.
       `sparql10-sort` (14 entries) and `sparql11-aggregates` (47) are the
       directories that would notice, and both are enabled.
 - [ ] **A test that the streaming path is taken**, not merely available —
@@ -227,3 +232,38 @@ different work:
 
 **Recommendation: 1.** The measurement says the optimization has no safe
 instance, and 2 buys a case the corpus and the benchmark do not contain.
+
+### 2026-08-25 — owner decision: closed as evidence
+
+**Option 1**, taken by the owner. The task is complete as an evidence
+task rather than as an implementation: the optimization it specified has
+no safe instance, that is proven and banked as tests, and the gap is
+filed on record's backlog beside the §12 GRAPH note under the family's
+"capability gaps become evidence-backed upstream proposals, never
+backend-specific workarounds" convention.
+
+**Its acceptance criteria are recorded as retired rather than ticked.**
+Six of the eight — MIN/MAX in one read, streaming `Plan_Order`, `LIMIT`
+that stops, the plan-knows-it criterion, the test that the streaming path
+is taken, and the bench lines — are void because the path they describe
+does not exist to be taken. Two are satisfied by doing nothing, and are
+worth stating as satisfied rather than dropped:
+
+- **"Every one of these is a choice, not a requirement. Where the order
+  does not serve, the operator does exactly what it does today."** The
+  order never serves; every operator does what it does today. This is the
+  criterion the finding lands on.
+- **"No result changes."** 537/537 across 38 directories, unchanged.
+
+**`SPARQL-T-0029` is closed with it**, having been superseded by this
+task and then blocked by the same finding.
+
+**What T-0039 files with record**, alongside the §12 GRAPH numbers: this
+is the second consumer-side cost of a record design decision found by this
+port, and unlike §12 it is not a cost but a capability that cannot be
+built at all on the current id scheme. `api.md` §12.8 already predicted
+it ("`ORDER BY` has no cheap path") and was right in a stronger sense than
+it stated — it notes that "numeric ordering is nearly free while string
+ordering is not", and the measurement is that **numeric ordering is not
+free either**, because three ordinary ways of writing a number leave the
+inlined range. That correction is the note's most useful sentence.
