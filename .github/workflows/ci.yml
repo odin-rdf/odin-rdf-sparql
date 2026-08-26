@@ -141,6 +141,19 @@ jobs:
       # SPARQL-T-0044 is where `.Set` arrives — the application's graph set
       # as a ceiling on what a query may read.
       #
+      # **`v0.6.0` is the pin since 2026-08-27 (SPARQL-T-0046)**, and it is
+      # the first record bump that changed what this engine *costs* without
+      # changing a line of it: record gained a seventh order, `GPOS`
+      # (RECORD-T-0028 — the application's workspace design fired
+      # RECORD-A-0004's review trigger), and `snapshot_match` chooses it
+      # whenever G is bound, S is not, and O is not bound without P. Every
+      # graph-bound pattern here becomes a prefix read at this pin;
+      # `bench/`'s `graph` case, this repository's own evidence that a
+      # bound graph was a scan (RECORD-T-0026), is re-pinned in
+      # `bench/config.odin` at exactly its answer. `merge_order_for` also
+      # sees the seventh order and selects it when G and P are ground and
+      # the join is on O — a correct, narrower window.
+      #
       # No `python3` step is needed: the cross-implementation verifier is
       # record's own test-suite dependency, not a consumer's. The Windows
       # runner compiles record without its POSIX `File_Ops` — that file is
@@ -153,7 +166,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.5.0
+          ref: v0.6.0
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2

@@ -66,6 +66,8 @@ CASES := []Case {
 	{
 		name = "graph",
 		about = "GRAPH <g1> { ?s ?p ?o } -- the graph-first regression case",
+		// Since record v0.6.0 (SPARQL-T-0046) the regression is gone: G
+		// leads the GPOS order and the window is exactly the graph.
 		text = PREFIX + `SELECT ?s ?p ?o WHERE { GRAPH b:g1 { ?s ?p ?o } }`,
 	},
 

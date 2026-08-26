@@ -83,6 +83,15 @@ CONFIGS := []Config {
 	// `candidates` 20,617 against 169,055 — the whole store, both times.
 	// The expectation is still not asserted anywhere; `candidates` is,
 	// which is the same claim stated as an integer instead of a guess.
+	//
+	// **Re-pinned 2026-08-27 (SPARQL-T-0046), at record v0.6.0.** The
+	// record grew a seventh order, GPOS, and `snapshot_match` leads with
+	// G whenever S is unbound (RECORD-T-0028) — so this case is 4,122
+	// candidates for 4,122 answers at both sizes, and flat across them
+	// as the old store was. Three other cases moved with it, each by
+	// exactly the named graph's 500 facts: a default-graph pattern's
+	// window no longer contains the named graph's facts to filter out.
+	// No solution count and no match/next count moved anywhere.
 	{
 		name = "large",
 		seed = 0x5EED_2040,
@@ -206,22 +215,22 @@ Pin :: struct {
 PINS := []Pin {
 	{config = "small", case_name = "bgp2", solutions = 2000, match = 2, next = 4002, load = 0, find = 3, triple = 0, candidates = 5000},
 	{config = "small", case_name = "bgp3", solutions = 8000, match = 8002, next = 26002, load = 0, find = 4, triple = 0, candidates = 20500},
-	{config = "small", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 20617},
-	{config = "small", case_name = "optional", solutions = 2000, match = 2001, next = 4496, load = 0, find = 3, triple = 0, candidates = 2995},
+	{config = "small", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 4122},
+	{config = "small", case_name = "optional", solutions = 2000, match = 2001, next = 4496, load = 0, find = 3, triple = 0, candidates = 2495},
 	{config = "small", case_name = "group", solutions = 12, match = 2, next = 4002, load = 4012, find = 26, triple = 0, candidates = 5000},
-	{config = "small", case_name = "order", solutions = 2000, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
-	{config = "small", case_name = "order-limit", solutions = 10, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2500},
+	{config = "small", case_name = "order", solutions = 2000, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2000},
+	{config = "small", case_name = "order-limit", solutions = 10, match = 1, next = 2001, load = 2000, find = 1, triple = 0, candidates = 2000},
 	{config = "small", case_name = "bgp3-selective-last", solutions = 180, match = 182, next = 2518, load = 0, find = 5, triple = 0, candidates = 2909},
 	{config = "small", case_name = "bgp2-narrow-left", solutions = 4, match = 5, next = 13, load = 0, find = 3, triple = 0, candidates = 8},
 	{config = "small", case_name = "path", solutions = 1950, match = 1950, next = 9750, load = 0, find = 2, triple = 0, candidates = 7800},
 
 	{config = "large", case_name = "bgp2", solutions = 20000, match = 2, next = 40002, load = 0, find = 3, triple = 0, candidates = 41000},
 	{config = "large", case_name = "bgp3", solutions = 80000, match = 80002, next = 260002, load = 0, find = 4, triple = 0, candidates = 182500},
-	{config = "large", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 169055},
-	{config = "large", case_name = "optional", solutions = 20000, match = 20001, next = 44934, load = 0, find = 3, triple = 0, candidates = 25433},
+	{config = "large", case_name = "graph", solutions = 4122, match = 1, next = 4123, load = 0, find = 1, triple = 0, candidates = 4122},
+	{config = "large", case_name = "optional", solutions = 20000, match = 20001, next = 44934, load = 0, find = 3, triple = 0, candidates = 24933},
 	{config = "large", case_name = "group", solutions = 12, match = 2, next = 40002, load = 40012, find = 26, triple = 0, candidates = 41000},
-	{config = "large", case_name = "order", solutions = 20000, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
-	{config = "large", case_name = "order-limit", solutions = 10, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20500},
+	{config = "large", case_name = "order", solutions = 20000, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20000},
+	{config = "large", case_name = "order-limit", solutions = 10, match = 1, next = 20001, load = 20000, find = 1, triple = 0, candidates = 20000},
 	{config = "large", case_name = "bgp3-selective-last", solutions = 1610, match = 1612, next = 24815, load = 0, find = 5, triple = 0, candidates = 23769},
 	{config = "large", case_name = "bgp2-narrow-left", solutions = 4, match = 5, next = 13, load = 0, find = 3, triple = 0, candidates = 8},
 	{config = "large", case_name = "path", solutions = 19612, match = 19612, next = 98060, load = 0, find = 2, triple = 0, candidates = 78448},

@@ -168,3 +168,8 @@ it.
   engine's is needed, and an empty `.Set` yields no solutions at the
   record; the engine-side short-circuit is belt and braces. Still not
   started.
+- **2026-08-27, later — `v0.6.0` is the pin (`SPARQL-T-0046`)**: record's
+  `GPOS` order makes a G-bound `(P, O)` pattern a prefix window, so the
+  Design's "planner prices the unfiltered window" caveat is now exact
+  per graph for such patterns, and a scoped read over `k` graphs can be
+  `k` seeks. Still not started.

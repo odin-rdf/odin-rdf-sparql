@@ -2283,6 +2283,14 @@ plan_merge :: proc(plan: ^Plan_BGP, costs: []int) {
 // `choose_order` would have made it, and since the six orders are the
 // six permutations of S/P/O such an order always exists for a `pos`
 // that is not G.
+//
+// Since record v0.6.0 (SPARQL-T-0046) there is a seventh order, GPOS,
+// with G leading, and the loop below sees it: it is chosen exactly when
+// G and P are ground and `pos` is O — a correct window, ascending in O
+// within a (G, P) prefix, and narrower than POSG's. A pattern with G,
+// P and O all ground joining on S would find its narrowest window in
+// GPOS at depth 3, which the `0 ..< 3` bound leaves unexplored; that
+// is a measured change to make, not a comment's.
 @(private = "file")
 merge_order_for :: proc(t: Plan_Triple, pos: int) -> (order: record.Order, ok: bool) {
 	depth := -1
