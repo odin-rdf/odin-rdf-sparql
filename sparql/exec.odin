@@ -304,7 +304,7 @@ match_open :: proc(e: ^Exec, pattern: Match_Pattern) -> record.Scan {
 		read_counts.store_ops += 1
 		read_counts.candidates += record.range_len(r)
 	}
-	return record.range_iter(r, record.Filter{origin = .Any})
+	return record.range_iter(r, record.Filter{origin = .Any, scope = .All})
 }
 
 // match_open_as is match_open with the permutation named rather than
@@ -329,7 +329,7 @@ match_open_as :: proc(e: ^Exec, pattern: Match_Pattern, order: record.Order) -> 
 		read_counts.store_ops += 1
 		read_counts.candidates += record.range_len(r)
 	}
-	return record.range_iter(r, record.Filter{origin = .Any})
+	return record.range_iter(r, record.Filter{origin = .Any, scope = .All})
 }
 
 // match_next yields the next matching fact as the engine's own quad.

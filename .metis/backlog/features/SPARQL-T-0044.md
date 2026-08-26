@@ -159,3 +159,12 @@ it.
   engine has no way to receive a graph set, so the record's per-fact
   ceiling is unreachable from SPARQL today (the dataset clauses it also
   ignores were already `SPARQL-T-0043`). Not started.
+- **2026-08-27 — `RECORD-T-0029` landed and `v0.5.0` is the pin
+  (`SPARQL-T-0045`).** `record.Filter` now carries `scope: Graph_Scope`;
+  the two read sites state `.All`. What this settles for the Design
+  above: `query_init` takes `scope: record.Graph_Scope` and
+  `graphs: []record.Term_ID` and passes them through — the record's own
+  type is the unscoped/scoped distinction, so no `Maybe` or flag of this
+  engine's is needed, and an empty `.Set` yields no solutions at the
+  record; the engine-side short-circuit is belt and braces. Still not
+  started.

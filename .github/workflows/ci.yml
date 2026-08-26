@@ -129,6 +129,18 @@ jobs:
       # patch — the same reasoning the retired store pin above gave for its
       # own format break.
       #
+      # **`v0.5.0` is the pin since 2026-08-27 (SPARQL-T-0045)**, and it is
+      # the first record bump that changed this repository's *source* rather
+      # than only what it could load: `record.Filter` gained
+      # `scope: Graph_Scope` with no valid zero, so a `Filter` that does not
+      # state `.All` or `.Set` is refused by `range_iter` at its first read
+      # (RECORD-T-0029 — an empty graph set had been reading every graph or
+      # nothing by allocation history). Three sites here state `.All`: the
+      # two executor read sites and the W3C harness. Not a format change;
+      # nothing in the suites notices beyond those three lines.
+      # SPARQL-T-0044 is where `.Set` arrives — the application's graph set
+      # as a ceiling on what a query may read.
+      #
       # No `python3` step is needed: the cross-implementation verifier is
       # record's own test-suite dependency, not a consumer's. The Windows
       # runner compiles record without its POSIX `File_Ops` — that file is
@@ -141,7 +153,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.4.0
+          ref: v0.5.0
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2

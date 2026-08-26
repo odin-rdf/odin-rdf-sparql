@@ -125,7 +125,7 @@ test_dataset_quads :: proc(td: ^Test_Dataset) -> int {
 	if !pinned {
 		return 0
 	}
-	sc := record.range_iter(record.snapshot_match(snap, {}), record.Filter{origin = .Any})
+	sc := record.range_iter(record.snapshot_match(snap, {}), record.Filter{origin = .Any, scope = .All})
 	n := 0
 	for {
 		if _, ok := record.scan_next(&sc); !ok {
