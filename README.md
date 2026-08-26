@@ -244,6 +244,17 @@ The evaluator's half:
 - The **snapshot is yours**. `query_init` holds it for the query's life
   and `query_destroy` does not release it — see *A query is one snapshot*
   below for why that is the right way round.
+- The **graph set is a ceiling, and it is yours to compute.**
+  `query_init` takes `scope` and `graphs` — record's own `Graph_Scope`
+  and, under `.Set`, resident ids resolved against the same snapshot
+  with misses dropped (`record.MATCH_DEFAULT_GRAPH` for the default
+  graph; never `0`). Every read the query makes carries them, below
+  every operator, so a fact outside the set never reaches a join, a
+  `COUNT`, or a `NOT EXISTS`; `GRAPH <x>` for an x outside the set
+  yields nothing; an empty `.Set` yields no solutions; `.All` is the
+  default and today's behaviour. The slice is copied. Dataset clauses
+  are a different thing — the query's *view* — and when they are
+  honoured they will intersect this ceiling, never widen it.
 - A **term** from `query_term` is valid until `query_destroy`. What that
   costs varies by term and you never have to know which: record hands
   back a borrow of its dictionary arena for most kinds, an owned joined

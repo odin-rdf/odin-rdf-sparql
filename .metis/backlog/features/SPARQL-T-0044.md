@@ -4,15 +4,15 @@ level: task
 title: "A graph set on query_init: the application's ceiling on what a query may read"
 short_code: "SPARQL-T-0044"
 created_at: 2026-08-26T21:10:58.020797+00:00
-updated_at: 2026-08-26T21:10:58.020797+00:00
+updated_at: 2026-08-26T23:11:59.800897+00:00
 parent: 
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/backlog"
   - "#feature"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -116,22 +116,26 @@ threading it through.
   (summed `range_len`) does not move and `next` drops where facts are
   excluded. Every existing pin passes `nil` and is unchanged.
 
-## Acceptance Criteria **[REQUIRED]**
+## Acceptance Criteria
 
-- [ ] `query_init` accepts a graph set of resident ids, with an explicit
+**[REQUIRED]**
+
+- [x] `query_init` accepts a graph set of resident ids, with an explicit
       unscoped form; both read sites pass it; the doc comment states the
       contract above (same snapshot; drop misses; never `0`;
       `MATCH_DEFAULT_GRAPH` for the default graph; the set is a ceiling
       the query text cannot widen; dataset clauses are not affected).
-- [ ] A test with the default graph and two named graphs, set = one of
+- [x] A test with the default graph and two named graphs, set = one of
       them: a BGP sees that graph only; `GRAPH <other> { … }` inside the
       query yields nothing; `GRAPH ?g` binds only the set's graphs;
       `MATCH_DEFAULT_GRAPH` in the set admits the default graph.
-- [ ] An empty scoped set yields no solutions — pinned, and independent
-      of record's `nil`/empty conflation (`RECORD-T-0029`).
-- [ ] 546/546 W3C entries and all `make test` tests unchanged with the
+- [x] An empty scoped set yields no solutions — pinned. *(Independent of
+      the conflation because `RECORD-T-0029` removed it and this engine
+      pins `v0.6.0`; no engine-side short-circuit was built — see the
+      completion note.)*
+- [x] 546/546 W3C entries and all `make test` tests unchanged with the
       unscoped form; read-count pins unchanged.
-- [ ] `make check`'s import-alias grep still clean; `record` only, no new
+- [x] `make check`'s import-alias grep still clean; `record` only, no new
       collection.
 
 ## Implementation Notes
@@ -173,3 +177,66 @@ it.
   Design's "planner prices the unfiltered window" caveat is now exact
   per graph for such patterns, and a scoped read over `k` graphs can be
   `k` seeks. Still not started.
+- **2026-08-27 — Active. Plan**, before code. `query_init` gains
+  `scope: record.Graph_Scope = .All` and `graphs: []record.Term_ID = nil`
+  — the record's own type is the unscoped/scoped distinction
+  (`RECORD-T-0029`), `.All` as the default keeps every call site and
+  today's behaviour, and the ids are **copied** into the query
+  (`q.graphs`, freed by `query_destroy`) so the caller's slice has no
+  lifetime rule. `Exec` carries one `record.Filter` built at
+  `exec_init` and both read sites pass it; nothing else in the engine
+  reads the store through anything but those two (`plan.odin:2115`
+  prices with `range_len` on the unfiltered window, deliberately, and
+  `snapshot_resolve` is unscoped because terms are global). No
+  engine-side short-circuit for an empty set: at the pinned record an
+  empty `.Set` admits nothing, and a second mechanism for one rule is
+  a divergence waiting to happen — the test pins the record's
+  guarantee through this API instead. The test kit's `test_solve` gains
+  the same two optional parameters so a new `scope_test.odin` can drive
+  the cases: a BGP under a one-graph set sees that graph only; `GRAPH
+  <other>` inside yields nothing; `GRAPH ?g` binds only the set's
+  graphs; `MATCH_DEFAULT_GRAPH` in the set admits the default graph; an
+  empty `.Set` yields no solutions; `.All` is today's answer. README's
+  contract bullets and the vision get the new parameter; `SPARQL-T-0043`
+  is told the ceiling it must intersect now has a name.
+- **2026-08-27 — Done.** `query_init(q, algebra, snapshot, base, scope,
+  graphs, allocator)`: `scope := record.Graph_Scope.All`, `graphs:
+  []record.Term_ID = nil`; under `.Set` the ids are copied into
+  `q.graphs` once preparation cannot fail, freed by `query_destroy`.
+  `Exec.filter` is one `record.Filter{origin = .Any, scope, graphs}`
+  built at `exec_init` and passed at both read sites — `match_open`
+  and `match_open_as` — so every read the executor makes carries the
+  ceiling, and `graph_scan_next` (`GRAPH ?g`) inherits it through
+  `match_open(MATCH_ALL)` as predicted. `plan.odin:2115` still prices
+  on the unfiltered window, deliberately.
+
+  **Decided against the engine-side short-circuit for an empty set.**
+  The task was written when record conflated `nil` with empty; at the
+  pinned `v0.6.0` an empty `.Set` admits nothing per fact, and a second
+  mechanism for the same rule in this engine would be one more place
+  for the two to disagree. `test_scope_empty_set_is_empty` pins the
+  record's guarantee *through this API* — with `nil` under `.Set`, and
+  with a set built from a label the store has never seen, which
+  resolves to nothing and leaves a non-nil empty buffer behind it.
+
+  Six tests in `sparql/scope_test.odin`, driven through the test kit's
+  `test_solve` (which gained the two parameters, after `loc` so no
+  positional caller moved): `.All` is today's answer; `GRAPH ?g` ranges
+  over the set's named graphs and the default graph in the set adds
+  nothing to it; `GRAPH <gb>` under `{ga}` yields nothing and under
+  `{ga, gb}` answers; a plain pattern under `{ga}` yields nothing and
+  under `{default, ga}` answers; the empty set is empty; and the set is
+  copied (the caller's slice is overwritten after `query_init` and the
+  answer does not move). One finding: four `tests/guards` sites passed
+  `allocator` positionally as the fifth argument, which the new
+  parameters shift — named now, and a reminder that `query_init`'s
+  trailing defaults are positional to anyone who counts.
+
+  `make check` clean; `make test` green — 202 tests in the package (196
+  + 6), guards 9, harness 73, readme 3, the W3C survey unchanged;
+  `make bench` passes with every read-count pin unmoved, since every
+  existing caller is `.All`. README's contract bullets carry the
+  parameter; the vision's Current State is amended; `SPARQL-T-0043`
+  knows the ceiling it intersects. Not tagged: `v0.2.0` stays the
+  release and whether this warrants one is the owner's call — no
+  consumer pins this engine.

@@ -262,6 +262,8 @@ test_solve :: proc(
 	query: string,
 	render: Row_Renderer,
 	loc := #caller_location,
+	scope := record.Graph_Scope.All,
+	graphs: []record.Term_ID = nil,
 ) -> (
 	rows: [dynamic]string,
 	ok: bool,
@@ -283,7 +285,7 @@ test_solve :: proc(
 	}
 
 	q: Query
-	if !query_init(&q, algebra, snap, parser_base(&p)) {
+	if !query_init(&q, algebra, snap, parser_base(&p), scope, graphs) {
 		testing.expectf(t, false, "query not supported: %s", q.unsupported, loc = loc)
 		query_destroy(&q)
 		return nil, false

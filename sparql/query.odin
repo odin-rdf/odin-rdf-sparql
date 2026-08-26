@@ -36,6 +36,8 @@ package sparql
 
 import "base:runtime"
 
+import "core:slice"
+
 import rdf "rdf:rdf"
 import record "record:record"
 
@@ -61,6 +63,10 @@ Materialized_Term :: struct {
 // back to the executor.
 Query :: struct {
 	snapshot:     record.Snapshot,
+	// The ceiling on what this query may read (SPARQL-T-0044): record's
+	// own Graph_Scope, and under .Set the ids the query owns a copy of.
+	scope:        record.Graph_Scope,
+	graphs:       []record.Term_ID,
 	slots:        Var_Slots,
 	plan:         Plan,
 	exec:         Exec,
@@ -101,17 +107,39 @@ Query :: struct {
 // base is the query's base IRI, which IRI() resolves relative references
 // against (§17.4.2.8); pass sparql.parser_base of the parser the algebra
 // came from. A query with no IRI() call never reads it.
+//
+// **scope and graphs are the ceiling on what the query may read**
+// (SPARQL-T-0044) — the application's, never the query text's. Every
+// read the executor makes carries them as record's `Filter`, so a fact
+// outside the set never reaches an operator: not a join, not a COUNT,
+// not a NOT EXISTS. `GRAPH <x> { … }` inside a scoped query is
+// intersected with the set by record itself and yields nothing for a
+// graph outside it; `GRAPH ?g` ranges over the set's named graphs;
+// constants resolve unscoped, because a term is not a fact. The
+// distinction between "unscoped" and "scoped to nothing" is record's
+// (`Graph_Scope`, RECORD-T-0029): `.All` is today's behaviour and the
+// default, `.Set` with an empty set yields no solutions. The ids are
+// resident ids resolved against **this snapshot** (record.snapshot_resolve),
+// with misses dropped — 0 must never be in the set, since there it means
+// the default graph; `record.MATCH_DEFAULT_GRAPH` names the default graph
+// deliberately. The slice is copied; the caller's has no lifetime rule.
+// Dataset clauses (FROM / FROM NAMED) are unaffected by this parameter —
+// SPARQL-T-0043 is where they are honoured, and when they are, they
+// intersect this ceiling and never widen it.
 query_init :: proc(
 	q: ^Query,
 	algebra: Algebra,
 	snapshot: record.Snapshot,
 	base := "",
+	scope := record.Graph_Scope.All,
+	graphs: []record.Term_ID = nil,
 	allocator := context.allocator,
 ) -> (
 	ok: bool,
 ) {
 	q.allocator = allocator
 	q.snapshot = snapshot
+	q.scope = scope
 	q.materialized = make([dynamic]Materialized_Term, allocator)
 	var_slots_init(&q.slots, allocator)
 
@@ -139,7 +167,13 @@ query_init :: proc(
 	q.plan = plan
 	q.exists_plans = q.builder.exists_plans[:]
 	q.exists_nodes = q.builder.exists_nodes[:]
-	exec_init(&q.exec, plan, &q.slots, snapshot, q.exists_plans, q.exists_nodes, allocator)
+	// The set is copied only once preparation cannot fail any more, so
+	// the failure path above has nothing new to release.
+	if scope == .Set && len(graphs) > 0 {
+		q.graphs = slice.clone(graphs, allocator)
+	}
+	filter := record.Filter{origin = .Any, scope = scope, graphs = q.graphs}
+	exec_init(&q.exec, plan, &q.slots, snapshot, q.exists_plans, q.exists_nodes, filter, allocator)
 	exec_set_base(&q.exec, base)
 	return true
 }
@@ -162,6 +196,7 @@ query_next :: proc(q: ^Query) -> (row: []record.Term_ID, ok: bool) {
 // handed back.
 query_destroy :: proc(q: ^Query) {
 	exec_destroy(&q.exec)
+	delete(q.graphs, q.allocator)
 	plan_destroy(q.plan, q.allocator)
 	for sub in q.exists_plans {
 		plan_destroy(sub, q.allocator)

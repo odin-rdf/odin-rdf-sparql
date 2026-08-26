@@ -145,3 +145,11 @@ Not a blocker there: `GRAPH ?g` answers the same question. It is filed
 because the silent disagreement between (2) and (4) is the kind that
 costs an afternoon, and because the workaround is what a consumer has to
 keep writing until this lands.
+- **2026-08-27 — The ceiling this must intersect now has a name
+  (`SPARQL-T-0044`).** `query_init` takes `scope`/`graphs`, held on
+  `Query` and threaded to both read sites as `Exec.filter`. When
+  dataset clauses are honoured here: `FROM <g>` merges g into the
+  query's default graph *only if g is in the set* (or the scope is
+  `.All`), `FROM NAMED <h>` admits h to `GRAPH ?g` on the same
+  condition, and neither may widen the set. A clause naming a graph
+  outside the ceiling contributes nothing, not an error.

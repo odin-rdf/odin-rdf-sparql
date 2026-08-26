@@ -304,7 +304,7 @@ match_open :: proc(e: ^Exec, pattern: Match_Pattern) -> record.Scan {
 		read_counts.store_ops += 1
 		read_counts.candidates += record.range_len(r)
 	}
-	return record.range_iter(r, record.Filter{origin = .Any, scope = .All})
+	return record.range_iter(r, e.filter)
 }
 
 // match_open_as is match_open with the permutation named rather than
@@ -329,7 +329,7 @@ match_open_as :: proc(e: ^Exec, pattern: Match_Pattern, order: record.Order) -> 
 		read_counts.store_ops += 1
 		read_counts.candidates += record.range_len(r)
 	}
-	return record.range_iter(r, record.Filter{origin = .Any, scope = .All})
+	return record.range_iter(r, e.filter)
 }
 
 // match_next yields the next matching fact as the engine's own quad.
@@ -405,6 +405,12 @@ Exec :: struct {
 	// what a dataset *is* — epoch-pinned, refcounted, and unaffected by
 	// whatever the writer does next.
 	snapshot:  record.Snapshot,
+	// The one filter every read goes through (SPARQL-T-0044): origin
+	// .Any always, and the application's graph scope — record's own
+	// Graph_Scope and, under .Set, the ids the Query owns. It is what
+	// makes the set a ceiling: record applies it per fact inside
+	// scan_next, below every operator here.
+	filter:    record.Filter,
 	nodes:     [dynamic]Exec_Node,
 	root:      int,
 	// The path from the root to the node currently producing, as
@@ -447,10 +453,12 @@ exec_init :: proc(
 	snapshot: record.Snapshot,
 	exists_plans: []Plan,
 	exists_nodes: []^Exists_Expr,
+	filter: record.Filter,
 	allocator := context.allocator,
 ) {
 	e.allocator = allocator
 	e.snapshot = snapshot
+	e.filter = filter
 	width := var_slots_count(slots)
 	e.width = width
 	e.computed = make([dynamic]rdf.Term, allocator)

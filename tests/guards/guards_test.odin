@@ -364,7 +364,7 @@ grouped_query_peak :: proc(t: ^testing.T, solutions: int) -> int {
 	defer mem.tracking_allocator_destroy(&track)
 
 	q: sparql.Query
-	prepared := sparql.query_init(&q, algebra, snap, "", mem.tracking_allocator(&track))
+	prepared := sparql.query_init(&q, algebra, snap, "", allocator = mem.tracking_allocator(&track))
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 	groups := 0
 	for {
@@ -470,7 +470,7 @@ path_query_peak :: proc(t: ^testing.T, nodes: int, fanout: int) -> int {
 	defer mem.tracking_allocator_destroy(&track)
 
 	q: sparql.Query
-	prepared := sparql.query_init(&q, algebra, snap, "", mem.tracking_allocator(&track))
+	prepared := sparql.query_init(&q, algebra, snap, "", allocator = mem.tracking_allocator(&track))
 	testing.expectf(t, prepared, "the query should be supported: %s", q.unsupported)
 	solutions := 0
 	for {
@@ -606,7 +606,7 @@ test_evaluation_no_leaks :: proc(t: ^testing.T) {
 			algebra, _ := sparql.translate(&p)
 
 			q: sparql.Query
-			if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator) {
+			if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator = allocator) {
 				pulled := 0
 				for {
 					_, more := sparql.query_next(&q)
@@ -704,7 +704,7 @@ test_result_graph_no_leaks :: proc(t: ^testing.T) {
 		algebra, _ := sparql.translate(&p)
 
 		q: sparql.Query
-		if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator) {
+		if sparql.query_init(&q, algebra, snap, sparql.parser_base(&p), allocator = allocator) {
 			graph: sparql.Result_Graph
 			if p.query.form == .Construct {
 				template: sparql.Template
