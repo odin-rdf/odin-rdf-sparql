@@ -203,11 +203,12 @@ evaluate :: proc() {
 ```
 
 `record.posix_file_ops()` is the durable form, and what an application
-uses. **The suites in this repository use `record.Mem_FS` and
+uses. **Linux and macOS only** — odin-rdf-record has no Windows
+`File_Ops` and Windows support was dropped on 2026-09-01
+(`RECORD-A-0011`). **The suites in this repository use `record.Mem_FS` and
 `record.mem_file_ops(&fs)` instead** — the same store with its log in
 memory, so a test needs no directory, no cleanup and no uniqueness, and
-the Windows CI runner works even though `record` has no Windows
-`File_Ops`. `tests/readme` therefore compiles this example with the
+CI leaves nothing behind on either runner. `tests/readme` therefore compiles this example with the
 memory seam substituted for the two `posix_file_ops` lines; nothing else
 about it differs.
 
