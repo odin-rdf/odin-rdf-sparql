@@ -37,7 +37,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # **Windows was dropped on 2026-09-01 (SPARQL-T-0047), a family
+        # decision recorded in RECORD-A-0011.** The leg had been proving that
+        # this engine compiles and passes on a platform its store cannot host
+        # on: odin-rdf-record is POSIX only by design — no Windows `File_Ops`,
+        # Linux the production environment, darwin development — so a Windows
+        # build could open a store over the memory seam and never keep one.
+        # The owner's call is that nobody is going to host an RDF store on
+        # Windows, and a green runner asserting a capability the layer below
+        # deliberately lacks is a cost without a claim behind it.
+        #
+        # What made the choice concrete: the odin-rdf-record v0.7.0 bump this
+        # PR carries turned this leg red. RECORD-T-0034 moved that
+        # repository's proof, scale and tool suites into package `record`, and
+        # Odin's `_test.odin` is a naming convention rather than a build tag —
+        # so those files, and their `posix_file_ops` calls, are part of the
+        # package every consumer compiles. The alternative was a
+        # `#+build linux, darwin` tag on each, keeping a Windows build alive
+        # for nobody.
+        #
+        # odin-rdf-parser keeps its Windows leg: a pure library with no
+        # platform dependency, independently usable, nothing below it.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
