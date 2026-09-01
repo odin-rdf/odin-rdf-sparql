@@ -163,10 +163,30 @@ jobs:
       # `mem_file_ops`, which is platform-free. The README shows
       # `posix_file_ops`, because that is what an application uses; no
       # test does.
+      #
+      # **`v0.7.0` (SPARQL-T-0047, 2026-09-01)** is the first record release
+      # that *removes* names instead of adding them: RECORD-I-0005 and -I-0007
+      # took its exported surface from 195 to 73, marking everything that was
+      # not API `@(private)`, with doc/api-surface.txt stating the 73 and
+      # `make api` failing that build on drift. Nothing here changed, and that
+      # is the result worth having — this engine claims to reach the store
+      # through its published read API alone (SPARQL-I-0003), and 122 names
+      # stopped being exported without one of them being missed.
+      #
+      # Two specifics for a query engine. `snapshot_triple_parts`,
+      # `snapshot_match_as` and `range_len` — the three reads this engine
+      # leans on hardest, for triple terms, the merge join and join_order —
+      # are all in the 73. And `Order`, `Component` and `order_key` survive
+      # too, which matters because SPARQL-T-0029's merge join names an order
+      # explicitly rather than letting the store choose.
+      #
+      # Not a format change: a `v0.6.0` store reads and writes identically,
+      # the W3C survey is byte-identical, and every one of `bench/`'s read
+      # counts and solution counts is unmoved.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.6.0
+          ref: v0.7.0
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2
