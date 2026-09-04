@@ -89,6 +89,16 @@ Met without qualification: evaluation reaches storage through odin-rdf-store's p
 
 The store facts this engine builds on: quads are `[4]Term_ID` with kind-tagged dense IDs (STORE-A-0001), so joins and dedup are integer comparisons and a term's kind (IRI/blank/literal/triple term) is readable from the ID without a dictionary lookup; `match` streams encoded quads with no ordering guarantee in v1, that revision explicitly deferred to this engine's evidence (both backends iterated in identical numeric-ID order, so ordered iteration is nearly free when asked for — and after STORE-A-0006 retired the in-memory backend, kvstore's order stands on its own, falling out of STORE-A-0001's big-endian key rule rather than out of agreement between two implementations, so this conclusion is unaffected); kvstore's read paths are transaction-parametric so the snapshot API arrives as an additive layer, not a refactor. All of these held in practice: joins compare integer IDs throughout, and the snapshot API arrived as an additive layer rather than a refactor the engine had to force — *(amended 2026-08-08, SPARQL-T-0024: it is no longer a proposal. odin-rdf-store shipped it as `STORE-A-0007` / v0.3.0, and this engine consumed it: `query_init` takes a read transaction and `query_destroy` ends it, which is the lifetime a `Query` already had. The prediction that it would be additive was correct — `query_init`'s signature did not change and no caller was touched.)*
 
+*(Amended 2026-09-04: **odin-rdf-record `v0.8.0`** — the record's permutations
+are copy-on-write B+trees of fact ids (`RECORD-A-0012`), so a commit there is
+0.24 ms where it was 37. Nothing in this engine changed: `snapshot_match` is two
+rank descents and 10–30% faster, `range_len` is still the exact O(1) count
+`SPARQL-T-0037` plans with, and `snapshot_match_as`'s ordered output — what the
+merge join of `SPARQL-T-0029` walks — is asserted by a record test over every
+order now. `make test` green, the W3C survey byte-identical, every one of
+`bench/`'s read counts and solution counts unmoved. "one of six permutations"
+above is seven since `v0.6.0`, and each is a tree since `v0.8.0`.)*
+
 ## Future State
 
 A complete, well-tested Odin library where:

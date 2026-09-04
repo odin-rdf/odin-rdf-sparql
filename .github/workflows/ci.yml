@@ -204,10 +204,19 @@ jobs:
       # Not a format change: a `v0.6.0` store reads and writes identically,
       # the W3C survey is byte-identical, and every one of `bench/`'s read
       # counts and solution counts is unmoved.
+      #
+      # `v0.8.0` (2026-09-04, RECORD-I-0009 / RECORD-A-0012): the record's
+      # permutations are copy-on-write B+trees of fact ids, and a commit
+      # costs 0.24 ms where it cost 37. For this engine that is a *read*
+      # change with no source change: `snapshot_match` is two rank descents
+      # and 10–30% faster, `range_len` is still exact, `scan_next` walks a
+      # cursor — and `Range`/`Scan` lost the fields (`main`, `delta`, `ids`)
+      # this engine never named. `make test` green, the survey byte-identical,
+      # every read count and solution count in `bench/` unmoved.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.7.0
+          ref: v0.8.0
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2
