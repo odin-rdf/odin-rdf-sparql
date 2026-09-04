@@ -99,6 +99,14 @@ order now. `make test` green, the W3C survey byte-identical, every one of
 `bench/`'s read counts and solution counts unmoved. "one of six permutations"
 above is seven since `v0.6.0`, and each is a tree since `v0.8.0`.)*
 
+*(Amended 2026-09-04, later: **odin-rdf-record `v0.9.0`** — `snapshot_history`,
+every generation a pattern ever matched over the same window and scan with the
+interval test omitted, `api.md` §12.6 built as written at the application's
+asking (`RECORD-T-0044`). SPARQL has no syntax for "ever" and a query reads one
+snapshot's visible state, the as-of coordinate being `store_at`; nothing here
+changed, `make test` green, the survey byte-identical, every `bench/` count
+unmoved. The pin moves so the floor stated here is the family's current tag.)*
+
 ## Future State
 
 A complete, well-tested Odin library where:
