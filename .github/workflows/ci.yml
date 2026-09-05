@@ -223,10 +223,23 @@ jobs:
       # and has no syntax for "ever", so nothing here changes: no source
       # change, `make test` green, the survey byte-identical, every read
       # count and solution count in `bench/` unmoved.
+      #
+      # `v0.9.1` (2026-09-05, RECORD-T-0047): a test-only release. Three of
+      # the record's own tests located their fixtures relative to the
+      # process's working directory — the Python cross-implementation
+      # verifier and the `record` CLI — so they failed for any consumer
+      # that compiles that package's tests into its own binary
+      # (`odin test <main> -all-packages`, odin-rdf-app's form and not this
+      # repository's). They are anchored to `#directory` now, the same way
+      # `tests/w3c/harness/dataset.odin` here has located the vendored
+      # corpus since it was written — the record's task cites this
+      # repository as one of its three precedents. No source, format or
+      # API change on either side: `make test` green, the survey
+      # byte-identical, every `bench/` count unmoved.
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.9.0
+          ref: v0.9.1
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2

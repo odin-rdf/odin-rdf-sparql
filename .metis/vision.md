@@ -107,6 +107,16 @@ snapshot's visible state, the as-of coordinate being `store_at`; nothing here
 changed, `make test` green, the survey byte-identical, every `bench/` count
 unmoved. The pin moves so the floor stated here is the family's current tag.)*
 
+*(Amended 2026-09-05: **odin-rdf-record `v0.9.1`**, `SPARQL-T-0051` — a
+test-only release. Three of the record's own tests found their fixtures
+relative to the working directory and now find them by their source file
+(`RECORD-T-0047`, filed by odin-rdf-app, whose suite is one
+`-all-packages` binary). Nothing on either side's source, format or API
+moved, and this repository never had the defect — `tests/w3c/harness`
+has anchored its corpus root to `#directory` since it was written, and
+the record's task cites it as a precedent. `make test` green, the survey
+byte-identical, every `bench/` count unmoved.)*
+
 ## Future State
 
 A complete, well-tested Odin library where:
