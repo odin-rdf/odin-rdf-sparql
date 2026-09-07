@@ -220,7 +220,12 @@ gone.
 CONSTRUCT and DESCRIBE answer with a graph rather than a solution
 sequence — compile the template or the clause against the prepared
 query's slot table (`sparql.template_build` / `sparql.describe_build`),
-then call `query_construct` / `query_describe`.
+then call `query_construct` / `query_describe`. §16.4 leaves DESCRIBE's
+*content* to the implementation; this engine answers **every triple the
+query may read whose subject is a described resource** — no blank-node
+closure, no incoming triples, no schema. "May read" is the graph set
+below, so a dataset that keeps every fact in a named graph is described
+from those graphs and the answer is a graph, not a graph per graph.
 
 ## Memory model
 
@@ -251,9 +256,9 @@ The evaluator's half:
   with misses dropped (`record.MATCH_DEFAULT_GRAPH` for the default
   graph; never `0`). Every read the query makes carries them, below
   every operator, so a fact outside the set never reaches a join, a
-  `COUNT`, or a `NOT EXISTS`; `GRAPH <x>` for an x outside the set
-  yields nothing; an empty `.Set` yields no solutions; `.All` is the
-  default and today's behaviour. The slice is copied. Dataset clauses
+  `COUNT`, a `NOT EXISTS` or a `DESCRIBE`; `GRAPH <x>` for an x outside
+  the set yields nothing; an empty `.Set` yields no solutions; `.All` is
+  the default and today's behaviour. The slice is copied. Dataset clauses
   are a different thing — the query's *view* — and when they are
   honoured they will intersect this ceiling, never widen it.
 - **The budget is a ceiling on what the query may cost**, and unlike the

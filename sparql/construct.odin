@@ -467,13 +467,23 @@ blank_label :: proc(buffer: []byte, solution: int, index: int) -> string {
 //
 // **What this engine's DESCRIBE returns**, since §16.4 leaves it to the
 // implementation and says only that the result "describes" the
-// resources: for each described resource, every triple of the query's
-// default graph with that resource as its *subject*. Nothing else — no
+// resources: for each described resource, every triple the query may
+// read with that resource as its *subject*. Nothing else — no
 // blank-node closure, no incoming triples, no schema. It is the smallest
 // answer that is a description, it is a graph rather than a solution
 // sequence, and it is stable, which is what a caller can build on. A
 // resource the data says nothing about contributes nothing rather than
 // failing.
+//
+// "May read" is `query_init`'s `scope` and `graphs` and nothing else
+// (SPARQL-T-0054): under `.All` every graph, default and named alike;
+// under `.Set` the set and no graph outside it. It read the default
+// graph alone until 2026-09-08, which described nothing at all in a
+// dataset that keeps every fact in a named graph — and said nothing
+// about why, since an empty description is also what an unknown
+// resource answers. Merging the graphs is the choice §16.4 leaves open:
+// the answer is a graph, so the graph a triple came from is not in it,
+// and a resource described from several answers each triple once.
 Describe_Targets :: struct {
 	slots:     [dynamic]int,
 	ids:       [dynamic]record.Term_ID,

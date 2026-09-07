@@ -242,13 +242,27 @@ covered by `sparql/forms_test.odin` instead, which is the only place its
 behaviour is stated. (It was `sparql/kvstore/forms_test.odin` until
 SPARQL-T-0032 made the engine one package.)
 
-This engine answers a DESCRIBE with **every triple of the query's default
-graph whose subject is a described resource**. Nothing else: no
-blank-node closure, no incoming triples, no schema. A resource the data
-says nothing about, or one the store has never heard of, contributes
-nothing rather than failing. It is the smallest answer that is a
-description, and it is stable — which is what a caller can build on when
-the specification promises nothing.
+This engine answers a DESCRIBE with **every triple the query may read
+whose subject is a described resource**. Nothing else: no blank-node
+closure, no incoming triples, no schema. A resource the data says nothing
+about, or one the store has never heard of, contributes nothing rather
+than failing. It is the smallest answer that is a description, and it is
+stable — which is what a caller can build on when the specification
+promises nothing.
+
+> **Amendment, 2026-09-08 (SPARQL-T-0054).** It read *the default graph*
+> and no other until here, which is what the paragraph above said. That
+> made the form unusable for a dataset holding every fact in a named
+> graph: every DESCRIBE parsed, planned, ran and answered an empty graph,
+> which is also what an unknown resource answers. What a query may read
+> is `query_init`'s `scope` and `graphs` (`SPARQL-T-0044`), so the graph
+> position of the pattern became a wildcard and the filter every other
+> read already carries decides — `.All` describes from every graph,
+> `.Set` from the set and no graph outside it. **No entry moved**, which
+> the paragraph above is the reason for: the corpus has no DESCRIBE to
+> move. `sparql/forms_test.odin` gained the four cases that tell the two
+> answers apart, and its default-graph cases are unchanged, because for a
+> dataset in the default graph the two answers coincide.
 
 ## The three that are not enabled
 

@@ -25,6 +25,7 @@ import "core:strings"
 import "core:testing"
 
 import rdf "rdf:rdf"
+import record "record:record"
 
 @(private = "file")
 DATA :: `@prefix : <http://example/> .
@@ -285,6 +286,127 @@ test_describe_star :: proc(t: ^testing.T) {
 	)
 }
 
+// --- DESCRIBE and the graph set (SPARQL-T-0054) ---------------------
+//
+// The four cases above put every triple in the default graph, which is
+// the one dataset shape for which DESCRIBE's old answer and its answer
+// now coincide — the reason they are still written exactly as they were.
+// The cases below are the shapes that told them apart.
+//
+// **A dataset that keeps every fact in a named graph described nothing
+// at all.** `exec_describe` named `DEFAULT_GRAPH` in the graph position
+// of its pattern, so a store provisioned one document per graph answered
+// every DESCRIBE with an empty graph — indistinguishable from the honest
+// empty answer `test_describe_an_unknown_resource_is_empty` asserts, and
+// therefore the one wrong conclusion the form made available. The fix is
+// a wildcard there and nothing else: `query_init`'s `scope` and `graphs`
+// reach the read as record's `Filter` already, so the ceiling
+// SPARQL-T-0044 established is what decides, here as at every join.
+
+@(private = "file")
+GA :: "http://example/ga"
+@(private = "file")
+GB :: "http://example/gb"
+
+// Two named graphs, no default graph at all, and one triple asserted in
+// both so that the answer's set-ness is visible.
+@(private = "file")
+NAMED_ONLY := []Form_Doc {
+	{GA, `@prefix : <http://example/> . :x :in "ga" . :x :both "yes" .`},
+	{GB, `@prefix : <http://example/> . :x :in "gb" . :x :both "yes" .`},
+}
+
+// The same two graphs with a default graph beside them, which is what
+// makes "the default graph included" an assertion rather than a wish.
+@(private = "file")
+THREE_GRAPHS := []Form_Doc {
+	{GA, `@prefix : <http://example/> . :x :in "ga" . :x :both "yes" .`},
+	{GB, `@prefix : <http://example/> . :x :in "gb" . :x :both "yes" .`},
+	{"", `@prefix : <http://example/> . :x :in "default" .`},
+}
+
+@(private = "file")
+DESCRIBE_X :: `PREFIX : <http://example/> DESCRIBE :x`
+
+// Unscoped, a DESCRIBE reads every graph. `:both` is asserted twice and
+// answered once: the result is a graph, so the graph a triple came from
+// is not in the answer and `result_graph_add` is what makes it a set.
+@(test)
+test_describe_reads_every_graph_when_unscoped :: proc(t: ^testing.T) {
+	lines, ok := described_in(t, NAMED_ONLY, DESCRIBE_X, .All, nil)
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(
+		t,
+		lines,
+		{
+			`<http://example/x> <http://example/both> "yes"^^xsd:string`,
+			`<http://example/x> <http://example/in> "ga"^^xsd:string`,
+			`<http://example/x> <http://example/in> "gb"^^xsd:string`,
+		},
+	)
+}
+
+// **The ceiling, which is the criterion to be careful about**: a scoped
+// DESCRIBE answers from the set and from no graph outside it. `:gb` and
+// the default graph both hold triples of `:x` and neither contributes
+// one — a describe that read past the set would be a worse defect than
+// the empty answer it replaced.
+@(test)
+test_describe_is_confined_to_the_graph_set :: proc(t: ^testing.T) {
+	lines, ok := described_in(t, THREE_GRAPHS, DESCRIBE_X, .Set, {GA})
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(
+		t,
+		lines,
+		{
+			`<http://example/x> <http://example/both> "yes"^^xsd:string`,
+			`<http://example/x> <http://example/in> "ga"^^xsd:string`,
+		},
+	)
+}
+
+// The default graph is in the set when the set says so, and is not a
+// graph the form reads on its own account any more. `:ga` is outside
+// this set and contributes nothing.
+@(test)
+test_describe_reads_the_default_graph_when_the_set_names_it :: proc(t: ^testing.T) {
+	lines, ok := described_in(t, THREE_GRAPHS, DESCRIBE_X, .Set, {"", GB})
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(
+		t,
+		lines,
+		{
+			`<http://example/x> <http://example/both> "yes"^^xsd:string`,
+			`<http://example/x> <http://example/in> "default"^^xsd:string`,
+			`<http://example/x> <http://example/in> "gb"^^xsd:string`,
+		},
+	)
+}
+
+// An empty set admits nothing, so it describes nothing — the ceiling at
+// its tightest, and the case that fails loudest if the wildcard ever
+// escapes the filter. The clause's IRI still resolves: a term is not a
+// fact, and `describe_build` resolves unscoped for the same reason plan
+// building does.
+@(test)
+test_describe_under_an_empty_set_describes_nothing :: proc(t: ^testing.T) {
+	lines, ok := described_in(t, THREE_GRAPHS, DESCRIBE_X, .Set, nil)
+	defer destroy_lines(&lines)
+	if !ok {
+		return
+	}
+	expect_lines(t, lines, {})
+}
+
 // A SPARQL 1.2 triple term in a template is built per solution out of
 // positions of its own, so a variable inside one is read from the
 // solution exactly as a variable beside one is (SPARQL-T-0018).
@@ -349,6 +471,15 @@ test_construct_drops_a_triple_term_with_an_unbound_component :: proc(t: ^testing
 
 // --- helpers --------------------------------------------------------
 
+// Form_Doc is one document of a fixture and the graph it is loaded into,
+// "" for the default graph. Each document is its own blank-node scope,
+// which is `test_db_load`'s rule and not this file's.
+@(private = "file")
+Form_Doc :: struct {
+	graph:  string,
+	source: string,
+}
+
 @(private = "file")
 constructed :: proc(t: ^testing.T, source, query: string, loc := #caller_location) -> ([dynamic]string, bool) {
 	lines, _, ok := constructed_with_blanks(t, source, query, loc)
@@ -365,20 +496,44 @@ constructed_with_blanks :: proc(
 	blanks: int,
 	ok: bool,
 ) {
-	return run_form(t, source, query, loc)
+	return run_form(t, {{"", source}}, query, .All, nil, loc)
 }
 
 @(private = "file")
 described :: proc(t: ^testing.T, source, query: string, loc := #caller_location) -> ([dynamic]string, bool) {
-	lines, _, ok := run_form(t, source, query, loc)
+	lines, _, ok := run_form(t, {{"", source}}, query, .All, nil, loc)
 	return lines, ok
 }
 
-// run_form evaluates a CONSTRUCT or a DESCRIBE and renders its graph.
+// described_in is `described` over a fixture that names its graphs, under
+// a stated scope. It is the shape SPARQL-T-0054's cases need and the one
+// the default-graph cases above deliberately do not use.
+@(private = "file")
+described_in :: proc(
+	t: ^testing.T,
+	docs: []Form_Doc,
+	query: string,
+	scope: record.Graph_Scope,
+	labels: []string,
+	loc := #caller_location,
+) -> (
+	[dynamic]string,
+	bool,
+) {
+	lines, _, ok := run_form(t, docs, query, scope, labels, loc)
+	return lines, ok
+}
+
+// run_form evaluates a CONSTRUCT or a DESCRIBE and renders its graph,
+// under the graph set the query is given (`.All` and nothing for the
+// cases that predate SPARQL-T-0054, which is `query_init`'s default).
 @(private = "file")
 run_form :: proc(
 	t: ^testing.T,
-	source, query: string,
+	docs: []Form_Doc,
+	query: string,
+	scope: record.Graph_Scope,
+	labels: []string,
 	loc := #caller_location,
 ) -> (
 	lines: [dynamic]string,
@@ -390,12 +545,32 @@ run_form :: proc(
 	if !test_db_open(t, &d, "forms", loc = loc) {
 		return nil, 0, false
 	}
-	if !test_db_load(t, &d, source, nil, loc = loc) {
-		return nil, 0, false
+	for doc in docs {
+		graph: rdf.Graph_Label
+		if doc.graph != "" {
+			graph = rdf.IRI(doc.graph)
+		}
+		if !test_db_load(t, &d, doc.source, graph, loc = loc) {
+			return nil, 0, false
+		}
 	}
 	snap, pinned := test_db_snap(t, &d, loc)
 	if !pinned {
 		return nil, 0, false
+	}
+	// The labels resolved against this snapshot, as SPARQL-T-0044's own
+	// cases do it: "" is the default graph, and a label the store has
+	// never seen is dropped rather than becoming 0, which in a set means
+	// the default graph.
+	ids := make([dynamic]record.Term_ID, context.temp_allocator)
+	for label in labels {
+		if label == "" {
+			append(&ids, record.MATCH_DEFAULT_GRAPH)
+			continue
+		}
+		if id, found := record.snapshot_resolve(snap, rdf.IRI(label)); found {
+			append(&ids, id)
+		}
 	}
 
 	p: Parser
@@ -410,7 +585,7 @@ run_form :: proc(
 	}
 
 	q: Query
-	if !query_init(&q, algebra, snap, parser_base(&p)) {
+	if !query_init(&q, algebra, snap, parser_base(&p), scope, ids[:]) {
 		testing.expectf(t, false, "query not supported: %s", q.unsupported, loc = loc)
 		query_destroy(&q)
 		return nil, 0, false

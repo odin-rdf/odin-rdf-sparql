@@ -1804,7 +1804,7 @@ exec_exists :: proc(
 }
 
 // exec_describe writes the description of each resource into a graph:
-// every triple of the default graph with that resource as its subject
+// every triple the query may read with that resource as its subject
 // (see Describe_Targets for why that, and only that).
 //
 // It is here rather than in construct.odin because it is the one part of
@@ -1823,8 +1823,22 @@ exec_describe :: proc(
 		if is_synthetic(subject) {
 			continue
 		}
-		// A pattern, so the default graph is the pattern-side constant.
-		pattern := Match_Pattern{subject, WILDCARD, WILDCARD, DEFAULT_GRAPH}
+		// **The graph position is a wildcard, not a constant**
+		// (SPARQL-T-0054). What a query may read is `query_init`'s
+		// `scope` and `graphs`, which every read here already carries as
+		// record's `Filter`; naming the default graph in the pattern
+		// reached past that parameter to a constant, so a dataset
+		// holding every fact in a named graph described nothing and said
+		// nothing about why. Wildcard and the filter together are the
+		// whole rule, and they are the same path a join reads through:
+		// `.All` describes from every graph, `.Set` from the set and no
+		// other. The ceiling SPARQL-T-0044 established is honoured here
+		// rather than restated.
+		//
+		// So a triple's graph does not survive into the answer, and a
+		// resource described from several graphs answers each triple
+		// once — the result is a graph, and `result_graph_add` is a set.
+		pattern := Match_Pattern{subject, WILDCARD, WILDCARD, WILDCARD}
 		it := match_open(e, pattern)
 		for {
 			quad, more := match_next(e, &it)
