@@ -9,6 +9,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import "rdf:rdf"
 import "record:record"
@@ -274,4 +275,98 @@ readme_query_over_a_validator_candidate :: proc(t: ^testing.T) {
 	// is written.
 	testing.expect_value(t, j.solutions, 3)
 	testing.expect_value(t, j.calls, 2)
+}
+
+// The README's fourth example: the budget (SPARQL-T-0053). The snippet
+// there is the `query_init` with a `Budget` and the `query_stopped`
+// after the loop; what is asserted here is what a reader cannot check by
+// eye — that a budget nothing reaches leaves the answer whole and
+// reports `.None`, and that one the query does reach truncates the
+// answer and says which bound did it.
+//
+// The bound used for the cut is one operation, because a test must not
+// race the machine it runs on and must not depend on how much work this
+// query happens to be. A budget below the cadence is charged exactly, so
+// `ops = 1` cuts on the first operation, always, on any data.
+BUDGET_QUERY :: `
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?a ?b WHERE { ?a a foaf:Person . ?b a foaf:Person }
+`
+
+@(test)
+readme_a_query_with_a_budget :: proc(t: ^testing.T) {
+	fs: record.Mem_FS
+	defer record.mem_fs_destroy(&fs)
+	db: record.Store
+	_, open_err, _, _ := record.store_open(&db, "budget", record.mem_file_ops(&fs))
+	if !testing.expectf(t, open_err == .None, "cannot open the store: %v", open_err) {
+		return
+	}
+	defer record.store_close(&db)
+	ops, ing_err := ingest.turtle(
+		transmute([]byte)string(DATA),
+		nil,
+		context.allocator,
+		blank_prefix = "budget_",
+		base = "http://example/",
+	)
+	if !testing.expectf(t, ing_err.kind == .None, "data did not parse: %v", ing_err.kind) {
+		return
+	}
+	defer ingest.ops_destroy(ops, context.allocator)
+	if _, _, apply_err := record.apply(&db, {ops = ops});
+	   !testing.expectf(t, apply_err == record.Apply_Error{}, "data did not load: %v", apply_err) {
+		return
+	}
+	snap, snap_err := record.store_latest(&db)
+	if !testing.expectf(t, snap_err == .None, "cannot pin a snapshot: %v", snap_err) {
+		return
+	}
+	defer record.snapshot_release(&snap)
+
+	p: sparql.Parser
+	sparql.parser_init(&p, transmute([]byte)string(BUDGET_QUERY))
+	defer sparql.parser_destroy(&p)
+	if _, parsed := sparql.parse(&p); !testing.expect(t, parsed, "the query should parse") {
+		return
+	}
+	algebra, _ := sparql.translate(&p)
+
+	drain :: proc(
+		algebra: sparql.Algebra,
+		snap: record.Snapshot,
+		base: string,
+		budget: sparql.Budget,
+	) -> (
+		rows: int,
+		stopped: sparql.Budget_Stop,
+	) {
+		q: sparql.Query
+		defer sparql.query_destroy(&q)
+		if !sparql.query_init(&q, algebra, snap, base, budget = budget) {
+			return
+		}
+		for {
+			row, more := sparql.query_next(&q)
+			if !more {
+				break
+			}
+			_ = row
+			rows += 1
+		}
+		return rows, sparql.query_stopped(&q)
+	}
+
+	base := sparql.parser_base(&p)
+	// Two people joined to themselves: four solutions, and a budget
+	// generous enough to be no budget at all.
+	rows, stopped := drain(algebra, snap, base, sparql.Budget{ops = 1_000_000, wall = time.Minute})
+	testing.expect_value(t, rows, 4)
+	testing.expect_value(t, stopped, sparql.Budget_Stop.None)
+
+	// The same query allowed one operation: cut before it has an answer,
+	// and saying so.
+	rows, stopped = drain(algebra, snap, base, sparql.Budget{ops = 1})
+	testing.expect_value(t, stopped, sparql.Budget_Stop.Operations)
+	testing.expectf(t, rows < 4, "the answer is a prefix: %d of 4 rows", rows)
 }

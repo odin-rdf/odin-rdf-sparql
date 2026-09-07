@@ -346,7 +346,17 @@ match_open_as :: proc(e: ^Exec, pattern: Match_Pattern, order: record.Order) -> 
 // close and no error to report — a read on a resident projection cannot
 // fail.
 @(private = "file")
-match_next :: proc(it: ^record.Scan) -> (quad: Encoded_Quad, ok: bool) {
+match_next :: proc(e: ^Exec, it: ^record.Scan) -> (quad: Encoded_Quad, ok: bool) {
+	// **The budget's hot tick** (SPARQL-T-0053). A scan step is where the
+	// join spends its time, and an operator that steps one does not
+	// return to the driver between facts — so a query that answers
+	// nothing for a long time is counted here or nowhere. A stopped
+	// budget reports the scan exhausted, which is a shape every operator
+	// above already handles: a nested loop backtracks a depth per call
+	// and unwinds in as many steps as the pattern has depths.
+	if !budget_tick(&e.budget) {
+		return {}, false
+	}
 	when SPARQL_COUNT_READS {
 		read_counts.next += 1
 		read_counts.store_ops += 1
@@ -441,6 +451,13 @@ Exec :: struct {
 	// — a sub-plan is an ordinary operator tree, just one nothing pulls
 	// from until an expression asks.
 	exists_roots: [dynamic]int,
+	// The ceiling on what running this query may cost (SPARQL-T-0053).
+	// Armed by query_init and ticked at the four places the engine can
+	// spin: `match_next` above, and `table_next`, `stored_next` and
+	// `replay_next` below — every source either reads the store or
+	// answers from memory, and each is counted where it does. Unbudgeted
+	// it is one decrement against `max(int)`; see budget.odin.
+	budget:    Budget_Run,
 	allocator: runtime.Allocator,
 }
 
@@ -761,8 +778,22 @@ exec_next :: proc(
 	row: []record.Term_ID,
 	ok: bool,
 ) {
+	// **The budget is checked on both sides of the walk**
+	// (SPARQL-T-0053). Before, because a cut query stays cut and must
+	// not touch the store again. After, because `run` is re-entrant: a
+	// budget reached inside an EXISTS or a MINUS makes that sub-plan
+	// report "no solution", which the operator above would read as an
+	// ordinary answer and could build a solution from. That solution is
+	// not one this query has established, so it never leaves here.
+	if e.budget.stop != .None {
+		return nil, false
+	}
 	collect_all(e)
-	return run(e, e.root)
+	row, ok = run(e, e.root)
+	if e.budget.stop != .None {
+		return nil, false
+	}
+	return row, ok
 }
 
 // collect_all runs the sub-plans whose solutions must be gathered before
@@ -982,6 +1013,9 @@ source_next :: proc(
 // itself, and the row it was built from is gone.
 @(private = "file")
 replay_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
+	if !budget_tick(&e.budget) {
+		return nil, false
+	}
 	node := &e.nodes[at]
 	if node.row_at >= len(node.rows) {
 		return nil, false
@@ -1009,7 +1043,7 @@ graph_scan_next :: proc(
 	}
 	for {
 		release_set_slots(e, node)
-		quad, more := match_next(&node.iters[0])
+		quad, more := match_next(e, &node.iters[0])
 		if !more {
 			node.iter_open[0] = false
 			return nil, false
@@ -1041,6 +1075,22 @@ graph_scan_next :: proc(
 	}
 }
 
+// **The budget's other tick lives in these three** (SPARQL-T-0053).
+// `match_next` alone would miss a plan that spins without ever touching
+// the store — a join over two materialized sub-plans, a VALUES block
+// crossed with itself, a huge OFFSET over a sorted sequence — because
+// those answer from memory the executor already holds. Every other
+// source reaches the store and is counted there, and the driver walk
+// cannot spin without asking one of them, so between the four sites
+// there is no loop in the engine that runs long without ticking.
+//
+// Putting it here rather than in `source_next` or in the driver loop is
+// what makes the check free on the queries that do not hit it: the
+// hottest path in the package now pays exactly the one tick in
+// `match_next` that it was always going to pay, and a source that reads
+// no store pays the tick it would otherwise have dodged. The driver
+// version of this cost 6–9% of a counting loop, measured.
+//
 // table_next and stored_next share a rule that is easy to miss: a stored
 // row is *merged* into the current solution, not written over it. Where
 // the row and the current bindings disagree the row does not apply at
@@ -1049,6 +1099,9 @@ graph_scan_next :: proc(
 // it.
 @(private = "file")
 table_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
+	if !budget_tick(&e.budget) {
+		return nil, false
+	}
 	node := &e.nodes[at]
 	for node.row_at < len(node.table.rows) {
 		release_set_slots(e, node)
@@ -1092,6 +1145,9 @@ merge_cells :: proc(e: ^Exec, node: ^Exec_Node, cells: []Plan_Table_Cell) -> boo
 
 @(private = "file")
 stored_next :: proc(e: ^Exec, at: int) -> (row: []record.Term_ID, ok: bool) {
+	if !budget_tick(&e.budget) {
+		return nil, false
+	}
 	node := &e.nodes[at]
 	for node.row_at < len(node.rows) {
 		release_set_slots(e, node)
@@ -1771,7 +1827,7 @@ exec_describe :: proc(
 		pattern := Match_Pattern{subject, WILDCARD, WILDCARD, DEFAULT_GRAPH}
 		it := match_open(e, pattern)
 		for {
-			quad, more := match_next(&it)
+			quad, more := match_next(e, &it)
 			if !more {
 				break
 			}
@@ -1906,9 +1962,9 @@ bgp_next :: proc(
 		quad: Encoded_Quad
 		more: bool
 		if merged {
-			quad, more = merge_next(node)
+			quad, more = merge_next(e, node)
 		} else {
-			quad, more = match_next(&node.iters[depth])
+			quad, more = match_next(e, &node.iters[depth])
 		}
 		if !more {
 			node.iter_open[depth] = false
@@ -1964,7 +2020,7 @@ merge_begin :: proc(e: ^Exec, node: ^Exec_Node) {
 		probe_pattern(e, node, 1),
 		node.bgp.merge.right_order,
 	)
-	merge_advance(&node.merge_main)
+	merge_advance(e, &node.merge_main)
 	node.merge_have = false
 }
 
@@ -1980,7 +2036,7 @@ merge_position :: proc(e: ^Exec, node: ^Exec_Node) {
 		// asked for again — which is what makes this a forward walk over
 		// the window rather than a seek into it.
 		for node.merge_main.valid && node.merge_main.quad[merge.right_pos] < want {
-			merge_advance(&node.merge_main)
+			merge_advance(e, &node.merge_main)
 		}
 		node.merge_value = want
 		node.merge_have = true
@@ -1993,7 +2049,7 @@ merge_position :: proc(e: ^Exec, node: ^Exec_Node) {
 // reports the run's end the way an exhausted scan does, so the depth
 // loop above backtracks without knowing which it was talking to.
 @(private = "file")
-merge_next :: proc(node: ^Exec_Node) -> (quad: Encoded_Quad, ok: bool) {
+merge_next :: proc(e: ^Exec, node: ^Exec_Node) -> (quad: Encoded_Quad, ok: bool) {
 	merge := node.bgp.merge
 	if !node.merge_cur.valid || node.merge_cur.quad[merge.right_pos] != node.merge_value {
 		// Spent. The replay cursor is now on the first fact past the run,
@@ -2005,13 +2061,13 @@ merge_next :: proc(node: ^Exec_Node) -> (quad: Encoded_Quad, ok: bool) {
 		return {}, false
 	}
 	quad = node.merge_cur.quad
-	merge_advance(&node.merge_cur)
+	merge_advance(e, &node.merge_cur)
 	return quad, true
 }
 
 @(private = "file")
-merge_advance :: proc(c: ^Merge_Cursor) {
-	c.quad, c.valid = match_next(&c.scan)
+merge_advance :: proc(e: ^Exec, c: ^Merge_Cursor) {
+	c.quad, c.valid = match_next(e, &c.scan)
 }
 
 // --- Property paths -------------------------------------------------
@@ -2053,7 +2109,7 @@ nps_next :: proc(
 
 	for {
 		unbind_depth(e, node, 0)
-		quad, more := match_next(&node.iters[0])
+		quad, more := match_next(e, &node.iters[0])
 		if !more {
 			node.iter_open[0] = false
 			return nil, false
@@ -2253,7 +2309,7 @@ path_collect_nodes :: proc(
 	}
 	it := match_open(e, pattern)
 	for {
-		quad, more := match_next(&it)
+		quad, more := match_next(e, &it)
 		if !more {
 			return
 		}
@@ -2285,7 +2341,7 @@ path_in_nodes :: proc(
 		pattern := Match_Pattern{WILDCARD, WILDCARD, WILDCARD, graph}
 		pattern[position] = id
 		it := match_open(e, pattern)
-		_, found := match_next(&it)
+		_, found := match_next(e, &it)
 		if found {
 			return true
 		}

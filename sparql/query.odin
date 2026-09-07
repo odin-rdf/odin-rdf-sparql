@@ -126,6 +126,21 @@ Query :: struct {
 // Dataset clauses (FROM / FROM NAMED) are unaffected by this parameter —
 // SPARQL-T-0043 is where they are honoured, and when they are, they
 // intersect this ceiling and never widen it.
+//
+// **budget is the ceiling on what running the query may cost**
+// (SPARQL-T-0053): an operation count, a wall clock, or both, checked by
+// the executor rather than by the caller's pull loop — because a query
+// that answers nothing may spend all its time inside one `query_next`
+// and never give a loop checking a deadline a turn. The zero value is no
+// budget and today's behaviour. A query the budget cut stops answering
+// and `query_stopped` says which bound ended it; see budget.odin for the
+// unit, the cadence and why there is no row bound here.
+//
+// **It sits after the allocator on purpose.** `query_init`'s trailing
+// parameters are positional to anyone who counts them, and a consumer
+// already names the allocator against exactly that hazard
+// (SPARQL-T-0044's finding); a new parameter therefore goes on the end
+// rather than in the place house style would put it.
 query_init :: proc(
 	q: ^Query,
 	algebra: Algebra,
@@ -134,6 +149,7 @@ query_init :: proc(
 	scope := record.Graph_Scope.All,
 	graphs: []record.Term_ID = nil,
 	allocator := context.allocator,
+	budget := Budget{},
 ) -> (
 	ok: bool,
 ) {
@@ -175,13 +191,38 @@ query_init :: proc(
 	filter := record.Filter{origin = .Any, scope = scope, graphs = q.graphs}
 	exec_init(&q.exec, plan, &q.slots, snapshot, q.exists_plans, q.exists_nodes, filter, allocator)
 	exec_set_base(&q.exec, base)
+	// Armed last, and after preparation rather than before it: the wall
+	// clock runs from here, and a query that failed to prepare has no
+	// run to bound.
+	budget_begin(&q.exec.budget, budget)
 	return true
 }
 
 // query_next yields the next solution as a row indexed by variable slot.
-// A false result means exhaustion — there is nothing else it can mean.
+//
+// A false result means the query has no more solutions to give. With no
+// budget set that is exhaustion and there is nothing else it can mean;
+// with one it is exhaustion **or** the budget, which `query_stopped`
+// tells apart (SPARQL-T-0053). The arity does not change, so a consumer
+// that sets no budget reads this exactly as it always has.
 query_next :: proc(q: ^Query) -> (row: []record.Term_ID, ok: bool) {
 	return exec_next(&q.exec)
+}
+
+// query_stopped says why the query stopped answering: `.None` when it
+// ran to exhaustion and its solutions are all of them, otherwise the
+// bound that cut it short (SPARQL-T-0053).
+//
+// It is the answer to the one question `query_next` cannot carry: a
+// truncated answer that looks complete is the failure a budget exists to
+// prevent, so read this after the pull loop whenever a budget was set.
+// A cut query stays cut — every later `query_next` answers false without
+// touching the store, and this keeps naming the bound until
+// query_destroy. A CONSTRUCT or DESCRIBE cut mid-run hands back the
+// graph it had built by then, which is a partial answer and says so
+// here.
+query_stopped :: proc(q: ^Query) -> Budget_Stop {
+	return q.exec.budget.stop
 }
 
 // query_destroy releases everything preparing and running the query

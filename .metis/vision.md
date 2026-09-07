@@ -132,6 +132,23 @@ case still 4,122 candidates for 4,122 answers at both sizes. **Released as
 `query_init`, so a consumer pinning that tag cannot state an authorization
 ceiling.)*
 
+*(Amended 2026-09-08, `SPARQL-T-0053`: **a prepared query can be given a
+budget the executor itself checks** — `query_init` takes a `Budget` of an
+operation count, a wall clock, or both, and `query_stopped` says which one
+cut the answer short. It is the second ceiling `query_init` now carries and
+it answers a different question from the first: the graph set bounds what a
+query may *see*, the budget bounds what it may *cost*. The case is one
+`query_next` that returns `false` after 24.3 seconds having produced
+nothing, so a consumer checking a deadline between pulls never gets a turn
+— a row limit works from outside and a wall clock cannot, which is why this
+is the engine's and not the caller's. Additive: `budget` is a defaulted
+parameter after `allocator`, `query_next`'s arity is unchanged, and every
+`bench/` read count is unmoved. Measured on the case that filed it: 23.7 s
+becomes 100.3 ms under a 100 ms wall clock, and the check costs a query
+that never reaches it 3–5% of the engine's raw pull loop. **There is
+deliberately no row bound** — the pull loop is the caller's and a caller
+counting rows enforces one exactly and for free.)*
+
 ## Future State
 
 A complete, well-tested Odin library where:

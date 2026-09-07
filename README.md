@@ -256,6 +256,12 @@ The evaluator's half:
   default and today's behaviour. The slice is copied. Dataset clauses
   are a different thing — the query's *view* — and when they are
   honoured they will intersect this ceiling, never widen it.
+- **The budget is a ceiling on what the query may cost**, and unlike the
+  graph set it is optional. `query_init` takes `budget` last — an
+  operation count, a wall clock, or both — and the executor checks it, so
+  a query that answers nothing for a long time can be stopped from
+  inside. `query_stopped` says whether it was; see *A query can be given
+  a budget* below.
 - A **term** from `query_term` is valid until `query_destroy`. What that
   costs varies by term and you never have to know which: record hands
   back a borrow of its dictionary arena for most kinds, an owned joined
@@ -349,6 +355,64 @@ triple-term join both stream at zero allocations; and grouping and
 property-path traversal are measured to be bounded by their groups and
 by the graph rather than by their input.
 
+### A query can be given a budget
+
+`query_next` runs until the next solution or until the input is
+exhausted. For a query that answers steadily that is what you want, and
+for one that answers *nothing* after a great deal of work it is exactly
+wrong: the whole cost falls inside one call, so a caller enforcing "at
+most N rows or at most T seconds" between pulls never gets a turn. A
+three-way join with a FILTER nothing satisfies is one `query_next`
+returning `false` after 24 seconds on a store where every honest query
+finishes inside 63 ms. A row limit works; a wall clock cannot.
+
+So the ceiling is the executor's, set once at `query_init`. It needs no
+synchronisation and it is not cancellation — this engine is
+single-threaded by construction:
+
+```odin
+q: sparql.Query
+defer sparql.query_destroy(&q)
+sparql.query_init(&q, algebra, snap, sparql.parser_base(&p),
+	budget = sparql.Budget{wall = 5 * time.Second, ops = 500_000_000})
+
+for {
+	row, more := sparql.query_next(&q)
+	if !more {
+		break
+	}
+	_ = row
+}
+if cut := sparql.query_stopped(&q); cut != .None {
+	// .Operations or .Wall_Clock — the answer above is a prefix
+}
+```
+
+- **Two bounds, and no row bound.** `ops` is the engine's own unit of
+  work — one solution asked of a source operator, or one step of a scan
+  inside one — and it is deterministic: the same query over the same
+  snapshot is cut in the same place on any machine under any load.
+  `wall` is a duration measured from `query_init`. There is deliberately
+  no row bound here: the pull loop is the caller's, and a caller counting
+  rows enforces one exactly and for free.
+- **`query_next`'s arity does not change.** A query with no budget
+  behaves exactly as it always has, and `query_stopped` answers `.None`.
+  The verdict is read after the loop rather than per row because a
+  truncated answer that looks complete is the failure the budget exists
+  to prevent.
+- **A cut query stays cut**: later pulls answer `false` without touching
+  the store, and `query_stopped` keeps naming the bound. A `CONSTRUCT` or
+  `DESCRIBE` cut mid-run hands back the graph it had built, which is a
+  partial answer and says so through the same accessor.
+- **The check is one decrement and one predicted branch** per fact the
+  engine takes from the store, on a 4096-operation cadence, so an
+  unbudgeted query never reaches the arithmetic or the clock — `ops` is
+  therefore honoured to within one cadence, which makes it a bound on the
+  pathological case rather than accounting. Measured on the case above:
+  23.7 s becomes 100.3 ms under a 100 ms wall clock, and the check costs
+  a query that never reaches it 3–5% of the engine's raw pull loop
+  (1–3% of a loop that also materializes and serializes each row).
+
 ## Conformance and testing
 
 The W3C SPARQL syntax and evaluation suites are vendored under
@@ -378,9 +442,10 @@ odin test tests/w3c/harness -collection:rdf=../odin-rdf-parser -collection:recor
 odin test tests/readme      -collection:rdf=../odin-rdf-parser -collection:record=../odin-rdf-record
 ```
 
-All three README examples above — the parser quick start, the evaluation
-walk-through, and the query over a validator's candidate — are compiled
-and asserted by `tests/readme`, so they cannot drift from the real API.
+All four README examples above — the parser quick start, the evaluation
+walk-through, the query over a validator's candidate, and the budgeted
+query — are compiled and asserted by `tests/readme`, so they cannot drift
+from the real API.
 
 ## Benchmarks
 
