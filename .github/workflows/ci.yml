@@ -236,10 +236,21 @@ jobs:
       # repository as one of its three precedents. No source, format or
       # API change on either side: `make test` green, the survey
       # byte-identical, every `bench/` count unmoved.
+      #
+      # `v0.10.0` (2026-09-07, RECORD-T-0048/-T-0050/-T-0053): the record's
+      # CLI release. The tool installs as `rdfrecord`, it grew a `stats`
+      # subcommand folded from the log rather than answered from a booted
+      # store, and the §5.5 environment note states the real format version
+      # instead of a literal `1` that had been wrong since `v0.4.0`. **The
+      # library is byte-identical to `v0.9.1`** — `doc/api-surface.txt`
+      # unmoved at 74 exported names, no format change, a `v0.9.1` store
+      # read and written identically. This engine links the library and
+      # never the tool: no source change, `make test` green, the survey
+      # byte-identical, every `bench/` count unmoved (SPARQL-T-0052).
       - uses: actions/checkout@v5
         with:
           repository: odin-rdf/odin-rdf-record
-          ref: v0.9.1
+          ref: v0.10.0
           path: odin-rdf-record
 
       - uses: laytan/setup-odin@v2

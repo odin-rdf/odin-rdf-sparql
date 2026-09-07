@@ -63,7 +63,7 @@ The library is deliberately engine-only: protocol/HTTP layers, federation (SERVI
 > 3. **One larger initiative, not several small ones.** The planner surface — `SPARQL-T-0028` (cardinality-ordered joins) and `SPARQL-T-0029` (ordered iteration) — is folded into this initiative rather than deferred to a follow-on. Both were filed against odin-rdf-store procedures that will not exist after this port, and record answers both better than the store did. There are no production installations to consider.
 > 4. **A `bench/` is built inside the port.** This repository has none today, so the one known performance regression is unmeasurable and any claim about the port's cost would be speculation.
 >
-> ~~**Unreleased.** The tag is still `v0.1.0`, which is the store-era engine; whether this warrants one is the owner's call.~~ *(Answered 2026-08-25: **`v0.2.0` is tagged and released**, the record-era engine's first. It was deliberately not cut when the port completed — the engine was still moving, and `SPARQL-T-0042`, `sparql10-i18n` and `SPARQL-T-0029`'s merge join all landed after it — so the tag names a resting point rather than the port's last commit. `v0.1.0` stays the store-era engine, the same two-tag split odin-rdf-shacl carries.)*
+> ~~**Unreleased.** The tag is still `v0.1.0`, which is the store-era engine; whether this warrants one is the owner's call.~~ *(Answered 2026-08-25: **`v0.2.0` is tagged and released**, the record-era engine's first. It was deliberately not cut when the port completed — the engine was still moving, and `SPARQL-T-0042`, `sparql10-i18n` and `SPARQL-T-0029`'s merge join all landed after it — so the tag names a resting point rather than the port's last commit. `v0.1.0` stays the store-era engine, the same two-tag split odin-rdf-shacl carries.)* *(Amended 2026-09-07: **`v0.3.0` is the release.** `v0.2.0` predates `SPARQL-T-0044` — `query_init` taking the application's graph set as an authorization ceiling the query text cannot widen — and five record adoptions, `v0.5.0` through `v0.10.0`. A consumer pinning `v0.2.0` gets an engine that cannot be given a graph set. The three-tag chain is the same one odin-rdf-shacl carries, and for the same reason each time.)*
 
 **The engine is built; three of five success criteria are met outright, one partially, and one is an open decision (2026-08-06).** Both initiatives are complete: SPARQL-I-0001 delivered the parser and §18.2/§18.4 algebra translation, SPARQL-I-0002 the evaluation engine. 352 syntax tests pass (154 SPARQL 1.1, 198 SPARQL 1.2). Across the vendored evaluation corpus of 556 entries, **542 pass (97.5%)**, every one run against *both* storage backends at *both* `Term_ID` widths. CI runs on Linux, macOS, and Windows. *(Amended 2026-09-01: Linux and macOS; Windows dropped, `RECORD-A-0011`.)* Tagged **v0.1.0**. *(Amended 2026-08-25: "both storage backends" was already retracted below on 2026-08-08; **"both `Term_ID` widths" is now retracted too** — SPARQL-T-0031 deleted the width matrix with the store, record's widths being fixed by design. And `v0.1.0` is the store-era engine, still the only tag.)*
 
@@ -116,6 +116,21 @@ moved, and this repository never had the defect — `tests/w3c/harness`
 has anchored its corpus root to `#directory` since it was written, and
 the record's task cites it as a precedent. `make test` green, the survey
 byte-identical, every `bench/` count unmoved.)*
+
+*(Amended 2026-09-07: **odin-rdf-record `v0.10.0`**, `SPARQL-T-0052` — the
+record's CLI release. The tool installs as `rdfrecord`, it grew a `stats`
+subcommand folded from the log rather than answered from a booted store
+(`store_open` recovers, resumes the writer and rewrites `HEAD`, and an
+auditor's tool must not mutate the thing it is auditing), and the §5.5
+environment note states the real format version instead of a literal `1`
+that had been wrong since `v0.4.0`. **The library is byte-identical to
+`v0.9.1`** — 74 exported names unmoved, no format change — and this engine
+links the library and never the tool: no source change, the survey
+byte-identical, every `bench/` read and solution count unmoved, the `graph`
+case still 4,122 candidates for 4,122 answers at both sizes. **Released as
+`v0.3.0`** the same day: `v0.2.0` predates `SPARQL-T-0044`'s graph set on
+`query_init`, so a consumer pinning that tag cannot state an authorization
+ceiling.)*
 
 ## Future State
 
