@@ -133,25 +133,22 @@ budget_run :: proc(
 		rows += 1
 	}
 	stop = query_stopped(&q)
-	// **A cut query stays cut**, asserted on every cut run rather than in
-	// one case, because every case would otherwise have to trust it: the
-	// loop above has already met the stop, so this pull is the one past
-	// the end.
+	// **A query that has stopped stays stopped**, asserted on every run
+	// rather than in one case, because every case would otherwise have to
+	// trust it: the loop above has already met the end, so this pull is
+	// the one past it.
 	//
-	// It is asserted only of a *cut* query, and finding out why was this
-	// task's one surprise. **Pulling an exhausted query again re-enters
-	// its plan and yields solutions it has already given**, on any query
-	// and without a budget in sight — `bgp_next` resumes from
-	// `node.started` by re-opening its deepest scan, and a run that has
-	// walked back to depth −1 has nothing to say it is over. It is
-	// SPARQL-T-0055 and predates this by a long way; what the budget adds
-	// is the one query state that does *not* behave that way, since
-	// `exec_next` refuses before the walk.
-	if stop != .None {
-		_, again := query_next(&q)
-		testing.expect(t, !again, "a query the budget cut yields nothing more", loc = loc)
-		testing.expect_value(t, query_stopped(&q), stop, loc = loc)
-	}
+	// It was asserted only of a *cut* query when this file was written,
+	// and finding out why was that task's one surprise: pulling an
+	// exhausted query again re-entered its plan and yielded solutions it
+	// had already given, on any query and without a budget in sight. That
+	// is SPARQL-T-0055, fixed since — the exhausted state is on the node
+	// now, beside `started` — so the two halves are one assertion again
+	// and `query_stopped` goes on being the whole difference between
+	// them.
+	_, again := query_next(&q)
+	testing.expect(t, !again, "a query that has stopped yields nothing more", loc = loc)
+	testing.expect_value(t, query_stopped(&q), stop, loc = loc)
 	return rows, stop, true
 }
 

@@ -140,6 +140,24 @@ Exec_Node :: struct {
 	depth:       int,
 	started:     bool,
 
+	// **Every kind, not just a basic graph pattern**, and the one field
+	// here that says a run is over rather than what it is doing: this
+	// node has produced its last solution and must not be entered again
+	// (SPARQL-T-0055). `started` alone gives a source two states where
+	// the walk needs three -- fresh, running, finished -- and without the
+	// third a BGP that has backtracked to depth -1 reads as "running" on
+	// the next call and re-opens its deepest iterator against whatever
+	// the working row still holds, answering a solution it has already
+	// given.
+	//
+	// It is set by `run` where a walk genuinely ends and cleared by
+	// `node_reset`, which is the whole distinction between the two
+	// re-entries: a correlated re-run resets its right side before it
+	// re-runs it, and a caller pulling an exhausted query cannot. So the
+	// driver goes on restarting a finished sub-plan and the caller no
+	// longer can, without either being spelled out a second time.
+	exhausted:   bool,
+
 	// BGP merge join (Plan_Merge, SPARQL-T-0029). Three cursors over one
 	// scan of depth 1's window: `merge_main` is the monotone one and
 	// never goes backwards, `merge_group` remembers where the current
@@ -772,6 +790,14 @@ bind_bound_slots :: proc(e: ^Exec, node: ^Exec_Node, depth: int, width: int) {
 // exhausted. The returned row is indexed by variable slot, holds
 // UNBOUND where a variable is unbound, and is valid only until the
 // next call — a consumer that keeps a solution copies it.
+//
+// **ok=false is final**, and that is the plan's doing rather than this
+// procedure's (SPARQL-T-0055): the operator that finished carries the
+// state, so a caller that pulls again is refused by the root of its own
+// plan whatever that plan is. The budget check below is the same
+// refusal one level up and is not the same check — a run cut *after* it
+// produced a row leaves the root unfinished, and a second call must not
+// reach collect_all and the store.
 exec_next :: proc(
 	e: ^Exec,
 ) -> (
@@ -864,9 +890,27 @@ run :: proc(
 
 	for {
 		if pulling {
+			// **A node that has finished stays finished**
+			// (SPARQL-T-0055). This is the one place the third state is
+			// read, and it stands ahead of `start_child` so that a
+			// finished node is neither descended into nor asked to
+			// produce -- an exhausted BGP would otherwise re-open its
+			// deepest scan and a `Slice` at its LIMIT would re-enter its
+			// input. At the root it is what makes an exhausted *query*
+			// stay exhausted, which is the caller-visible half.
+			if e.nodes[at].exhausted {
+				row, ok = nil, false
+				pulling = false
+				continue
+			}
 			child := start_child(e, at)
 			if child < 0 {
 				row, ok = source_next(e, at)
+				// A source has one kind of `false` and it is the terminal
+				// one: it produces or it is spent.
+				if !ok {
+					e.nodes[at].exhausted = true
+				}
 				pulling = false
 				continue
 			}
@@ -886,6 +930,16 @@ run :: proc(
 			at = want
 			pulling = true
 			continue
+		}
+		// **`false` from an operator is not exhaustion; `false` with no
+		// next child is.** `want >= 0` above is a continuation -- "I have
+		// nothing yet, pull that one" -- and a correlated join hands
+		// control to its right side exactly that way, so marking every
+		// `false` would retire a join the first time it started its
+		// right side and lose rows rather than repeat them. Only the
+		// branch below is an operator saying it is done.
+		if !next_ok {
+			e.nodes[parent].exhausted = true
 		}
 		at = parent
 		row, ok = next_row, next_ok
@@ -1889,6 +1943,7 @@ node_reset :: proc(e: ^Exec, at: int) {
 		release_set_slots(e, node)
 		blocking_reset(e, i)
 		node.started = false
+		node.exhausted = false
 		node.produced_unit = false
 		node.depth = 0
 		node.phase = .Need_Left
@@ -1918,6 +1973,16 @@ node_reset :: proc(e: ^Exec, at: int) {
 // The state that survives between calls is the per-depth iterators and
 // the bindings they produced, so resuming means asking the deepest
 // iterator for its next quad — not restarting the search.
+//
+// **`started` is two of the three states this needs**, and the third is
+// `node.exhausted`, kept by the driver rather than here (SPARQL-T-0055).
+// `!started` is fresh and `started` is running; a walk that has
+// backtracked to depth -1 is *finished*, and if that is not recorded the
+// next call takes the `else` branch below, sets `depth = last`, finds
+// the deepest iterator closed and re-opens it against whatever the
+// working row still holds. `run` sets the third state where this
+// procedure's `false` reaches it and `node_reset` clears it, which is
+// why nothing about it appears here.
 @(private = "file")
 bgp_next :: proc(
 	e: ^Exec,
@@ -2023,10 +2088,10 @@ bgp_next :: proc(
 //
 // **This is why node_reset says nothing about the merge.** A run begins
 // only from `!started`, and node_reset's whole effect on a BGP is to
-// clear that flag, so every re-run — including a correlated one under a
-// different outer binding — arrives here and re-opens against the
-// bindings of that moment. There is no per-run merge state that outlives
-// this procedure.
+// clear that flag and the `exhausted` one beside it, so every re-run —
+// including a correlated one under a different outer binding — arrives
+// here and re-opens against the bindings of that moment. There is no
+// per-run merge state that outlives this procedure.
 @(private = "file")
 merge_begin :: proc(e: ^Exec, node: ^Exec_Node) {
 	node.merge_main.scan = match_open_as(

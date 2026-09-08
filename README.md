@@ -217,6 +217,18 @@ There is **no error to check after a run**. A read on record cannot fail
 kind there is, and the `query_error` this engine had against LMDB is
 gone.
 
+**An exhausted query stays exhausted.** Once `query_next` has answered
+`false` it answers `false` for ever, whatever the plan: the loop above
+is the shape to write, and a consumer that pulls one more time to
+confirm the end is handed the end again rather than a solution it has
+already been given. That is a property of the query rather than of the
+caller's discipline (`SPARQL-T-0055`) — the state sits on the operator
+that finished, so it holds for a basic graph pattern, a path, a `VALUES`
+block, a materialized subquery and a blocking operator alike, and it is
+what a correlated join clears when it re-runs its right side for the
+next left solution. `query_stopped` still separates exhaustion from
+truncation; see *A query can be given a budget* below.
+
 CONSTRUCT and DESCRIBE answer with a graph rather than a solution
 sequence — compile the template or the clause against the prepared
 query's slot table (`sparql.template_build` / `sparql.describe_build`),
